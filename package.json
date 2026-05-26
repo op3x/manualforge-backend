@@ -1,7 +1,7 @@
 {
-  "name": "manualforge-backend",
+  "name": "matrix-manual-backend",
   "version": "1.0.0",
-  "description": "Node/Express backend for ManualForge",
+  "description": "Node/Express backend for Matrix Manual - AI-powered PLC manual generator",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
