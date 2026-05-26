@@ -1,7 +1,7 @@
 {
-    "name": "matrix-manual-backend",
+    "name": "manualos-backend",
     "version": "1.0.0",
-    "description": "Node/Express backend for Matrix Manual - AI-powered PLC manual generator",
+    "description": "Node/Express backend for ManualOS - AI-powered PLC manual generator",
     "main": "server.js",
     "scripts": {
           "start": "node server.js",
