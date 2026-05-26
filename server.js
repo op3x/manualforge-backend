@@ -15,7 +15,7 @@ app.use(express.json());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'manualforge-backend' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', service: 'matrix-manual-backend' }));
 
 // Create Stripe Checkout Session
 app.post('/create-checkout-session', async (req, res) => {
@@ -94,16 +94,16 @@ app.post('/webhook', async (req, res) => {
 
   switch (event.type) {
     case 'checkout.session.completed':
-      console.log('Payment completed:', event.data.object.customer_email);
+      console.log('Matrix Manual - Payment completed:', event.data.object.customer_email);
       break;
     case 'customer.subscription.created':
-      console.log('Subscription created:', event.data.object.id);
+      console.log('Matrix Manual - Subscription created:', event.data.object.id);
       break;
     case 'customer.subscription.deleted':
-      console.log('Subscription cancelled:', event.data.object.id);
+      console.log('Matrix Manual - Subscription cancelled:', event.data.object.id);
       break;
     case 'invoice.payment_failed':
-      console.log('Payment failed:', event.data.object.customer_email);
+      console.log('Matrix Manual - Payment failed:', event.data.object.customer_email);
       break;
     default:
       console.log('Unhandled event:', event.type);
@@ -112,4 +112,4 @@ app.post('/webhook', async (req, res) => {
   res.json({ received: true });
 });
 
-app.listen(PORT, () => console.log('ManualForge backend running on port ' + PORT));
+app.listen(PORT, () => console.log('Matrix Manual backend running on port ' + PORT));
