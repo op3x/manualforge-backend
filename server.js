@@ -194,9 +194,25 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
                         plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes. Entries: ' + zipEntries.map(e=>e.entryName).join(', ');
                     }
                 } catch (zipErr) {
-                    console.error('ZIP error:', zipErr);
-                    plcContent = '[File: ' + req.file.originalname + '] - Extract error: ' + zipErr.message;
-                }
+                    // ACD files may use a format adm-zip can't read. Try scanning buffer for raw XML.
+                    console.error('ZIP error:', zipErr.message);
+                    try {
+                      const bufStr = req.file.buffer.toString('latin1');
+                      const xmlStart = bufStr.indexOf('<RSLogix5000Content');
+                      const xmlStart2 = bufStr.indexOf('<?xml');
+                      const start = xmlStart >= 0 ? xmlStart : (xmlStart2 >= 0 ? xmlStart2 : -1);
+                      if (start >= 0) {
+                        const xmlEnd = bufStr.lastIndexOf('</RSLogix5000Content>');
+                        plcContent = xmlEnd >= 0 ? bufStr.substring(start, xmlEnd + 21) : bufStr.substring(start, start + 200000);
+                        if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated]';
+                        console.log('Extracted XML from raw buffer, length:', plcContent.length);
+                      } else {
+                        plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes.';
+                      }
+                    } catch(e2) {
+                      plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes.';
+                    }
+                  }
             } else {
                 plcContent = req.file.buffer.toString('utf8');
             }
