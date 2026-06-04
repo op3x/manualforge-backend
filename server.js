@@ -436,6 +436,42 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
   }
 });
 
+
+app.post('/text-test', upload.single('file'), async (req, res) => {
+  try {
+    let plcContent = '';
+    const filename = req.file ? req.file.originalname : 'unknown';
+    if (req.file) {
+      const ext = req.file.originalname.split('.').pop().toLowerCase();
+      const buf = req.file.buffer;
+      if (ext === 'l5x' || ext === 'xml') { plcContent = buf.toString('utf8'); }
+      else if (ext === 'acd') {
+        const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
+        if (xmlFromGzip && xmlFromGzip.includes('<')) { plcContent = xmlFromGzip; }
+        else {
+          const binaryNames = extractRoutineNamesFromAcdBinary(buf);
+          const ctrlM = xmlFromGzip.match(/Name=\"([^\"]+)\"/);
+          const ctrlName = ctrlM ? ctrlM[1] : filename.replace(/\.ACD$/i, '');
+          plcContent = '<RSLogix5000Content>\n<Controller Name=\"' + ctrlName + '\">\n';
+          plcContent += '<Programs><Program Name=\"MainProgram\"><Routines>\n';
+          for (const name of binaryNames.slice(0, 30)) plcContent += '<Routine Name=\"' + name + '\" Type=\"Ladder\"/>\n';
+          plcContent += '</Routines></Program></Programs></Controller></RSLogix5000Content>\n';
+        }
+      } else { plcContent = buf.toString('utf8'); }
+    }
+    const plcInfo = extractPlcInfo(plcContent);
+    const routineBlocks = extractRoutineBlocks(plcContent);
+    const summaries = plcInfo.routines.slice(0, 5).map(r => summarizeRoutineTemplate(r.name, r.type, routineBlocks[r.name] || ''));
+    res.json({
+      routineCount: plcInfo.routines.length,
+      blockCount: Object.keys(routineBlocks).length,
+      routines: plcInfo.routines.slice(0,10),
+      firstSummary: summaries[0] || 'none',
+      contentSample: plcContent.substring(0, 300),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
