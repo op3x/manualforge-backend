@@ -4,6 +4,9 @@ const cors = require('cors');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const Anthropic = require('@anthropic-ai/sdk');
 const PDFDocument = require('pdfkit');
+const multer = require('multer');
+const AdmZip = require('adm-zip');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -177,11 +180,46 @@ function generatePDF(manualText, brand, codeRefPercentage) {
 }
 
 // Generate manual via Claude - returns PDF
-app.post('/generate-manual', async (req, res) => {
-    try {
-          const { plcContent, brand, sections } = req.body;
-          if (!plcContent) return res.status(400).json({ error: 'plcContent is required' });
+app.post('/generate-manual', upload.single('file'), async (req, res) => {
+        try {
+                    let plcContent = '';
+                    const brand = (req.body && req.body.brand) || '';
+                    const sections = (req.body && req.body.sections) ? JSON.parse(req.body.sections) : [];
 
+                    if (req.file) {
+                                    // Handle binary file upload (ACD, L5X, ZIP, etc.)
+                                    const fileExt = req.file.originalname.split('.').pop().toLowerCase();
+                                    if (fileExt === 'acd' || fileExt === 'zip' || fileExt === 'zap15') {
+                                                        // ACD files are ZIP archives - extract XML content
+                                                        try {
+                                                                                const zip = new AdmZip(req.file.buffer);
+                                                                                const zipEntries = zip.getEntries();
+                                                                                const xmlEntries = zipEntries.filter(e => e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
+                                                                                if (xmlEntries.length > 0) {
+                                                                                                            // Use the largest XML file (likely the main program)
+                                                                                                            xmlEntries.sort((a, b) => b.header.size - a.header.size);
+                                                                                                            plcContent = zip.readAsText(xmlEntries[0]);
+                                                                                                            // Truncate if too large for Claude
+                                                                                                            if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated for processing]';
+                                                                                    } else {
+                                                                                                            // No XML found, use raw text representation
+                                                                                                            plcContent = `[ACD Binary File: ${req.file.originalname} - ${req.file.size} bytes. No XML content found in archive.]`;
+                                                                                    }
+                                                        } catch (zipErr) {
+                                                                                console.error('ZIP extraction error:', zipErr);
+                                                                                plcContent = `[File: ${req.file.originalname} - Could not extract content: ${zipErr.message}]`;
+                                                        }
+                                    } else {
+                                                        // Text-based file (L5X, XML, etc.) - read as UTF-8
+                                                        plcContent = req.file.buffer.toString('utf8');
+                                                        if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated for processing]';
+                                    }
+                    } else if (req.body && req.body.plcContent) {
+                                    // Fallback: JSON body with plcContent
+                                    plcContent = req.body.plcContent;
+                    }
+
+                    if (!plcContent) return res.status(400).json({ error: 'No file or plcContent provided' });
       const prompt = `You are an expert industrial automation engineer. Generate a comprehensive operator manual for the following PLC program.
 
       Brand/Manufacturer: ${brand || 'Unknown'}
