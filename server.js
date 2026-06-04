@@ -323,7 +323,7 @@ function assembleManual(plcInfo, routineSummaries, brand, filename) {
   t += '##SECTION## 5. ROUTINE DESCRIPTIONS\n';
   t += 'Each routine has been read separately. Rung-by-rung functions are documented below.\n\n';
   if (routineSummaries.length === 0) {
-    t += 'No routine content could be extracted. For .ACD files, export to L5X from Studio 5000 (File > Save As > L5X).\n\n';
+    t += 'NOTE: This .ACD file stores ladder logic in Rockwellproprietary binary format. Routine rung content cannot be extracted automatically.\n\nTo get full routine summaries, export from Studio 5000:\n>Open this project in Studio 5000 / RSLogix 5000\n>Go to File > Save As\n>Choose L5X Export as the file format\n>Upload the .L5X file to ManualOS\n\nThe L5X format contains complete routine names, rung logic, and tag references.\n';
   } else {
     for (const s of routineSummaries) t += s + '\n\n';
   }
@@ -373,20 +373,19 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
         const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
         if (xmlFromGzip && xmlFromGzip.includes('<')) {
           plcContent = xmlFromGzip;
-          console.log('ACD: got XML from GZIP, length:', plcContent.length);
-        } else {
-          // Build pseudo-XML with binary-extracted names
-          const binaryNames = extractRoutineNamesFromAcdBinary(buf);
-          const ctrlM = xmlFromGzip.match(/Name="([^"]+)"/);
-          const ctrlName = ctrlM ? ctrlM[1] : filename.replace(/\.ACD$/i, '');
-          plcContent = '<RSLogix5000Content>\n<Controller Name="' + ctrlName + '">\n';
-          plcContent += '<Programs><Program Name="MainProgram"><Routines>\n';
-          for (const name of binaryNames.slice(0, 30)) {
-            plcContent += '<Routine Name="' + name + '" Type="Ladder"/>\n';
+          // If no Routine tags were found in GZIP, note that in the content
+          if (!xmlFromGzip.includes('<Routine') && !xmlFromGzip.includes('Routine Name=')) {
+            plcContent += '\n<!-- ACD_NOTE: This .ACD file stores ladder logic in a proprietary binary format. Routine names and rung content cannot be extracted without Rockwell Studio 5000. To generate a full report with routine details, export the file as L5X: File > Save As > L5X Export in Studio 5000. -->';
+            console.log('ACD: no Routine XML in GZIP blocks — noting binary format limitation');
           }
-          plcContent += '</Routines></Program></Programs></Controller></RSLogix5000Content>\n';
-          plcContent += '<!-- ACD_BINARY: Ladder content not readable. Names inferred from binary. Export L5X for details. -->';
-          console.log('ACD: built pseudo-XML from binary, routines:', binaryNames.length);
+          console.log('ACD: content length:', plcContent.length);
+        } else {
+          // Extract what we can from the controller name in the file header
+          const ctrlName = filename.replace(/\.ACD$/i, '');
+          plcContent = '<RSLogix5000Content>\n<Controller Name=\"' + ctrlName + '\">\n';
+          plcContent += '</Controller>\n</RSLogix5000Content>\n';
+          plcContent += '<!-- ACD_NOTE: This .ACD file stores ladder logic in a proprietary binary format. No XML content could be extracted. For full routine details, export as L5X from Studio 5000. -->';
+          console.log('ACD: no GZIP XML at all, minimal placeholder');
         }
       } else if (ext === 'zip' || ext === 'zap15') {
         try {
