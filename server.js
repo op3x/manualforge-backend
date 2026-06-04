@@ -555,6 +555,101 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
   }
 });
 
+
+// Diagnostic endpoint: returns JSON of what the server extracts from the uploaded file
+app.post('/parse-test', upload.single('file'), async (req, res) => {
+  try {
+    let plcContent = '';
+    const filename = req.file ? req.file.originalname : 'unknown';
+    const fileSize = req.file ? req.file.size : 0;
+    let extractMethod = 'none';
+
+    if (req.file) {
+      const fileExt = req.file.originalname.split('.').pop().toLowerCase();
+      if (fileExt === 'acd' || fileExt === 'zip' || fileExt === 'zap15') {
+        try {
+          const zip = new AdmZip(req.file.buffer);
+          const zipEntries = zip.getEntries();
+          const allEntries = zipEntries.map(e => ({ name: e.entryName, size: e.header.size }));
+          const xmlEntries = zipEntries.filter(e =>
+            e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
+          if (xmlEntries.length > 0) {
+            xmlEntries.sort((a, b) => b.header.size - a.header.size);
+            plcContent = zip.readAsText(xmlEntries[0]);
+            extractMethod = 'zip-xml:' + xmlEntries[0].entryName;
+          } else {
+            extractMethod = 'zip-no-xml-entries';
+          }
+          if (!plcContent) {
+            return res.json({ filename, fileSize, extractMethod, zipEntries: allEntries, error: 'No XML found in zip' });
+          }
+        } catch (zipErr) {
+          // Try raw buffer scan
+          try {
+            const bufStr = req.file.buffer.toString('latin1');
+            const xmlStart = bufStr.indexOf('<RSLogix5000Content');
+            const xmlStart2 = bufStr.indexOf('<?xml');
+            const start = xmlStart >= 0 ? xmlStart : (xmlStart2 >= 0 ? xmlStart2 : -1);
+            if (start >= 0) {
+              const xmlEnd = bufStr.lastIndexOf('</RSLogix5000Content>');
+              plcContent = xmlEnd >= 0 ? bufStr.substring(start, xmlEnd + 21) : bufStr.substring(start, start + 100000);
+              extractMethod = 'raw-buffer-scan';
+            } else {
+              return res.json({ filename, fileSize, extractMethod: 'failed', zipError: zipErr.message, bufferStart: req.file.buffer.toString('latin1').substring(0, 200) });
+            }
+          } catch (e2) {
+            return res.json({ filename, fileSize, error: e2.message });
+          }
+        }
+      } else {
+        plcContent = req.file.buffer.toString('utf8');
+        extractMethod = 'utf8:' + fileExt;
+      }
+    }
+
+    const contentLength = plcContent.length;
+    const contentSample = plcContent.substring(0, 500);
+
+    // Run extractors
+    const plcInfo = extractPlcInfo(plcContent);
+    const routineBlocks = extractRoutineBlocks(plcContent);
+
+    // Sample first routine block
+    const blockNames = Object.keys(routineBlocks);
+    const firstBlockSample = blockNames.length > 0
+      ? routineBlocks[blockNames[0]].substring(0, 400)
+      : 'NO BLOCKS FOUND';
+
+    // Check rung extraction on first block
+    let rungSample = 'N/A';
+    if (blockNames.length > 0) {
+      const firstBlock = routineBlocks[blockNames[0]];
+      const rungMatches = firstBlock.match(/<Rung[^>]*>/gi);
+      rungSample = rungMatches ? rungMatches.length + ' rungs found' : 'NO RUNGS found in block';
+    }
+
+    res.json({
+      filename, fileSize, extractMethod, contentLength,
+      contentSample,
+      plcInfo: {
+        controller: plcInfo.controller,
+        programs: plcInfo.programs,
+        tasks: plcInfo.tasks,
+        routineCount: plcInfo.routines.length,
+        routines: plcInfo.routines.slice(0, 10),
+        tagCount: plcInfo.tags.length,
+        moduleCount: plcInfo.modules.length,
+      },
+      routineBlocksFound: blockNames.length,
+      routineBlockNames: blockNames.slice(0, 10),
+      firstBlockSample,
+      rungSample,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 app.post('/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
