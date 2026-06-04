@@ -57,46 +57,66 @@ app.get('/verify-session', async (req, res) => {
 // Each compressed section contains UTF-16LE encoded XML.
 // This function finds, decompresses, and decodes all GZIP blocks.
 // ============================================================
-function extractXmlFromAcdBuffer(buffer) {
-  const bytes = buffer;
+function gunzipBufferAsync(buf) {
+  return new Promise((resolve) => {
+    zlib.gunzip(buf, (err, result) => {
+      if (err || !result) resolve(null);
+      else resolve(result);
+    });
+  });
+}
+
+// Extract embedded GZIP+UTF16 XML blocks from ACD binary file
+// Also extract routine names from the binary object index
+async function extractXmlFromAcdBuffer(buffer) {
   const allXml = [];
   let i = 0;
-
-  while (i < bytes.length - 2) {
-    // Look for GZIP magic bytes: 0x1F 0x8B
-    if (bytes[i] === 0x1F && bytes[i + 1] === 0x8B) {
-      const slice = bytes.slice(i);
-      try {
-        // Decompress synchronously
-        const decompressed = zlib.gunzipSync(slice);
-        // Try UTF-16LE decode first (RSLogix uses UTF-16)
-        let text = '';
-        if (decompressed.length > 2 && decompressed[0] !== 0x3C) {
-          // UTF-16LE: check for BOM or wide chars
-          text = decompressed.toString('utf16le');
-        }
-        if (!text.includes('<') || text.length < 10) {
-          text = decompressed.toString('utf8');
-        }
+  while (i < buffer.length - 2) {
+    if (buffer[i] === 0x1F && buffer[i + 1] === 0x8B) {
+      // Try decompressing from this offset to end of buffer
+      const slice = buffer.slice(i);
+      const result = await gunzipBufferAsync(slice);
+      if (result && result.length > 20) {
+        // Try UTF-16LE decode
+        let text = result.toString('utf16le');
+        if (!text.includes('<') || text.length < 10) text = result.toString('utf8');
         if (text.includes('<') && text.length > 20) {
           allXml.push(text);
-          console.log('ACD: decompressed block at', i, 'length', decompressed.length, 'xml chars', text.length);
+          console.log('ACD GZIP block @' + i + ' -> ' + result.length + ' bytes, ' + text.length + ' chars');
         }
-        // Skip past this block — find next GZIP header
-        // The decompressed size tells us nothing about compressed size; scan forward
-        i += 10; // skip at least the GZIP header
-      } catch (e) {
-        i++; // this wasn't a valid gzip block, keep scanning
+        i += Math.max(result.length / 2, 100); // skip past likely end of this block
+      } else {
+        i++;
       }
     } else {
       i++;
     }
   }
-
   const combined = allXml.join('\n');
-  console.log('ACD total XML chars extracted:', combined.length, 'from', allXml.length, 'blocks');
+  console.log('ACD total XML from GZIP blocks:', combined.length, 'chars, blocks:', allXml.length);
   return combined;
 }
+
+// Extract routine names by scanning binary for PLC identifier strings
+// ACD files store an object index with readable ASCII strings
+function extractRoutineNamesFromAcdBinary(buffer) {
+  const text = buffer.toString('latin1');
+  const names = new Set();
+  // Scan for sequences: 3+ printable ASCII chars surrounded by nulls (common in binary databases)
+  const identRegex = /[A-Za-z][A-Za-z0-9_]{2,29}/g;
+  // Also look in the plain-text header region (first 50KB) for any identifier strings
+  const headerText = buffer.slice(0, Math.min(50000, buffer.length)).toString('latin1');
+  // PLC identifier pattern: starts with letter, alphanumeric+underscore, 3-30 chars
+  const matches = headerText.match(/\b[A-Z][A-Z0-9_]{2,29}\b/g) || [];
+  const blacklist = new Set(['RSLogix', 'Studio', 'Version', 'Object', 'System', 'False', 'True',
+    'File', 'Creation', 'Saved', 'WARNING', 'ALTER', 'NULL', 'BOOL', 'DINT', 'REAL', 'STRING',
+    'INT', 'SINT', 'LINT', 'USINT', 'UINT', 'ULINT', 'LREAL', 'BYTE', 'WORD', 'DWORD', 'LWORD']);
+  for (const m of matches) {
+    if (!blacklist.has(m) && m.length >= 3 && m.length <= 30) names.add(m);
+  }
+  return Array.from(names).slice(0, 50);
+}
+
 
 function calculateCodeReferencePercentage(plcContent, manualText) {
   if (!plcContent || !manualText) return 0;
@@ -430,65 +450,68 @@ function assembleManual(plcInfo, routineBlocks, routineSummaries, brand, filenam
 // ============================================================
 async function extractPlcContent(file) {
   const fileExt = file.originalname.split('.').pop().toLowerCase();
+  const buf = file.buffer;
   let plcContent = '';
   let method = 'unknown';
 
   if (fileExt === 'l5x' || fileExt === 'xml') {
-    // L5X / XML: plain UTF-8 XML — the best format
-    plcContent = file.buffer.toString('utf8');
-    method = 'l5x-xml';
+    plcContent = buf.toString('utf8');
+    method = 'l5x-utf8';
   } else if (fileExt === 'acd') {
-    // ACD: RSLogix/Studio 5000 proprietary binary format
-    // Contains GZIP-compressed UTF-16LE XML sections embedded in binary blob
-    console.log('ACD file detected — scanning for embedded GZIP blocks...');
-    const extracted = extractXmlFromAcdBuffer(file.buffer);
-    if (extracted && extracted.length > 100) {
-      plcContent = extracted;
+    console.log('ACD binary file — extracting GZIP+UTF16 blocks...');
+    const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
+    if (xmlFromGzip && xmlFromGzip.includes('<')) {
+      plcContent = xmlFromGzip;
       method = 'acd-gzip-utf16';
     } else {
-      // Fallback: try raw buffer for any readable text
-      const raw = file.buffer.toString('utf8');
-      if (raw.includes('<Routine') || raw.includes('<Program')) {
-        plcContent = raw;
-        method = 'acd-raw-utf8';
-      } else {
-        plcContent = 'ACD_BINARY: ' + file.originalname + ' (' + file.size + ' bytes). ' +
-          'The .ACD file format stores ladder logic in a proprietary binary database. ' +
-          'For full routine details, please export to L5X format from Studio 5000: File > Save As > L5X Export.';
-        method = 'acd-binary-unreadable';
+      // No XML found — build a structured placeholder with binary-extracted names
+      // and a note for the AI to use routine names only
+      const binaryNames = extractRoutineNamesFromAcdBinary(buf);
+      const controllerMatch = xmlFromGzip.match(/Name="([^"]+)"/);
+      const ctrlName = controllerMatch ? controllerMatch[1] : file.originalname.replace(/\.ACD$/i, '');
+      // Build pseudo-XML so extractPlcInfo and extractRoutineBlocks can work
+      plcContent = '<RSLogix5000Content>\n<Controller Name="' + ctrlName + '">\n';
+      plcContent += '<Programs>\n<Program Name="MainProgram">\n<Routines>\n';
+      // Use names found in binary header as routine names
+      for (const name of binaryNames.slice(0, 30)) {
+        plcContent += '<Routine Name="' + name + '" Type="Ladder"/>\n';
       }
+      plcContent += '</Routines>\n</Program>\n</Programs>\n</Controller>\n</RSLogix5000Content>\n';
+      plcContent += '<!-- ACD_BINARY_NOTE: Ladder logic content not accessible in .ACD format. Routine names inferred from binary metadata. Export as L5X for full rung-by-rung details. -->';
+      method = 'acd-binary-names-only';
     }
   } else if (fileExt === 'zip' || fileExt === 'zap15') {
     try {
-      const zip = new AdmZip(file.buffer);
-      const zipEntries = zip.getEntries();
-      const xmlEntries = zipEntries.filter(e =>
+      const zip = new AdmZip(buf);
+      const entries = zip.getEntries();
+      const xmlEntries = entries.filter(e =>
         e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
       if (xmlEntries.length > 0) {
         xmlEntries.sort((a, b) => b.header.size - a.header.size);
         plcContent = zip.readAsText(xmlEntries[0]);
         method = 'zip-xml:' + xmlEntries[0].entryName;
       } else {
-        plcContent = 'ZIP file with no XML entries: ' + zipEntries.map(e => e.entryName).join(', ');
-        method = 'zip-no-xml';
+        plcContent = buf.toString('utf8');
+        method = 'zip-raw';
       }
     } catch (e) {
-      plcContent = file.buffer.toString('utf8');
-      method = 'zip-fallback-utf8';
+      plcContent = buf.toString('utf8');
+      method = 'zip-error-fallback';
     }
   } else {
-    plcContent = file.buffer.toString('utf8');
+    plcContent = buf.toString('utf8');
     method = 'raw-utf8:' + fileExt;
   }
 
-  if (plcContent.length > 300000) plcContent = plcContent.substring(0, 300000) + '\n... [truncated]';
-  console.log('File extraction method:', method, '| content length:', plcContent.length);
-  return plcContent;
+  if (plcContent.length > 300000) plcContent = plcContent.substring(0, 300000) + '\n...[truncated]';
+  console.log('Extraction method:', method, '| length:', plcContent.length);
+  return { content: plcContent, method };
 }
+
 
 app.post('/parse-test', upload.single('file'), async (req, res) => {
   try {
-    const plcContent = await extractPlcContent(req.file);
+    const { content: plcContent } = await extractPlcContent(req.file);
     const plcInfo = extractPlcInfo(plcContent);
     const routineBlocks = extractRoutineBlocks(plcContent);
     const blockNames = Object.keys(routineBlocks);
@@ -514,7 +537,7 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
     const filename = req.file ? req.file.originalname : 'unknown';
 
     const plcContent = req.file
-      ? await extractPlcContent(req.file)
+      ? (await extractPlcContent(req.file)).content
       : (req.body && req.body.plcContent) || '';
 
     if (!plcContent) return res.status(400).json({ error: 'No file or plcContent provided' });
@@ -548,7 +571,7 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
           '####DETAIL#### Key tags: <comma-separated tag names>\n' +
           '####DETAIL#### Summary: <2-3 sentences of complete description>\n\n' +
           'Routine Name: ' + r.name + '  Type: ' + (r.type || 'Ladder') + '\n\n' +
-          'Routine XML:\n' + (truncatedBlock || '(no XML content — ACD binary format; describe based on routine name only)') + '\n';
+          'Routine XML:\n' + (truncatedBlock || '(no XML ladder content available — this is an ACD binary file. Based ONLY on the routine name "' + r.name + '", infer its likely purpose in an Allen-Bradley PLC program. Common patterns: MainRoutine=main scan, Init/Initialize=startup, Fault/Safety=safety logic, sequence names=step control, etc.)' + '\n';
 
         try {
           const msg = await anthropic.messages.create({
