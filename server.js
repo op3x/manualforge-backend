@@ -135,44 +135,283 @@ function generateTemplateManual(plcContent, brand, filename) {
 }
 
 function generatePDF(manualText, brand, codeRefPercentage) {
-    return new Promise((resolve, reject) => {
-        const doc = new PDFDocument({ margin: 50 });
-        const buffers = [];
-        doc.on('data', (chunk) => buffers.push(chunk));
-        doc.on('end', () => resolve(Buffer.concat(buffers)));
-        doc.on('error', reject);
-        doc.fontSize(20).font('Helvetica-Bold').text('ManualOS', { align: 'center' });
-        doc.fontSize(14).font('Helvetica').text('AI-Generated Operator Manual', { align: 'center' });
-        doc.moveDown(0.5);
-        if (brand) doc.fontSize(12).text('Brand / Manufacturer: ' + brand, { align: 'center' });
-        doc.moveDown(0.5);
-        const barWidth = 400, barHeight = 18;
-        const barX = (doc.page.width - barWidth) / 2;
-        const barY = doc.y;
-        doc.fontSize(11).font('Helvetica-Bold').text('Code Coverage Referenced in This Report:', barX, barY, { lineBreak: false });
-        doc.moveDown(1.5);
-        const filledWidth = Math.round((codeRefPercentage / 100) * barWidth);
-        const barStartY = doc.y;
-        doc.rect(barX, barStartY, barWidth, barHeight).fillColor('#e0e0e0').fill();
-        if (filledWidth > 0) doc.rect(barX, barStartY, filledWidth, barHeight).fillColor('#4CAF50').fill();
-        doc.rect(barX, barStartY, barWidth, barHeight).strokeColor('#999').stroke();
-        doc.fillColor('black').fontSize(10).font('Helvetica-Bold').text(codeRefPercentage + '%', barX + barWidth + 10, barStartY + 3, { lineBreak: false });
-        doc.moveDown(2);
-        doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-        doc.moveDown(1);
-        doc.fillColor('black').fontSize(10).font('Helvetica');
-        const lines = manualText.split('\n');
-        for (const line of lines) {
-            if (line.startsWith('=====')) { doc.moveDown(0.3); doc.moveTo(50,doc.y).lineTo(doc.page.width-50,doc.y).strokeColor('#ccc').stroke(); doc.moveDown(0.3); }
-            else if (line.match(/^\d+\. [A-Z]/) || line.match(/^[A-Z ]{5,}:?\s*$/)) { doc.fontSize(12).font('Helvetica-Bold').text(line); doc.fontSize(10).font('Helvetica'); }
-            else if (line.startsWith('  -') || line.startsWith('  *')) doc.text(line, { indent: 20 });
-            else if (line.trim() === '') doc.moveDown(0.4);
-            else doc.text(line);
-        }
-        doc.end();
-    });
-}
+  return new Promise((resolve, reject) => {
+    // Colors
+    const C = { primary: '#1a3a5c', accent: '#e8f4f8', gold: '#c8a500', warn: '#d44000', danger: '#b00000', caution: '#e67e00', body: '#222', light: '#f7f9fb', border: '#c5d5e0', white: '#ffffff', muted: '#5a6a7a' };
+    const doc = new PDFDocument({ margin: 0, size: 'LETTER', info: { Title: 'PLC Operator Manual', Author: 'ManualOS', Creator: 'ManualForge AI' } });
+    const buffers = [];
+    doc.on('data', chunk => buffers.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(buffers)));
+    doc.on('error', reject);
 
+    const W = doc.page.width;
+    const H = doc.page.height;
+    const ML = 54, MR = 54, MT = 50;
+    const CW = W - ML - MR;
+
+    // ---- HELPER FUNCTIONS ----
+    function hexToRgb(hex) {
+      const r = parseInt(hex.slice(1,3),16);
+      const g = parseInt(hex.slice(3,5),16);
+      const b = parseInt(hex.slice(5,7),16);
+      return [r, g, b];
+    }
+    function setFill(hex) { const [r,g,b]=hexToRgb(hex); doc.fillColor([r,g,b]); }
+    function setStroke(hex) { const [r,g,b]=hexToRgb(hex); doc.strokeColor([r,g,b]); }
+
+    function drawPageHeader(title) {
+      doc.rect(0, 0, W, 38).fill(hexToRgb(C.primary));
+      doc.fillColor(hexToRgb(C.white)).fontSize(9).font('Helvetica-Bold').text('MANUALOS', ML, 13, { width: CW/2 });
+      doc.fillColor(hexToRgb(C.white)).fontSize(9).font('Helvetica').text(title, ML + CW/2, 13, { width: CW/2, align: 'right' });
+    }
+
+    function drawPageFooter(pageNum) {
+      const y = H - 30;
+      doc.moveTo(ML, y - 4).lineTo(W - MR, y - 4).stroke(hexToRgb(C.border));
+      doc.fillColor(hexToRgb(C.muted)).fontSize(8).font('Helvetica')'ManualOS AI-Generated Documentation (.text For reference only. Verify all safety-critical information.', ML, y, { width: CW - 60 });
+      doc.fillColor(hexToRgb(C.muted)).fontSize(8).text('Page ' + pageNum, ML, y, { width: CW, align: 'right' });
+    }
+
+    function sectionHeader(label, y, color) {
+      color = color || C.primary;
+      doc.rect(ML, y, CW, 26).fill(hexToRgb(color));
+      doc.fillColor(hexToRgb(C.white)).fontSize(12).font('Helvetica-Bold').text(label, ML + 12, y + 7, { width: CW - 20 });
+      return y + 30;
+    }
+
+    function checkY(y, needed) {
+      needed = needed || 60;
+      if (y + needed > H - 50) {
+        doc.addPage();
+        drawPageHeader(currentSection);
+        drawPageFooter(++pageNum);
+        return MT + 40;
+      }
+      return y;
+    }
+
+    function infoBox(x, y, w, h, bg, border) {
+      doc.rect(x, y, w, h).fill(hexToRgb(bg || C.accent));
+      if (border) { doc.rect(x, y, w, h).stroke(hexToRgb(border)); }
+      return y;
+    }
+
+    function warningBox(type, text, y) {
+      const colors = { WARNING: [C.warn, '#fff4ef'], DANGER: [C.danger, '#fff0f0'], CAUTION: [C.caution, '#fffaf0'], NOTE: [C.primary, C.accent] };
+      const [bc, bg] = colors[type] || colors.NOTE;
+      const lineH = 14;
+      const lines = text.match(/.{1,85}/g) || [text];
+      const bh = 10 + lines.length * lineH + 6;
+      y = checkY(y, bh + 8);
+      doc.rect(ML, y, 4, bh).fill(hexToRgb(bc));
+      doc.rect(ML + 4, y, CW - 4, bh).fill(hexToRgb(bg));
+      doc.rect(ML + 4, y, CW - 4, bh).stroke(hexToRgb(bc));
+      doc.fillColor(hexToRgb(bc)).fontSize(8).font('Helvetica-Bold').text(type + ':', ML + 14, y + 7);
+      doc.fillColor(hexToRgb(C.body)).fontSize(9.5).font('Helvetica').text(text, ML + 14 + 52, y + 7, { width: CW - 70 });
+      return y + bh + 6;
+    }
+
+    function tableHeader(cols, widths, y) {
+      y = checkY(y, 30);
+      doc.rect(ML, y, CW, 22).fill(hexToRgb(C.primary));
+      let x = ML + 6;
+      cols.forEach((col, i) => {
+        doc.fillColor(hexToRgb(C.white)).fontSize(9).font('Helvetica-Bold').text(col, x, y + 6, { width: widths[i] - 4, lineBreak: false });
+        x += widths[i];
+      });
+      return y + 22;
+    }
+
+    function tableRow(cells, widths, y, isEven) {
+      const rh = 18;
+      y = checkY(y, rh);
+      doc.rect(ML, y, CW, rh).fill(hexToRgb(isEven ? C.accent : C.white));
+      doc.rect(ML, y, CW, rh).stroke(hexToRgb(C.border));
+      let x = ML + 6;
+      cells.forEach((cell, i) => {
+        doc.fillColor(hexToRgb(C.body)).fontSize(8.5).font('Helvetica').text(String(cell||'').substring(0,60), x, y + 4, { width: widths[i] - 8, lineBreak: false });
+        x += widths[i];
+      });
+      return y + rh;
+    }
+
+    // ---- PARSE MANUAL TEXT INTO SECTIONS ----
+    const lines = manualText.split('\n');
+    let pageNum = 1;
+    let currentSection = 'Overview';
+
+    // Extract title info from first lines
+    const titleLine = lines[0] || 'OPERATOR MANUAL';
+    const controllerLine = lines[1] || '';
+    const brandLine = lines[2] || brand || '';
+
+    // =========================================
+    // PAGE 1: COVER
+    // =========================================
+    // Top dark band
+    doc.rect(0, 0, W, 220).fill(hexToRgb(C.primary));
+    // Gold accent line
+    doc.rect(0, 220, W, 5).fill(hexToRgb(C.gold));
+    // White content area
+    doc.rect(0, 225, W, H - 225).fill(hexToRgb(C.white));
+
+    // Cover logo area
+    doc.fillColor(hexToRgb(C.white)).fontSize(36).font('Helvetica-Bold').text('MANUALOS', 0, 55, { align: 'center', width: W });
+    doc.fillColor(hexToRgb(C.gold)).fontSize(13).font('Helvetica').text('AI-POWERED DOCUMENTATION', 0, 96, { align: 'center', width: W });
+
+    // Horizontal divider in header
+    doc.moveTo(ML, 124).lineTo(W - MR, 124).strokeColor(hexToRgb(C.gold)).lineWidth(0.5).stroke();
+
+    // Document type
+    doc.fillColor(hexToRgb(C.white)).fontSize(10).font('Helvetica').text('OPERATOR MANUAL', 0, 135, { align: 'center', width: W });
+
+    // Equipment details box
+    const bx = ML + 20, bw = CW - 40, by = 250;
+    doc.rect(bx, by, bw, 130).fill(hexToRgb(C.light));
+    doc.rect(bx, by, bw, 130).stroke(hexToRgb(C.border));
+    doc.rect(bx, by, 4, 130).fill(hexToRgb(C.primary));
+
+    // Controller / system name
+    const sysName = controllerLine || (lines.find(l => l.match(/controller|system|plc/i)) || controllerLine || 'PLC SYSTEM');
+    doc.fillColor(hexToRgb(C.muted)).fontSize(9).font('Helvetica').text('SYSTEM / CONTROLLER', bx + 20, by + 18);
+    doc.fillColor(hexToRgb(C.primary)).fontSize(18).font('Helvetica-Bold').text(sysName.substring(0, 50), bx + 20, by + 32, { width: bw - 40 });
+    doc.fillColor(hexToRgb(C.muted)).fontSize(9).font('Helvetica').text('MANUFACTURER', bx + 20, by + 70);
+    doc.fillColor(hexToRgb(C.body)).fontSize(12).font('Helvetica-Bold').text(brandLine || brand || 'N/A', bx + 20, by + 83);
+    doc.fillColor(hexToRgb(C.muted)).fontSize(9).font('Helvetica').text('DATE GENERATED', bx + 20, by + 105);
+    doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}), bx + 20, by + 118);
+
+    // Code reference percentage badge
+    if (codeRefPercentage > 0) {
+      const bpx = W - MR - 100, bpy = by + 25;
+      doc.rect(bpx, bpy, 80, 80).fill(hexToRgb(C.primary));
+      doc.fillColor(hexToRgb(C.white)).fontSize(26).font('Helvetica-Bold').text(codeRefPercentage+'%', bpx, bpy + 14, { width: 80, align: 'center' });
+      doc.fillColor(hexToRgb(C.gold)).fontSize(7).font('Helvetica').text('CODE REFERENCE', bpx, bpy + 50, { width: 80, align: 'center' });
+      doc.fillColor(hexToRgb(C.gold)).fontSize(7).font('Helvetica').text('COVERAGE', bpx, bpy + 60, { width: 80, align: 'center' });
+    }
+
+    // Footer notice on cover
+    doc.fillColor(hexToRgb(C.muted)).fontSize(8).font('Helvetica-Oblique').text('This document was generated by ManualOS AI. Verify all safety-critical information against official documentation before use.', ML, H - 60, { width: CW, align: 'center' });
+
+    // =========================================
+    // PAGE 2+: CONTENT
+    // =========================================
+    doc.addPage();
+    pageNum++;
+    currentSection = 'Overview';
+    drawPageHeader(currentSection);
+    drawPageFooter(pageNum);
+
+    let y = MT + 45;
+
+    // Parse sections from manual text
+    let inSection = '';
+    let sectionBuf = [];
+    const sections = [];
+
+    for (let i = 4; i < lines.length; i++) {
+      const line = lines[i];
+      const isSep = line.startsWith('===') || line.startsWith('---');
+      const isHdr = line.match(/^[0-9]+.[s]/);
+      if (isSep && i + 1 < lines.length && lines[i+1].match(/^[0-9]+./)) continue;
+      if (isHdr || (isSep && sectionBuf.length > 0)) {
+        if (inSection) sections.push({ title: inSection, lines: sectionBuf });
+        inSection = line.replace(/^[0-9]+.s+/, '').replace(/=+/g,'').trim();
+        sectionBuf = [];
+      } else {
+        sectionBuf.push(line);
+      }
+    }
+    if (inSection) sections.push({ title: inSection, lines: sectionBuf });
+
+    // If no structured sections found, fall back to raw text rendering
+    if (sections.length === 0) {
+      for (let i = 4; i < lines.length; i++) {
+        sectionBuf.push(lines[i]);
+      }
+      sections.push({ title: 'Manual Content', lines: sectionBuf });
+    }
+
+    // Render each section
+    for (const sec of sections) {
+      y = checkY(y, 60);
+      currentSection = sec.title;
+
+      // Detect section type for styling
+      const isSafety = /safety|warning|danger|hazard/i.test(sec.title);
+      const isTag = /tag|reference/i.test(sec.title);
+      const isTask = /task/i.test(sec.title);
+      const isModule = /module|hardware/i.test(sec.title);
+      const isRoutine = /routine/i.test(sec.title);
+      const isProgram = /program/i.test(sec.title);
+      const isOp = /operat/i.test(sec.title);
+
+      const hColor = isSafety ? C.danger : C.primary;
+      y = sectionHeader(sec.title.toUpperCase(), y, hColor);
+      y += 6;
+
+      // Detect and render table-like sections
+      if (isTag && sec.lines.some(l => l.match(/(BOOL|DINT|REAL|INT|UDINT|STRING/))) {
+        // Tag table
+        const widths = [200, 80, CW - 280];
+        y = tableHeader(['Tag Name', 'Data Type', 'Description'], widths, y);
+        let rowN = 0;
+        for (const l of sec.lines) {
+          const m = l.match(/([w.]+)s*(([w]+))(s*-s*(.*))?/);
+          if (m) { y = tableRow([m[1], m[2], m[4]||''], widths, y, rowN % 2 === 0); rowN++; }
+        }
+      } else if ((isTask || isModule || isRoutine || isProgram) && sec.lines.some(l => l.match(/^s*[-*]|^Task:|^w/))) {
+        // Two-column list table
+        const widths = [CW/2, CW/2];
+        y = tableHeader(['Name', 'Details'], widths, y);
+        let rowN = 0;
+        for (const l of sec.lines) {
+          const clean = l.replace(/^s*[-*]s*/, '').trim();
+          if (!clean) continue;
+          const parts = clean.split(/:s*|s{2,}/);
+          y = tableRow([parts[0]||'', parts.slice(1).join(' ')||''], widths, y, rowN % 2 === 0);
+          rowN++;
+        }
+      } else if (isSafety) {
+        // Safety section: parse warning/danger/caution lines specially
+        for (const l of sec.lines) {
+          if (!l.trim()) { y += 4; continue; }
+          y = checkY(y, 30);
+          if (/^WARNING:/i.test(l)) { y = warningBox('WARNING', l.replace(/^WARNING:s*/i,''), y); }
+          else if (/^DANGER:/i.test(l)) { y = warningBox('DANGER', l.replace(/^DANGER:s*/i,''), y); }
+          else if (/^CAUTION:/i.test(l)) { y = warningBox('CAUTION', l.replace(/^CAUTION:s*/i,''), y); }
+          else if (/^NOTE:/i.test(l)) { y = warningBox('NOTE', l.replace(/^NOTE:s*/i,''), y); }
+          else {
+            doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l, ML, y, { width: CW, lineGap: 2 });
+            y += doc.heightOfString(l, { width: CW }) + 4;
+          }
+        }
+      } else {
+        // General prose content
+        for (const l of sec.lines) {
+          y = checkY(y, 16);
+          if (!l.trim()) { y += 5; continue; }
+          const isBullet = /^s*[-*]/.test(l);
+          const isSubHdr = l.match(/^[A-Z][A-Zs]{4,}:/) || l.match(/^[A-Zs]{5,}$/);
+          if (isSubHdr) {
+            y += 4;
+            doc.fillColor(hexToRgb(C.primary)).fontSize(10).font('Helvetica-Bold').text(l.trim(), ML, y, { width: CW });
+            y += 14;
+          } else if (isBullet) {
+            doc.fillColor(hexToRgb(C.primary)).text('•', ML + 8, y, { width: 14, lineBreak: false });
+            doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l.replace(/^s*[-*]s*/,'').trim(), ML + 22, y, { width: CW - 22, lineGap: 2 });
+            y += doc.heightOfString(l, { width: CW - 22 }) + 3;
+          } else {
+            doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l, ML, y, { width: CW, lineGap: 2 });
+            y += doc.heightOfString(l, { width: CW }) + 3;
+          }
+        }
+      }
+      y += 14;
+    }
+
+    doc.end();
+  });
+}
 app.post('/generate-manual', upload.single('file'), async (req, res) => {
     // Extend socket timeout to prevent Railway proxy 60s timeout
     if (req.socket) req.socket.setTimeout(0);
