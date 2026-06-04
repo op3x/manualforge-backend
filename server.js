@@ -23,440 +23,332 @@ app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: _hasValidKey }));
 
 app.post('/create-checkout-session', async (req, res) => {
-    try {
-        const { email } = req.body;
-        const session = await stripe.checkout.sessions.create({
-            payment_method_types: ['card'],
-            mode: 'subscription',
-            line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
-            customer_email: email,
-            success_url: process.env.FRONTEND_URL + '/success?session_id={CHECKOUT_SESSION_ID}',
-            cancel_url: process.env.FRONTEND_URL + '/cancel',
-        });
-        res.json({ url: session.url });
-    } catch (err) {
-        console.error('Checkout error:', err);
-        res.status(500).json({ error: err.message });
-    }
+try {
+const { email } = req.body;
+const session = await stripe.checkout.sessions.create({
+payment_method_types: ['card'],
+mode: 'subscription',
+line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+customer_email: email,
+success_url: process.env.FRONTEND_URL + '/success?session_id={CHECKOUT_SESSION_ID}',
+cancel_url: process.env.FRONTEND_URL + '/cancel',
+});
+res.json({ url: session.url });
+} catch (err) {
+console.error('Checkout error:', err);
+res.status(500).json({ error: err.message });
+}
 });
 
 app.get('/verify-session', async (req, res) => {
-    try {
-        const { session_id } = req.query;
-        const session = await stripe.checkout.sessions.retrieve(session_id, { expand: ['subscription', 'customer'] });
-        res.json({ paid: session.payment_status === 'paid', customer: session.customer_details, subscription: session.subscription });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+try {
+const { session_id } = req.query;
+const session = await stripe.checkout.sessions.retrieve(session_id, { expand: ['subscription', 'customer'] });
+res.json({ paid: session.payment_status === 'paid', customer: session.customer_details, subscription: session.subscription });
+} catch (err) {
+res.status(500).json({ error: err.message });
+}
 });
 
 function calculateCodeReferencePercentage(plcContent, manualText) {
-    if (!plcContent || !manualText) return 0;
-    const tokenRegex = /\b([A-Za-z_][A-Za-z0-9_]{2,})\b/g;
-    const plcTokens = new Set();
-    let match;
-    while ((match = tokenRegex.exec(plcContent)) !== null) {
-        const token = match[1].toLowerCase();
-        const skip = new Set(['var','end','for','the','and','not','int','bool','true','false','then','else','begin','function','program','type','struct','array','real','word','byte','string']);
-        if (!skip.has(token)) plcTokens.add(token);
-    }
-    if (plcTokens.size === 0) return 0;
-    const manualLower = manualText.toLowerCase();
-    let referenced = 0;
-    for (const token of plcTokens) { if (manualLower.includes(token)) referenced++; }
-    return Math.min(Math.round((referenced / plcTokens.size) * 100), 100);
+if (!plcContent || !manualText) return 0;
+const tokenRegex = /\b([A-Za-z_][A-Za-z0-9_]{2,})\b/g;
+const plcTokens = new Set();
+let match;
+while ((match = tokenRegex.exec(plcContent)) !== null) {
+const token = match[1].toLowerCase();
+const skip = new Set(['var','end','for','the','and','not','int','bool','true','false','then','else','begin','function','program','type','struct','array','real','word','byte','string']);
+if (!skip.has(token)) plcTokens.add(token);
+}
+if (plcTokens.size === 0) return 0;
+const manualLower = manualText.toLowerCase();
+let referenced = 0;
+for (const token of plcTokens) { if (manualLower.includes(token)) referenced++; }
+return Math.min(Math.round((referenced / plcTokens.size) * 100), 100);
 }
 
 function extractPlcInfo(xml) {
-    const info = { controller:'', programs:[], tasks:[], routines:[], tags:[], modules:[] };
-    const ctrlM = xml.match(/<Controller[^>]*Name="([^"]+)"/i);
-    if (ctrlM) info.controller = ctrlM[1];
-    for (const m of xml.matchAll(/<Task[^>]*Name="([^"]+)"[^>]*(?:Period="([^"]*)")?[^>]*(?:Priority="([^"]*)")?/gi)) info.tasks.push({name:m[1],period:m[2]||'',priority:m[3]||''});
-    for (const m of xml.matchAll(/<Program[^>]*Name="([^"]+)"/gi)) { if (!info.programs.includes(m[1])) info.programs.push(m[1]); }
-    for (const m of xml.matchAll(/<Routine[^>]*Name="([^"]+)"[^>]*(?:Type="([^"]*)")?/gi)) info.routines.push({name:m[1],type:m[2]||'Ladder'});
-    let tc=0; for (const m of xml.matchAll(/<Tag[^>]*Name="([^"]+)"[^>]*DataType="([^"]+)"[^>]*(?:Description="([^"]*)")?/gi)) { if(tc++>=50)break; info.tags.push({name:m[1],type:m[2],desc:m[3]||''}); }
-    for (const m of xml.matchAll(/<Module[^>]*Name="([^"]+)"[^>]*(?:CatalogNumber="([^"]*)")?/gi)) info.modules.push({name:m[1],catalog:m[2]||''});
-    return info;
+const info = { controller:'', programs:[], tasks:[], routines:[], tags:[], modules:[] };
+const ctrlM = xml.match(/<Controller[^>]*Name="([^"]+)"/i);
+if (ctrlM) info.controller = ctrlM[1];
+for (const m of xml.matchAll(/<Task[^>]*Name="([^"]+)"[^>]*(?:Period="([^"]*)")?[^>]*(?:Priority="([^"]*)")?/gi)) info.tasks.push({name:m[1],period:m[2]||'',priority:m[3]||''});
+for (const m of xml.matchAll(/<Program[^>]*Name="([^"]+)"/gi)) { if (!info.programs.includes(m[1])) info.programs.push(m[1]); }
+for (const m of xml.matchAll(/<Routine[^>]*Name="([^"]+)"[^>]*(?:Type="([^"]*)")?/gi)) info.routines.push({name:m[1],type:m[2]||'Ladder'});
+let tc=0; for (const m of xml.matchAll(/<Tag[^>]*Name="([^"]+)"[^>]*DataType="([^"]+)"[^>]*(?:Description="([^"]*)")?/gi)) { if(tc++>=50)break; info.tags.push({name:m[1],type:m[2],desc:m[3]||''}); }
+for (const m of xml.matchAll(/<Module[^>]*Name="([^"]+)"[^>]*(?:CatalogNumber="([^"]*)")?/gi)) info.modules.push({name:m[1],catalog:m[2]||''});
+return info;
+}
+
+// Extract each routine's full XML block separately, keyed by routine name
+function extractRoutineBlocks(xml) {
+const blocks = {};
+const routineRegex = /<Routine[^>]*Name="([^"]+)"[^>]*>([\s\S]*?)<\/Routine>/gi;
+let m;
+while ((m = routineRegex.exec(xml)) !== null) {
+const name = m[1];
+const body = m[0];
+blocks[name] = body;
+}
+return blocks;
+}
+
+// Build a template-based summary for a single routine block
+function summarizeRoutineTemplate(name, type, routineXml) {
+const lines = [];
+lines.push('Routine: ' + name + ' (Type: ' + (type || 'Ladder') + ')');
+const rungMatches = routineXml.match(/<Rung[^>]*>/gi);
+const rungCount = rungMatches ? rungMatches.length : 0;
+lines.push('  Rungs: ' + rungCount);
+const instrRegex = /\b([A-Z]{2,5})\s*\(/g;
+const instrSet = new Set();
+let im;
+while ((im = instrRegex.exec(routineXml)) !== null) { instrSet.add(im[1]); }
+if (instrSet.size > 0) lines.push('  Instructions used: ' + Array.from(instrSet).join(', '));
+const tagRegex = /Operand="([^"]+)"/gi;
+const tagSet = new Set();
+let tm;
+while ((tm = tagRegex.exec(routineXml)) !== null) {
+const val = tm[1].trim();
+if (val && !/^\d/.test(val)) tagSet.add(val.split('.')[0]);
+}
+if (tagSet.size > 0) {
+const tagList = Array.from(tagSet).slice(0, 20);
+lines.push('  Key tags/operands: ' + tagList.join(', ') + (tagSet.size > 20 ? ', ...' : ''));
+}
+const commentRegex = /<Text[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/Text>/gi;
+const comments = [];
+let cm2;
+while ((cm2 = commentRegex.exec(routineXml)) !== null && comments.length < 5) {
+const c = cm2[1].trim();
+if (c) comments.push(c.substring(0, 120));
+}
+if (comments.length > 0) lines.push('  Rung comments: ' + comments.join(' | '));
+return lines.join('\n');
 }
 
 function generateTemplateManual(plcContent, brand, filename) {
-    const info = extractPlcInfo(plcContent);
-    const ctrl = info.controller || filename || 'PLC System';
-    const br = brand || 'Unknown';
-    const date = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-    let t = 'OPERATOR MANUAL\n' + ctrl + '\n' + br + ' PLC System\nGenerated by ManualOS | ' + date + '\n\n';
-    t += '================================================================================\n1. SYSTEM OVERVIEW\n================================================================================\n\n';
-    t += 'This manual covers the ' + ctrl + ' PLC system manufactured by ' + br + '.\n';
-    t += 'File: ' + (filename||'N/A') + ' | Programs: ' + (info.programs.join(', ')||'N/A') + '\n\n';
-    t += '================================================================================\n2. SAFETY WARNINGS\n================================================================================\n\n';
-    t += 'WARNING: De-energize and LOTO all power before any maintenance work.\n';
-    t += 'DANGER: High voltage present - only qualified personnel may work on this system.\n';
-    t += 'CAUTION: Verify safe state before making program changes or forcing I/O.\n\n';
-    if (info.tasks.length) {
-        t += '================================================================================\n3. TASKS\n================================================================================\n';
-        for (const k of info.tasks) t += 'Task: ' + k.name + (k.period?' Period:'+k.period+'ms':'') + (k.priority?' Priority:'+k.priority:'') + '\n';
-        t += '\n';
-    }
-    if (info.programs.length) {
-        t += '================================================================================\n4. PROGRAMS\n================================================================================\n';
-        for (const p of info.programs) t += '  - ' + p + '\n';
-        t += '\n';
-    }
-    if (info.routines.length) {
-        t += '================================================================================\n5. ROUTINES\n================================================================================\n';
-        for (const r of info.routines) t += '  - ' + r.name + ' (' + r.type + ')\n';
-        t += '\n';
-    }
-    if (info.modules.length) {
-        t += '================================================================================\n6. MODULES\n================================================================================\n';
-        for (const m of info.modules) t += '  ' + m.name + (m.catalog?' ('+m.catalog+')':'') + '\n';
-        t += '\n';
-    }
-    if (info.tags.length) {
-        t += '================================================================================\n7. TAG REFERENCE\n================================================================================\n';
-        for (const g of info.tags) t += '  ' + g.name + ' (' + g.type + ')' + (g.desc?' - '+g.desc:'') + '\n';
-        t += '\n';
-    }
-    t += '================================================================================\n8. OPERATING PROCEDURES\n================================================================================\n\n';
-    t += 'STARTUP:\n1. Verify safety interlocks functional\n2. Check I/O connections\n3. Power on, verify RUN indicator\n4. Clear all faults\n5. Enable outputs via operator interface\n\n';
-    t += 'NORMAL OPERATION:\n- Monitor system via HMI\n- Respond to alarms promptly\n- Log unusual behavior\n\n';
-    t += 'SHUTDOWN:\n1. Initiate controlled shutdown via operator interface\n2. Verify outputs de-energized\n3. Apply LOTO before maintenance\n\n';
-    t += '================================================================================\n9. TROUBLESHOOTING\n================================================================================\n\n';
-    t += 'CONTROLLER FAULT: Check fault code, review recent changes, verify I/O comms\n';
-    t += 'I/O COMM ERROR: Check cables, power supplies, node addresses\n';
-    t += 'LOGIC ERROR: Review ladder logic, check tag values online, verify sensors\n\n';
-    t += '================================================================================\n10. MAINTENANCE SCHEDULE\n================================================================================\n\n';
-    t += 'DAILY: Check status LEDs, review alarm history\n';
-    t += 'WEEKLY: Inspect connections, backup program to maintenance folder\n';
-    t += 'MONTHLY: Clean panel (LOTO), check battery backup\n';
-    t += 'ANNUALLY: Full functional test, calibration verification, update documentation\n\n';
-    t += 'Generated by ManualOS AI Manual Generator.\n';
-    return t;
+const info = extractPlcInfo(plcContent);
+const routineBlocks = extractRoutineBlocks(plcContent);
+const ctrl = info.controller || filename || 'PLC System';
+const br = brand || 'Unknown';
+const date = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+let t = 'OPERATOR MANUAL\n' + ctrl + '\n' + br + ' PLC System\nGenerated by ManualOS | ' + date + '\n\n';
+t += '================================================================================\n1. SYSTEM OVERVIEW\n================================================================================\n\n';
+t += 'This manual covers the ' + ctrl + ' PLC system manufactured by ' + br + '.\n';
+t += 'File: ' + (filename||'N/A') + ' | Programs: ' + (info.programs.join(', ')||'N/A') + '\n\n';
+t += '================================================================================\n2. SAFETY WARNINGS\n================================================================================\n\n';
+t += 'WARNING: De-energize and LOTO all power before any maintenance work.\n';
+t += 'DANGER: High voltage present - only qualified personnel may work on this system.\n';
+t += 'CAUTION: Verify safe state before making program changes or forcing I/O.\n\n';
+if (info.tasks.length) {
+t += '================================================================================\n3. TASKS\n================================================================================\n';
+for (const k of info.tasks) t += 'Task: ' + k.name + (k.period?' Period:'+k.period+'ms':'') + (k.priority?' Priority:'+k.priority:'') + '\n';
+t += '\n';
+}
+if (info.programs.length) {
+t += '================================================================================\n4. PROGRAMS\n================================================================================\n';
+for (const p of info.programs) t += ' - ' + p + '\n';
+t += '\n';
+}
+if (info.routines.length) {
+t += '================================================================================\n5. ROUTINE SUMMARIES\n================================================================================\n\n';
+for (const r of info.routines) {
+const xmlBlock = routineBlocks[r.name] || '';
+const summary = summarizeRoutineTemplate(r.name, r.type, xmlBlock);
+t += '--------------------------------------------------------------------------------\n';
+t += summary + '\n\n';
+}
+}
+if (info.modules.length) {
+t += '================================================================================\n6. MODULES\n================================================================================\n';
+for (const m of info.modules) t += ' ' + m.name + (m.catalog?' ('+m.catalog+')':'') + '\n';
+t += '\n';
+}
+if (info.tags.length) {
+t += '================================================================================\n7. TAG REFERENCE\n================================================================================\n';
+for (const g of info.tags) t += ' ' + g.name + ' (' + g.type + ')' + (g.desc?' - '+g.desc:'') + '\n';
+t += '\n';
+}
+t += '================================================================================\n8. OPERATING PROCEDURES\n================================================================================\n\n';
+t += 'STARTUP:\n1. Verify safety interlocks functional\n2. Check I/O connections\n3. Power on, verify RUN indicator\n4. Clear all faults\n5. Enable outputs via operator interface\n\n';
+t += 'NORMAL OPERATION:\n- Monitor system via HMI\n- Respond to alarms promptly\n- Log unusual behavior\n\n';
+t += 'SHUTDOWN:\n1. Initiate controlled shutdown via operator interface\n2. Verify outputs de-energized\n3. Apply LOTO before maintenance\n\n';
+t += '================================================================================\n9. TROUBLESHOOTING\n================================================================================\n\n';
+t += 'CONTROLLER FAULT: Check fault code, review recent changes, verify I/O comms\n';
+t += 'I/O COMM ERROR: Check cables, power supplies, node addresses\n';
+t += 'LOGIC ERROR: Review ladder logic, check tag values online, verify sensors\n\n';
+t += '================================================================================\n10. MAINTENANCE SCHEDULE\n================================================================================\n\n';
+t += 'DAILY: Check status LEDs, review alarm history\n';
+t += 'WEEKLY: Inspect connections, backup program to maintenance folder\n';
+t += 'MONTHLY: Clean panel (LOTO), check battery backup\n';
+t += 'ANNUALLY: Full functional test, calibration verification, update documentation\n\n';
+t += 'Generated by ManualOS AI Manual Generator.\n';
+return t;
 }
 
 function generatePDF(manualText, brand, codeRefPercentage) {
-  return new Promise((resolve, reject) => {
-    var CPRIMARY = [26, 58, 92];
-    var CACCENT = [232, 244, 248];
-    var CGOLD = [200, 165, 0];
-    var CWARN = [212, 68, 0];
-    var CDANGER = [176, 0, 0];
-    var CCAUTION = [230, 126, 0];
-    var CBODY = [34, 34, 34];
-    var CLIGHT = [247, 249, 251];
-    var CBORDER = [197, 213, 224];
-    var CWHITE = [255, 255, 255];
-    var CMUTED = [90, 106, 122];
-    var CWARNBG = [255, 244, 239];
-    var CDANGERBG = [255, 240, 240];
-    var CCAUTIONBG = [255, 250, 240];
-    var doc = new PDFDocument({ margin: 0, size: 'LETTER', info: { Title: 'PLC Operator Manual', Author: 'ManualOS' } });
-    var buffers = [];
-    doc.on('data', function(chunk) { buffers.push(chunk); });
-    doc.on('end', function() { resolve(Buffer.concat(buffers)); });
-    doc.on('error', reject);
-    var W = doc.page.width;
-    var H = doc.page.height;
-    var ML = 54, MR = 54, MT = 50;
-    var CW = W - ML - MR;
-    var pageNum = 1;
-    var currentSection = 'Overview';
-    function drawPageHeader(title) {
-      doc.rect(0, 0, W, 38).fill(CPRIMARY);
-      doc.fillColor(CWHITE).fontSize(9).font('Helvetica-Bold').text('MANUALOS', ML, 13, { width: CW/2 });
-      doc.fillColor(CWHITE).fontSize(9).font('Helvetica').text(title, ML + CW/2, 13, { width: CW/2, align: 'right' });
-    }
-    function drawPageFooter(pn) {
-      var fy = H - 30;
-      doc.moveTo(ML, fy - 4).lineTo(W - MR, fy - 4).strokeColor(CBORDER).stroke();
-      doc.fillColor(CMUTED).fontSize(8).font('Helvetica').text('ManualOS AI-Generated Documentation - For reference only.', ML, fy, { width: CW - 60 });
-      doc.fillColor(CMUTED).fontSize(8).text('Page ' + pn, ML, fy, { width: CW, align: 'right' });
-    }
-    function sectionHeader(label, sy, isRed) {
-      var hc = isRed ? CDANGER : CPRIMARY;
-      doc.rect(ML, sy, CW, 26).fill(hc);
-      doc.fillColor(CWHITE).fontSize(12).font('Helvetica-Bold').text(label, ML + 12, sy + 7, { width: CW - 20 });
-      return sy + 30;
-    }
-    function checkY(y, needed) {
-      if (y + (needed || 60) > H - 50) {
-        doc.addPage();
-        pageNum++;
-        drawPageHeader(currentSection);
-        drawPageFooter(pageNum);
-        return MT + 40;
-      }
-      return y;
-    }
-    function warningBox(type, text, y) {
-      var bc = type === 'DANGER' ? CDANGER : type === 'WARNING' ? CWARN : type === 'CAUTION' ? CCAUTION : CPRIMARY;
-      var bg = type === 'DANGER' ? CDANGERBG : type === 'WARNING' ? CWARNBG : type === 'CAUTION' ? CCAUTIONBG : CACCENT;
-      var approxLines = Math.ceil(text.length / 85) || 1;
-      var bh = 10 + approxLines * 14 + 6;
-      y = checkY(y, bh + 8);
-      doc.rect(ML, y, 4, bh).fill(bc);
-      doc.rect(ML + 4, y, CW - 4, bh).fill(bg);
-      doc.rect(ML + 4, y, CW - 4, bh).strokeColor(bc).stroke();
-      doc.fillColor(bc).fontSize(8).font('Helvetica-Bold').text(type + ':', ML + 14, y + 7);
-      doc.fillColor(CBODY).fontSize(9.5).font('Helvetica').text(text, ML + 66, y + 7, { width: CW - 70 });
-      return y + bh + 6;
-    }
-    function tableHeader(cols, widths, y) {
-      y = checkY(y, 30);
-      doc.rect(ML, y, CW, 22).fill(CPRIMARY);
-      var tx = ML + 6;
-      cols.forEach(function(col, i) {
-        doc.fillColor(CWHITE).fontSize(9).font('Helvetica-Bold').text(col, tx, y + 6, { width: widths[i] - 4, lineBreak: false });
-        tx += widths[i];
-      });
-      return y + 22;
-    }
-    function tableRow(cells, widths, y, isEven) {
-      var rh = 18;
-      y = checkY(y, rh);
-      doc.rect(ML, y, CW, rh).fill(isEven ? CACCENT : CWHITE);
-      doc.rect(ML, y, CW, rh).strokeColor(CBORDER).stroke();
-      var tx = ML + 6;
-      cells.forEach(function(cell, i) {
-        doc.fillColor(CBODY).fontSize(8.5).font('Helvetica').text(String(cell||'').substring(0, 60), tx, y + 4, { width: widths[i] - 8, lineBreak: false });
-        tx += widths[i];
-      });
-      return y + rh;
-    }
-    var lines = manualText.split('\n');
-    var controllerLine = lines[1] || '';
-    var brandLine = lines[2] || brand || '';
-    doc.rect(0, 0, W, 220).fill(CPRIMARY);
-    doc.rect(0, 220, W, 5).fill(CGOLD);
-    doc.rect(0, 225, W, H - 225).fill(CWHITE);
-    doc.fillColor(CWHITE).fontSize(36).font('Helvetica-Bold').text('MANUALOS', 0, 55, { align: 'center', width: W });
-    doc.fillColor(CGOLD).fontSize(13).font('Helvetica').text('AI-POWERED DOCUMENTATION', 0, 96, { align: 'center', width: W });
-    doc.moveTo(ML, 124).lineTo(W - MR, 124).strokeColor(CGOLD).lineWidth(0.5).stroke();
-    doc.fillColor(CWHITE).fontSize(10).font('Helvetica').text('OPERATOR MANUAL', 0, 135, { align: 'center', width: W });
-    var bx = ML + 20, bw = CW - 40, by = 250;
-    doc.rect(bx, by, bw, 130).fill(CLIGHT);
-    doc.rect(bx, by, bw, 130).strokeColor(CBORDER).stroke();
-    doc.rect(bx, by, 4, 130).fill(CPRIMARY);
-    doc.fillColor(CMUTED).fontSize(9).font('Helvetica').text('SYSTEM / CONTROLLER', bx + 20, by + 18);
-    doc.fillColor(CPRIMARY).fontSize(18).font('Helvetica-Bold').text((controllerLine || 'PLC SYSTEM').substring(0, 50), bx + 20, by + 32, { width: bw - 40 });
-    doc.fillColor(CMUTED).fontSize(9).font('Helvetica').text('MANUFACTURER', bx + 20, by + 70);
-    doc.fillColor(CBODY).fontSize(12).font('Helvetica-Bold').text(brandLine || brand || 'N/A', bx + 20, by + 83);
-    doc.fillColor(CMUTED).fontSize(9).font('Helvetica').text('DATE GENERATED', bx + 20, by + 105);
-    doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), bx + 20, by + 118);
-    if (codeRefPercentage > 0) {
-      var bpx = W - MR - 100, bpy = by + 25;
-      doc.rect(bpx, bpy, 80, 80).fill(CPRIMARY);
-      doc.fillColor(CWHITE).fontSize(26).font('Helvetica-Bold').text(codeRefPercentage + '%', bpx, bpy + 14, { width: 80, align: 'center' });
-      doc.fillColor(CGOLD).fontSize(7).font('Helvetica').text('CODE REFERENCE', bpx, bpy + 50, { width: 80, align: 'center' });
-      doc.fillColor(CGOLD).fontSize(7).font('Helvetica').text('COVERAGE', bpx, bpy + 60, { width: 80, align: 'center' });
-    }
-    doc.fillColor(CMUTED).fontSize(8).font('Helvetica-Oblique').text('This document was generated by ManualOS AI. Verify all safety-critical information before use.', ML, H - 60, { width: CW, align: 'center' });
-    doc.addPage();
-    pageNum = 2;
-    currentSection = 'Overview';
-    drawPageHeader(currentSection);
-    drawPageFooter(pageNum);
-    var y = MT + 45;
-    var inSection = '';
-    var sectionBuf = [];
-    var sections = [];
-    for (var i = 4; i < lines.length; i++) {
-      var line = lines[i];
-      var isSep = line.indexOf('===') === 0 || line.indexOf('---') === 0;
-      var isHdr = /^[0-9]+[.] /.test(line);
-      if (isSep && i + 1 < lines.length && /^[0-9]+[.]/.test(lines[i + 1])) continue;
-      if (isHdr || (isSep && sectionBuf.length > 0)) {
-        if (inSection) sections.push({ title: inSection, lines: sectionBuf });
-        inSection = line.replace(/^[0-9]+[.] +/, '').replace(/=+/g, '').trim();
-        sectionBuf = [];
-      } else {
-        sectionBuf.push(line);
-      }
-    }
-    if (inSection) sections.push({ title: inSection, lines: sectionBuf });
-    if (sections.length === 0) {
-      var fallback = [];
-      for (var j = 4; j < lines.length; j++) fallback.push(lines[j]);
-      sections.push({ title: 'Manual Content', lines: fallback });
-    }
-    for (var s = 0; s < sections.length; s++) {
-      var sec = sections[s];
-      y = checkY(y, 60);
-      currentSection = sec.title;
-      var isSafety = /safety|warning|danger|hazard/i.test(sec.title);
-      var isTag = /tag|reference/i.test(sec.title);
-      var isTask = /task/i.test(sec.title);
-      var isModule = /module|hardware/i.test(sec.title);
-      var isRoutine = /routine/i.test(sec.title);
-      var isProgram = /program/i.test(sec.title);
-      y = sectionHeader(sec.title.toUpperCase(), y, isSafety);
-      y += 6;
-      var hasTypes = sec.lines.some(function(l) {
-        return l.indexOf('(BOOL') >= 0 || l.indexOf('(DINT') >= 0 || l.indexOf('(REAL') >= 0 || l.indexOf('(INT') >= 0 || l.indexOf('(STRING') >= 0;
-      });
-      if (isTag && hasTypes) {
-        var tw = [200, 80, CW - 280];
-        y = tableHeader(['Tag Name', 'Data Type', 'Description'], tw, y);
-        var rn = 0;
-        for (var ti = 0; ti < sec.lines.length; ti++) {
-          var tl = sec.lines[ti];
-          var tm = tl.match(/([\w.]+)\s*\(([\w]+)\)(?:\s*-\s*(.*))?/);
-          if (tm) { y = tableRow([tm[1], tm[2], tm[3] || ''], tw, y, rn % 2 === 0); rn++; }
-        }
-      } else if (isTask || isModule || isRoutine || isProgram) {
-        var tw2 = [CW / 2, CW / 2];
-        y = tableHeader(['Name', 'Details'], tw2, y);
-        var rn2 = 0;
-        for (var li = 0; li < sec.lines.length; li++) {
-          var clean = sec.lines[li].replace(/^\s*[-*]\s*/, '').trim();
-          if (!clean) continue;
-          var parts = clean.split(/:\s*|\s{2,}/);
-          y = tableRow([parts[0] || '', parts.slice(1).join(' ') || ''], tw2, y, rn2 % 2 === 0);
-          rn2++;
-        }
-      } else if (isSafety) {
-        for (var si = 0; si < sec.lines.length; si++) {
-          var sl = sec.lines[si];
-          if (!sl.trim()) { y += 4; continue; }
-          y = checkY(y, 30);
-          if (/^WARNING:/i.test(sl)) { y = warningBox('WARNING', sl.replace(/^WARNING:\s*/i, ''), y); }
-          else if (/^DANGER:/i.test(sl)) { y = warningBox('DANGER', sl.replace(/^DANGER:\s*/i, ''), y); }
-          else if (/^CAUTION:/i.test(sl)) { y = warningBox('CAUTION', sl.replace(/^CAUTION:\s*/i, ''), y); }
-          else if (/^NOTE:/i.test(sl)) { y = warningBox('NOTE', sl.replace(/^NOTE:\s*/i, ''), y); }
-          else {
-            doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(sl, ML, y, { width: CW, lineGap: 2 });
-            y += doc.heightOfString(sl, { width: CW }) + 4;
-          }
-        }
-      } else {
-        for (var gi = 0; gi < sec.lines.length; gi++) {
-          var gl = sec.lines[gi];
-          y = checkY(y, 16);
-          if (!gl.trim()) { y += 5; continue; }
-          var isBullet = /^\s*[-*]/.test(gl);
-          var isSubHdr = /^[A-Z][A-Z ]{4,}:/.test(gl) || /^[A-Z ]{5,}$/.test(gl);
-          if (isSubHdr) {
-            y += 4;
-            doc.fillColor(CPRIMARY).fontSize(10).font('Helvetica-Bold').text(gl.trim(), ML, y, { width: CW });
-            y += 14;
-          } else if (isBullet) {
-            doc.fillColor(CPRIMARY).fontSize(10).font('Helvetica').text('*', ML + 8, y, { width: 14, lineBreak: false });
-            doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(gl.replace(/^\s*[-*]\s*/, '').trim(), ML + 22, y, { width: CW - 22, lineGap: 2 });
-            y += doc.heightOfString(gl, { width: CW - 22 }) + 3;
-          } else {
-            doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(gl, ML, y, { width: CW, lineGap: 2 });
-            y += doc.heightOfString(gl, { width: CW }) + 3;
-          }
-        }
-      }
-      y += 14;
-    }
-    doc.end();
-  });
+return new Promise((resolve, reject) => {
+const doc = new PDFDocument({ margin: 50 });
+const buffers = [];
+doc.on('data', (chunk) => buffers.push(chunk));
+doc.on('end', () => resolve(Buffer.concat(buffers)));
+doc.on('error', reject);
+doc.fontSize(20).font('Helvetica-Bold').text('ManualOS', { align: 'center' });
+doc.fontSize(14).font('Helvetica').text('AI-Generated Operator Manual', { align: 'center' });
+doc.moveDown(0.5);
+if (brand) doc.fontSize(12).text('Brand / Manufacturer: ' + brand, { align: 'center' });
+doc.moveDown(0.5);
+const barWidth = 400, barHeight = 18;
+const barX = (doc.page.width - barWidth) / 2;
+const barY = doc.y;
+doc.fontSize(11).font('Helvetica-Bold').text('Code Coverage Referenced in This Report:', barX, barY, { lineBreak: false });
+doc.moveDown(1.5);
+const filledWidth = Math.round((codeRefPercentage / 100) * barWidth);
+const barStartY = doc.y;
+doc.rect(barX, barStartY, barWidth, barHeight).fillColor('#e0e0e0').fill();
+if (filledWidth > 0) doc.rect(barX, barStartY, filledWidth, barHeight).fillColor('#4CAF50').fill();
+doc.rect(barX, barStartY, barWidth, barHeight).strokeColor('#999').stroke();
+doc.fillColor('black').fontSize(10).font('Helvetica-Bold').text(codeRefPercentage + '%', barX + barWidth + 10, barStartY + 3, { lineBreak: false });
+doc.moveDown(2);
+doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+doc.moveDown(1);
+doc.fillColor('black').fontSize(10).font('Helvetica');
+const lines = manualText.split('\n');
+for (const line of lines) {
+if (line.startsWith('=====')) { doc.moveDown(0.3); doc.moveTo(50,doc.y).lineTo(doc.page.width-50,doc.y).strokeColor('#ccc').stroke(); doc.moveDown(0.3); }
+else if (line.match(/^\d+\. [A-Z]/) || line.match(/^[A-Z ]{5,}:?\s*$/)) { doc.fontSize(12).font('Helvetica-Bold').text(line); doc.fontSize(10).font('Helvetica'); }
+else if (line.startsWith(' -') || line.startsWith(' *')) doc.text(line, { indent: 20 });
+else if (line.trim() === '') doc.moveDown(0.4);
+else doc.text(line);
+}
+doc.end();
+});
 }
 
 app.post('/generate-manual', upload.single('file'), async (req, res) => {
-    // Extend socket timeout to prevent Railway proxy 60s timeout
-    if (req.socket) req.socket.setTimeout(0);
-    res.setTimeout(0);
-    try {
-        let plcContent = '';
-        const brand = (req.body && req.body.brand) || '';
-        const sections = (req.body && req.body.sections) ? JSON.parse(req.body.sections) : [];
-        const filename = req.file ? req.file.originalname : 'unknown.acd';
-        if (req.file) {
-            const fileExt = req.file.originalname.split('.').pop().toLowerCase();
-            if (fileExt === 'acd' || fileExt === 'zip' || fileExt === 'zap15') {
-                try {
-                    const zip = new AdmZip(req.file.buffer);
-                    const zipEntries = zip.getEntries();
-                    const xmlEntries = zipEntries.filter(e => e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
-                    if (xmlEntries.length > 0) {
-                        xmlEntries.sort((a, b) => b.header.size - a.header.size);
-                        plcContent = zip.readAsText(xmlEntries[0]);
-                        if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated]';
-                    } else {
-                        plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes. Entries: ' + zipEntries.map(e=>e.entryName).join(', ');
-                    }
-                } catch (zipErr) {
-                    // ACD files may use a format adm-zip can't read. Try scanning buffer for raw XML.
-                    console.error('ZIP error:', zipErr.message);
-                    try {
-                      const bufStr = req.file.buffer.toString('latin1');
-                      const xmlStart = bufStr.indexOf('<RSLogix5000Content');
-                      const xmlStart2 = bufStr.indexOf('<?xml');
-                      const start = xmlStart >= 0 ? xmlStart : (xmlStart2 >= 0 ? xmlStart2 : -1);
-                      if (start >= 0) {
-                        const xmlEnd = bufStr.lastIndexOf('</RSLogix5000Content>');
-                        plcContent = xmlEnd >= 0 ? bufStr.substring(start, xmlEnd + 21) : bufStr.substring(start, start + 200000);
-                        if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated]';
-                        console.log('Extracted XML from raw buffer, length:', plcContent.length);
-                      } else {
-                        plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes.';
-                      }
-                    } catch(e2) {
-                      plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes.';
-                    }
-                  }
-            } else {
-                plcContent = req.file.buffer.toString('utf8');
-            }
-        } else if (req.body && req.body.plcContent) {
-            plcContent = req.body.plcContent;
-        }
-        if (!plcContent) return res.status(400).json({ error: 'No file or plcContent provided' });
+if (req.socket) req.socket.setTimeout(0);
+res.setTimeout(0);
+try {
+let plcContent = '';
+const brand = (req.body && req.body.brand) || '';
+const sections = (req.body && req.body.sections) ? JSON.parse(req.body.sections) : [];
+const filename = req.file ? req.file.originalname : 'unknown.acd';
+if (req.file) {
+const fileExt = req.file.originalname.split('.').pop().toLowerCase();
+if (fileExt === 'acd' || fileExt === 'zip' || fileExt === 'zap15') {
+try {
+const zip = new AdmZip(req.file.buffer);
+const zipEntries = zip.getEntries();
+const xmlEntries = zipEntries.filter(e => e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
+if (xmlEntries.length > 0) {
+xmlEntries.sort((a, b) => b.header.size - a.header.size);
+plcContent = zip.readAsText(xmlEntries[0]);
+if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated]';
+} else {
+plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes. Entries: ' + zipEntries.map(e=>e.entryName).join(', ');
+}
+} catch (zipErr) {
+console.error('ZIP error:', zipErr.message);
+try {
+const bufStr = req.file.buffer.toString('latin1');
+const xmlStart = bufStr.indexOf('<RSLogix5000Content');
+const xmlStart2 = bufStr.indexOf('<?xml');
+const start = xmlStart >= 0 ? xmlStart : (xmlStart2 >= 0 ? xmlStart2 : -1);
+if (start >= 0) {
+const xmlEnd = bufStr.lastIndexOf('</RSLogix5000Content>');
+plcContent = xmlEnd >= 0 ? bufStr.substring(start, xmlEnd + 21) : bufStr.substring(start, start + 200000);
+if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated]';
+console.log('Extracted XML from raw buffer, length:', plcContent.length);
+} else {
+plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes.';
+}
+} catch(e2) {
+plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes.';
+}
+}
+} else {
+plcContent = req.file.buffer.toString('utf8');
+}
+} else if (req.body && req.body.plcContent) {
+plcContent = req.body.plcContent;
+}
+if (!plcContent) return res.status(400).json({ error: 'No file or plcContent provided' });
 
-        let manualText = '';
-        let usedAI = false;
+let manualText = '';
+let usedAI = false;
 
-        if (_hasValidKey && anthropic) {
-            try {
-                console.log('Calling Anthropic API...');
-                const prompt = 'You are an expert industrial automation engineer. Generate a comprehensive operator manual for the following PLC program.\n\nBrand/Manufacturer: ' + (brand||'Unknown') + '\nSections: ' + (sections.join(', ')||'All standard') + '\n\nPLC Content:\n' + plcContent + '\n\nGenerate a professional operator manual with safety warnings and operational procedures.';
-                const message = await anthropic.messages.create({ model: 'claude-3-5-haiku-20241022', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] });
-                manualText = message.content[0].text;
-                usedAI = true;
-                console.log('Anthropic API success.');
-            } catch (aiErr) {
-                console.error('Anthropic failed, using template:', aiErr.message);
-                manualText = generateTemplateManual(plcContent, brand, filename);
-            }
-        } else {
-            console.log('No valid Anthropic key - template generation.');
-            manualText = generateTemplateManual(plcContent, brand, filename);
-        }
+if (_hasValidKey && anthropic) {
+try {
+console.log('Calling Anthropic API with per-routine processing...');
+const plcInfo = extractPlcInfo(plcContent);
+const routineBlocks = extractRoutineBlocks(plcContent);
 
-        const codeRefPercentage = calculateCodeReferencePercentage(plcContent, manualText);
-        const pdfBuffer = await generatePDF(manualText, brand, codeRefPercentage);
-        res.set({
-            'Content-Type': 'application/pdf',
-            'Content-Disposition': 'attachment; filename="matrix-manual-report.pdf"',
-            'Content-Length': pdfBuffer.length,
-            'X-Manual-Mode': usedAI ? 'ai-generated' : 'template-generated',
-        });
-        res.send(pdfBuffer);
-    } catch (err) {
-        console.error('Manual generation error:', err);
-        res.status(500).json({ error: err.message, stack: err.stack });
-    }
+// Build per-routine summaries by calling AI for each routine separately
+const routineSummaries = [];
+for (const r of plcInfo.routines) {
+const xmlBlock = routineBlocks[r.name] || '';
+const truncatedBlock = xmlBlock.length > 8000 ? xmlBlock.substring(0, 8000) + '\n... [truncated]' : xmlBlock;
+const routinePrompt = 'You are an expert industrial automation engineer. Summarize the following PLC routine in 3-6 sentences for an operator manual. Focus on: what the routine does, key logic or conditions, and any important tags or I/O it controls.\n\nRoutine Name: ' + r.name + '\nRoutine Type: ' + (r.type || 'Ladder') + '\n\nRoutine XML:\n' + (truncatedBlock || '(no content extracted - routine may be empty or binary-only)') + '\n\nProvide a clear, concise summary suitable for a maintenance technician.';
+try {
+const msg = await anthropic.messages.create({ model: 'claude-3-5-haiku-20241022', max_tokens: 512, messages: [{ role: 'user', content: routinePrompt }] });
+routineSummaries.push({ name: r.name, type: r.type || 'Ladder', summary: msg.content[0].text.trim() });
+console.log('Summarized routine:', r.name);
+} catch (routineErr) {
+console.error('Failed to summarize routine ' + r.name + ':', routineErr.message);
+routineSummaries.push({ name: r.name, type: r.type || 'Ladder', summary: summarizeRoutineTemplate(r.name, r.type, xmlBlock) });
+}
+}
+
+const routineSummaryText = routineSummaries.map(rs =>
+'--- Routine: ' + rs.name + ' (' + rs.type + ') ---\n' + rs.summary
+).join('\n\n');
+
+const fullPrompt = 'You are an expert industrial automation engineer. Generate a comprehensive operator manual for the following PLC program.\n\nBrand/Manufacturer: ' + (brand||'Unknown') + '\nController: ' + (plcInfo.controller||'Unknown') + '\nSections: ' + (sections.join(', ')||'All standard') + '\n\nPrograms: ' + (plcInfo.programs.join(', ')||'N/A') + '\nTasks: ' + (plcInfo.tasks.map(t=>t.name).join(', ')||'N/A') + '\nModules: ' + (plcInfo.modules.map(m=>m.name+(m.catalog?' ('+m.catalog+')':'')).join(', ')||'N/A') + '\n\nPer-Routine Summaries (each routine has been read and analyzed individually):\n' + routineSummaryText + '\n\nTop Tags:\n' + (plcInfo.tags.slice(0,30).map(g=>g.name+' ('+g.type+')'+(g.desc?' - '+g.desc:'')).join('\n')||'N/A') + '\n\nGenerate a professional operator manual. Include a dedicated "ROUTINE DESCRIPTIONS" section that uses the per-routine summaries above. Also include safety warnings, startup/shutdown procedures, and troubleshooting guidance.';
+
+const message = await anthropic.messages.create({ model: 'claude-3-5-haiku-20241022', max_tokens: 4096, messages: [{ role: 'user', content: fullPrompt }] });
+manualText = message.content[0].text;
+usedAI = true;
+console.log('Anthropic API success.');
+} catch (aiErr) {
+console.error('Anthropic failed, using template:', aiErr.message);
+manualText = generateTemplateManual(plcContent, brand, filename);
+}
+} else {
+console.log('No valid Anthropic key - template generation.');
+manualText = generateTemplateManual(plcContent, brand, filename);
+}
+
+const codeRefPercentage = calculateCodeReferencePercentage(plcContent, manualText);
+const pdfBuffer = await generatePDF(manualText, brand, codeRefPercentage);
+res.set({
+'Content-Type': 'application/pdf',
+'Content-Disposition': 'attachment; filename="matrix-manual-report.pdf"',
+'Content-Length': pdfBuffer.length,
+'X-Manual-Mode': usedAI ? 'ai-generated' : 'template-generated',
+});
+res.send(pdfBuffer);
+} catch (err) {
+console.error('Manual generation error:', err);
+res.status(500).json({ error: err.message, stack: err.stack });
+}
 });
 
 app.post('/webhook', async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-    try {
-        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-        return res.status(400).send('Webhook signature verification failed');
-    }
-    switch (event.type) {
-        case 'checkout.session.completed': console.log('Payment completed:', event.data.object.customer_email); break;
-        case 'customer.subscription.created': console.log('Subscription created:', event.data.object); break;
-        case 'customer.subscription.deleted': console.log('Subscription cancelled:', event.data.object); break;
-        case 'invoice.payment_failed': console.log('Payment failed:', event.data.object.customer_email); break;
-        default: console.log('Unhandled event:', event.type);
-    }
-    res.json({ received: true });
+const sig = req.headers['stripe-signature'];
+let event;
+try {
+event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+} catch (err) {
+return res.status(400).send('Webhook signature verification failed');
+}
+switch (event.type) {
+case 'checkout.session.completed': console.log('Payment completed:', event.data.object.customer_email); break;
+case 'customer.subscription.created': console.log('Subscription created:', event.data.object); break;
+case 'customer.subscription.deleted': console.log('Subscription cancelled:', event.data.object); break;
+case 'invoice.payment_failed': console.log('Payment failed:', event.data.object.customer_email); break;
+default: console.log('Unhandled event:', event.type);
+}
+res.json({ received: true });
 });
 
 app.listen(PORT, () => console.log('ManualOS backend running on port ' + PORT));
