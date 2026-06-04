@@ -174,6 +174,9 @@ function generatePDF(manualText, brand, codeRefPercentage) {
 }
 
 app.post('/generate-manual', upload.single('file'), async (req, res) => {
+    // Extend socket timeout to prevent Railway proxy 60s timeout
+    if (req.socket) req.socket.setTimeout(0);
+    res.setTimeout(0);
     try {
         let plcContent = '';
         const brand = (req.body && req.body.brand) || '';
@@ -228,7 +231,7 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
             try {
                 console.log('Calling Anthropic API...');
                 const prompt = 'You are an expert industrial automation engineer. Generate a comprehensive operator manual for the following PLC program.\n\nBrand/Manufacturer: ' + (brand||'Unknown') + '\nSections: ' + (sections.join(', ')||'All standard') + '\n\nPLC Content:\n' + plcContent + '\n\nGenerate a professional operator manual with safety warnings and operational procedures.';
-                const message = await anthropic.messages.create({ model: 'claude-opus-4-5', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] });
+                const message = await anthropic.messages.create({ model: 'claude-3-5-haiku-20241022', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] });
                 manualText = message.content[0].text;
                 usedAI = true;
                 console.log('Anthropic API success.');
