@@ -373,19 +373,25 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
         const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
         if (xmlFromGzip && xmlFromGzip.includes('<')) {
           plcContent = xmlFromGzip;
-          // If no Routine tags were found in GZIP, note that in the content
-          if (!xmlFromGzip.includes('<Routine') && !xmlFromGzip.includes('Routine Name=')) {
-            plcContent += '\n<!-- ACD_NOTE: This .ACD file stores ladder logic in a proprietary binary format. Routine names and rung content cannot be extracted without Rockwell Studio 5000. To generate a full report with routine details, export the file as L5X: File > Save As > L5X Export in Studio 5000. -->';
-            console.log('ACD: no Routine XML in GZIP blocks — noting binary format limitation');
+          // Add note if no Routine XML was found
+          if (!xmlFromGzip.includes('<Routine')) {
+            const ctrlName = (xmlFromGzip.match(/Name="([^"]+)"/) || [])[1] || filename.replace(/\.ACD$/i, '');
+            // Build minimal XML to get controller name + empty programs (no fake routines)
+            plcContent = '<RSLogix5000Content>\n<Controller Name="' + ctrlName + '">\n';
+            plcContent += '<Programs><Program Name="MainProgram"><Routines>\n';
+            plcContent += '<!-- ACD_BINARY_NO_ROUTINES -->\n';
+            plcContent += '</Routines></Program></Programs>\n</Controller>\n</RSLogix5000Content>\n';
+            console.log('ACD: GZIP XML found but no Routine elements — binary format limitation');
+          } else {
+            console.log('ACD: GZIP XML with Routine data, length:', plcContent.length);
           }
-          console.log('ACD: content length:', plcContent.length);
         } else {
-          // Extract what we can from the controller name in the file header
           const ctrlName = filename.replace(/\.ACD$/i, '');
-          plcContent = '<RSLogix5000Content>\n<Controller Name=\"' + ctrlName + '\">\n';
-          plcContent += '</Controller>\n</RSLogix5000Content>\n';
-          plcContent += '<!-- ACD_NOTE: This .ACD file stores ladder logic in a proprietary binary format. No XML content could be extracted. For full routine details, export as L5X from Studio 5000. -->';
-          console.log('ACD: no GZIP XML at all, minimal placeholder');
+          plcContent = '<RSLogix5000Content>\n<Controller Name="' + ctrlName + '">\n';
+          plcContent += '<Programs><Program Name="MainProgram"><Routines>\n';
+          plcContent += '<!-- ACD_BINARY_NO_ROUTINES -->\n';
+          plcContent += '</Routines></Program></Programs>\n</Controller>\n</RSLogix5000Content>\n';
+          console.log('ACD: no GZIP XML extracted at all');
         }
       } else if (ext === 'zip' || ext === 'zap15') {
         try {
@@ -475,18 +481,17 @@ app.post('/text-test', upload.single('file'), async (req, res) => {
       const ext = req.file.originalname.split('.').pop().toLowerCase();
       const buf = req.file.buffer;
       if (ext === 'l5x' || ext === 'xml') { plcContent = buf.toString('utf8'); }
-      else if (ext === 'acd') {
+    } else if (ext === 'acd') {
         const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
-        if (xmlFromGzip && xmlFromGzip.includes('<')) { plcContent = xmlFromGzip; }
-        else {
-          const binaryNames = extractRoutineNamesFromAcdBinary(buf);
-          const ctrlM = xmlFromGzip.match(/Name=\"([^\"]+)\"/);
-          const ctrlName = ctrlM ? ctrlM[1] : filename.replace(/\.ACD$/i, '');
-          plcContent = '<RSLogix5000Content>\n<Controller Name=\"' + ctrlName + '\">\n';
-          plcContent += '<Programs><Program Name=\"MainProgram\"><Routines>\n';
-          for (const name of binaryNames.slice(0, 30)) plcContent += '<Routine Name=\"' + name + '\" Type=\"Ladder\"/>\n';
-          plcContent += '</Routines></Program></Programs></Controller></RSLogix5000Content>\n';
+        if (xmlFromGzip && xmlFromGzip.includes('<Routine')) {
+          plcContent = xmlFromGzip;
+        } else if (xmlFromGzip && xmlFromGzip.includes('<')) {
+          const ctrlName = (xmlFromGzip.match(/Name="([^"]+)"/) || [])[1] || filename.replace(/\.ACD$/i, '');
+          plcContent = '<RSLogix5000Content><Controller Name="' + ctrlName + '"><Programs><Program Name="MainProgram"><Routines></Routines></Program></Programs></Controller></RSLogix5000Content>';
+        } else {
+          plcContent = '<RSLogix5000Content><Controller Name="' + filename.replace(/\.ACD$/i,'') + '"><Programs><Program Name="MainProgram"><Routines></Routines></Program></Programs></Controller></RSLogix5000Content>';
         }
+      }
       } else { plcContent = buf.toString('utf8'); }
     }
     const plcInfo = extractPlcInfo(plcContent);
