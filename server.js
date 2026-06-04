@@ -94,7 +94,7 @@ function summarizeRoutineTemplate(name, type, routineXml) {
   lines.push('###ROUTINE### ' + name);
   lines.push('####DETAIL#### Type: ' + (type || 'Ladder'));
   if (!routineXml || routineXml.length < 20) {
-    lines.push('####DETAIL#### Purpose: Empty or binary-only — no XML content');
+    lines.push('####DETAIL#### Purpose: Empty or binary-only â no XML content');
     lines.push('####DETAIL#### Summary: Routine exists in program. Export as L5X for details.');
     return lines.join('\n');
   }
@@ -128,8 +128,8 @@ function summarizeRoutineTemplate(name, type, routineXml) {
       const sfx = (comment && ri.size > 0) ? ' [' + Array.from(ri).join(',') + ']' : '';
       lines.push('>>Rung ' + rung.num + ': ' + desc + sfx);
     }
-  } else { lines.push('####DETAIL#### No ladder rungs — may be ST/FBD or empty'); }
-  lines.push('####DETAIL#### Summary: ' + name + ' (' + (type||'Ladder') + ') — ' + rungBlocks.length + ' rung(s).' + (il.length>0?' Uses: '+il.slice(0,5).join(',')+'.':'') + (tagSet.size>0?' Controls: '+Array.from(tagSet).slice(0,4).join(',')+'.':''));
+  } else { lines.push('####DETAIL#### No ladder rungs â may be ST/FBD or empty'); }
+  lines.push('####DETAIL#### Summary: ' + [name + ' is a ' + (type||'Ladder') + ' routine containing ' + rungBlocks.length + ' rung(s).', pp.length>0?'It performs: '+pp.join(', ')+'.':'', tagSet.size>0?'Key tags: '+Array.from(tagSet).slice(0,5).join(', ')+'.':'', il.length>0?'Main instructions: '+il.slice(0,6).map(x=>instrDesc(x)).join(', ')+'.':''].filter(Boolean).join(' '));
   return lines.join('\n');
 }
 function generatePDF(manualText, brand, codeRefPercentage) {
@@ -161,7 +161,7 @@ function generatePDF(manualText, brand, codeRefPercentage) {
       if (t === '') { doc.moveDown(0.3); continue; }
       if (t.startsWith('##SECTION##')) { const title = t.slice(11).trim(); doc.moveDown(0.6); doc.moveTo(marginL,doc.y).lineTo(pageW-marginL,doc.y).lineWidth(1.5).strokeColor('#1a1a2e').stroke(); doc.moveDown(0.25); doc.fontSize(12).font('Helvetica-Bold').fillColor('#1a1a2e').text(title); doc.moveTo(marginL,doc.y).lineTo(pageW-marginL,doc.y).lineWidth(0.5).strokeColor('#aaa').stroke(); doc.moveDown(0.3); doc.fontSize(10).font('Helvetica').fillColor('#222'); continue; }
       if (t.startsWith('###ROUTINE###')) { const rName = t.slice(13).trim(); doc.moveDown(0.5); const boxY = doc.y; doc.rect(marginL,boxY,contentW,22).fillColor('#e3f2fd').fill(); doc.rect(marginL,boxY,contentW,22).strokeColor('#90caf9').lineWidth(0.5).stroke(); doc.fontSize(11).font('Helvetica-Bold').fillColor('#0d47a1').text('Routine: '+rName,marginL+8,boxY+5,{width:contentW-16,lineBreak:false}); doc.y=boxY+28; doc.moveDown(0.2); doc.fontSize(10).font('Helvetica').fillColor('#222'); continue; }
-      if (t.startsWith('####DETAIL####')) { doc.fontSize(9).font('Helvetica').fillColor('#444').text(t.slice(14).trim(), marginL+14, doc.y, {width:contentW-14}); doc.fillColor('#222'); continue; }
+      if (t.startsWith('####DETAIL####')) { const detailText = t.slice(14).trim(); if (detailText.startsWith('Summary:')) { doc.moveDown(0.2); doc.fontSize(10).font('Helvetica-Bold').fillColor('#1a1a2e').text(detailText, marginL+14, doc.y, {width:contentW-14}); doc.moveDown(0.1); } else { doc.fontSize(9).font('Helvetica').fillColor('#444').text(detailText, marginL+14, doc.y, {width:contentW-14}); } doc.fillColor('#222'); continue; }
       if (t.startsWith('>>')) { doc.fontSize(9).font('Helvetica').fillColor('#333').text('\u2022 '+t.slice(2).trim(), marginL+28, doc.y, {width:contentW-28}); doc.fillColor('#222'); continue; }
       if (t.startsWith('>')) { doc.fontSize(10).font('Helvetica').fillColor('#222').text('\u2022 '+t.slice(1).trim(), marginL+14, doc.y, {width:contentW-14}); continue; }
       doc.fontSize(10).font('Helvetica').fillColor('#222').text(t, marginL, doc.y, {width:contentW});
@@ -199,7 +199,17 @@ function assembleManual(plcInfo, routineSummaries, brand, filename) {
     t += 'The L5X format is standard XML that contains all routine names, rung logic, tag references,\n';
     t += 'and rung comments \u2014 enabling complete rung-by-rung summaries in this report.\n\n';
   } else {
-    t += 'Each routine has been read and analyzed separately. Summaries are below.\n\n';
+    t += '##SECTION## ROUTINE SUMMARY OVERVIEW\n';
+    for (const s of routineSummaries) {
+      const nameMatch = s.match(/###ROUTINE###\s+(.+)/);
+      const summaryMatch = s.match(/####DETAIL####\s+Summary:\s+(.+)/);
+      const purposeMatch = s.match(/####DETAIL####\s+Purpose:\s+(.+)/);
+      const rName = nameMatch ? nameMatch[1].trim() : 'Unknown';
+      const rSummary = summaryMatch ? summaryMatch[1].trim() : (purposeMatch ? purposeMatch[1].trim() : 'See detailed section below.');
+      t += '>' + rName + ': ' + rSummary + '\n';
+    }
+    t += '\n';
+    t += 'Each routine has been read and analyzed separately. Detailed breakdowns are below.\n\n';
     for (const s of routineSummaries) t += s + '\n\n';
   }
   if (plcInfo.modules.length) { t += '##SECTION## 6. I/O MODULES\n'; for (const m of plcInfo.modules) t += '>'+m.name+(m.catalog?'  ('+m.catalog+')':'')+'\n'; t += '\n'; }
@@ -234,7 +244,7 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
         plcContent = buf.toString('utf8');
         console.log('L5X/XML, length:', plcContent.length);
       } else if (ext === 'acd') {
-        console.log('ACD binary — scanning GZIP blocks...');
+        console.log('ACD binary â scanning GZIP blocks...');
         const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
         if (xmlFromGzip && xmlFromGzip.includes('<Routine')) {
           plcContent = xmlFromGzip;
@@ -243,7 +253,7 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
           const ctrlMatch = xmlFromGzip ? xmlFromGzip.match(/Name="([^"]+)"/) : null;
           const ctrlName = ctrlMatch ? ctrlMatch[1] : filename.replace(/\.ACD$/i,'');
           plcContent = '<RSLogix5000Content><Controller Name="'+ctrlName+'"><Programs><Program Name="MainProgram"><Routines></Routines></Program></Programs></Controller></RSLogix5000Content>';
-          console.log('ACD: no Routine XML found — binary format limitation');
+          console.log('ACD: no Routine XML found â binary format limitation');
         }
       } else if (ext === 'zip' || ext === 'zap15') {
         try {
