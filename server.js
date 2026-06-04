@@ -11,279 +11,251 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Only init Anthropic if key is valid (not placeholder from .env.example)
+const _apiKey = process.env.ANTHROPIC_API_KEY || '';
+const _hasValidKey = _apiKey && _apiKey !== 'sk-ant-...' && _apiKey.startsWith('sk-ant-api');
+const anthropic = _hasValidKey ? new Anthropic({ apiKey: _apiKey }) : null;
 
-// Stripe webhook needs raw body
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
 
-// Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'manualos-backend' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: _hasValidKey }));
 
-// Create Stripe Checkout Session
 app.post('/create-checkout-session', async (req, res) => {
     try {
-          const { email } = req.body;
-          const session = await stripe.checkout.sessions.create({
-                  payment_method_types: ['card'],
-                  mode: 'subscription',
-                  line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
-                  customer_email: email,
-                  success_url: process.env.FRONTEND_URL + '/success?session_id={CHECKOUT_SESSION_ID}',
-                  cancel_url: process.env.FRONTEND_URL + '/cancel',
-          });
-          res.json({ url: session.url });
+        const { email } = req.body;
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            mode: 'subscription',
+            line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+            customer_email: email,
+            success_url: process.env.FRONTEND_URL + '/success?session_id={CHECKOUT_SESSION_ID}',
+            cancel_url: process.env.FRONTEND_URL + '/cancel',
+        });
+        res.json({ url: session.url });
     } catch (err) {
-          console.error('Checkout error:', err);
-          res.status(500).json({ error: err.message });
+        console.error('Checkout error:', err);
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Verify session after payment
 app.get('/verify-session', async (req, res) => {
     try {
-          const { session_id } = req.query;
-          const session = await stripe.checkout.sessions.retrieve(session_id, {
-                  expand: ['subscription', 'customer'],
-          });
-          res.json({
-                  paid: session.payment_status === 'paid',
-                  customer: session.customer_details,
-                  subscription: session.subscription,
-          });
+        const { session_id } = req.query;
+        const session = await stripe.checkout.sessions.retrieve(session_id, { expand: ['subscription', 'customer'] });
+        res.json({ paid: session.payment_status === 'paid', customer: session.customer_details, subscription: session.subscription });
     } catch (err) {
-          res.status(500).json({ error: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Helper: calculate code reference percentage
-// Counts how many distinct PLC identifiers/keywords from plcContent appear in the generated manual
 function calculateCodeReferencePercentage(plcContent, manualText) {
     if (!plcContent || !manualText) return 0;
-
-  // Extract meaningful tokens from PLC content (variable names, function names, labels)
-  const tokenRegex = /\b([A-Za-z_][A-Za-z0-9_]{2,})\b/g;
+    const tokenRegex = /\b([A-Za-z_][A-Za-z0-9_]{2,})\b/g;
     const plcTokens = new Set();
     let match;
     while ((match = tokenRegex.exec(plcContent)) !== null) {
-          const token = match[1].toLowerCase();
-          // Skip very common programming keywords
-      const skip = new Set(['var', 'end', 'for', 'the', 'and', 'not', 'int', 'bool', 'true', 'false', 'then', 'else', 'begin', 'function', 'program', 'type', 'struct', 'array', 'real', 'word', 'byte', 'string']);
-          if (!skip.has(token)) {
-                  plcTokens.add(token);
-          }
+        const token = match[1].toLowerCase();
+        const skip = new Set(['var','end','for','the','and','not','int','bool','true','false','then','else','begin','function','program','type','struct','array','real','word','byte','string']);
+        if (!skip.has(token)) plcTokens.add(token);
     }
-
-  if (plcTokens.size === 0) return 0;
-
-  const manualLower = manualText.toLowerCase();
+    if (plcTokens.size === 0) return 0;
+    const manualLower = manualText.toLowerCase();
     let referenced = 0;
-    for (const token of plcTokens) {
-          if (manualLower.includes(token)) {
-                  referenced++;
-          }
-    }
-
-  const percentage = Math.round((referenced / plcTokens.size) * 100);
-    return Math.min(percentage, 100);
+    for (const token of plcTokens) { if (manualLower.includes(token)) referenced++; }
+    return Math.min(Math.round((referenced / plcTokens.size) * 100), 100);
 }
 
-// Helper: generate PDF buffer from manual text + metadata
+function extractPlcInfo(xml) {
+    const info = { controller:'', programs:[], tasks:[], routines:[], tags:[], modules:[] };
+    const ctrlM = xml.match(/<Controller[^>]*Name="([^"]+)"/i);
+    if (ctrlM) info.controller = ctrlM[1];
+    for (const m of xml.matchAll(/<Task[^>]*Name="([^"]+)"[^>]*(?:Period="([^"]*)")?[^>]*(?:Priority="([^"]*)")?/gi)) info.tasks.push({name:m[1],period:m[2]||'',priority:m[3]||''});
+    for (const m of xml.matchAll(/<Program[^>]*Name="([^"]+)"/gi)) { if (!info.programs.includes(m[1])) info.programs.push(m[1]); }
+    for (const m of xml.matchAll(/<Routine[^>]*Name="([^"]+)"[^>]*(?:Type="([^"]*)")?/gi)) info.routines.push({name:m[1],type:m[2]||'Ladder'});
+    let tc=0; for (const m of xml.matchAll(/<Tag[^>]*Name="([^"]+)"[^>]*DataType="([^"]+)"[^>]*(?:Description="([^"]*)")?/gi)) { if(tc++>=50)break; info.tags.push({name:m[1],type:m[2],desc:m[3]||''}); }
+    for (const m of xml.matchAll(/<Module[^>]*Name="([^"]+)"[^>]*(?:CatalogNumber="([^"]*)")?/gi)) info.modules.push({name:m[1],catalog:m[2]||''});
+    return info;
+}
+
+function generateTemplateManual(plcContent, brand, filename) {
+    const info = extractPlcInfo(plcContent);
+    const ctrl = info.controller || filename || 'PLC System';
+    const br = brand || 'Unknown';
+    const date = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+    let t = 'OPERATOR MANUAL\n' + ctrl + '\n' + br + ' PLC System\nGenerated by ManualOS | ' + date + '\n\n';
+    t += '================================================================================\n1. SYSTEM OVERVIEW\n================================================================================\n\n';
+    t += 'This manual covers the ' + ctrl + ' PLC system manufactured by ' + br + '.\n';
+    t += 'File: ' + (filename||'N/A') + ' | Programs: ' + (info.programs.join(', ')||'N/A') + '\n\n';
+    t += '================================================================================\n2. SAFETY WARNINGS\n================================================================================\n\n';
+    t += 'WARNING: De-energize and LOTO all power before any maintenance work.\n';
+    t += 'DANGER: High voltage present - only qualified personnel may work on this system.\n';
+    t += 'CAUTION: Verify safe state before making program changes or forcing I/O.\n\n';
+    if (info.tasks.length) {
+        t += '================================================================================\n3. TASKS\n================================================================================\n';
+        for (const k of info.tasks) t += 'Task: ' + k.name + (k.period?' Period:'+k.period+'ms':'') + (k.priority?' Priority:'+k.priority:'') + '\n';
+        t += '\n';
+    }
+    if (info.programs.length) {
+        t += '================================================================================\n4. PROGRAMS\n================================================================================\n';
+        for (const p of info.programs) t += '  - ' + p + '\n';
+        t += '\n';
+    }
+    if (info.routines.length) {
+        t += '================================================================================\n5. ROUTINES\n================================================================================\n';
+        for (const r of info.routines) t += '  - ' + r.name + ' (' + r.type + ')\n';
+        t += '\n';
+    }
+    if (info.modules.length) {
+        t += '================================================================================\n6. MODULES\n================================================================================\n';
+        for (const m of info.modules) t += '  ' + m.name + (m.catalog?' ('+m.catalog+')':'') + '\n';
+        t += '\n';
+    }
+    if (info.tags.length) {
+        t += '================================================================================\n7. TAG REFERENCE\n================================================================================\n';
+        for (const g of info.tags) t += '  ' + g.name + ' (' + g.type + ')' + (g.desc?' - '+g.desc:'') + '\n';
+        t += '\n';
+    }
+    t += '================================================================================\n8. OPERATING PROCEDURES\n================================================================================\n\n';
+    t += 'STARTUP:\n1. Verify safety interlocks functional\n2. Check I/O connections\n3. Power on, verify RUN indicator\n4. Clear all faults\n5. Enable outputs via operator interface\n\n';
+    t += 'NORMAL OPERATION:\n- Monitor system via HMI\n- Respond to alarms promptly\n- Log unusual behavior\n\n';
+    t += 'SHUTDOWN:\n1. Initiate controlled shutdown via operator interface\n2. Verify outputs de-energized\n3. Apply LOTO before maintenance\n\n';
+    t += '================================================================================\n9. TROUBLESHOOTING\n================================================================================\n\n';
+    t += 'CONTROLLER FAULT: Check fault code, review recent changes, verify I/O comms\n';
+    t += 'I/O COMM ERROR: Check cables, power supplies, node addresses\n';
+    t += 'LOGIC ERROR: Review ladder logic, check tag values online, verify sensors\n\n';
+    t += '================================================================================\n10. MAINTENANCE SCHEDULE\n================================================================================\n\n';
+    t += 'DAILY: Check status LEDs, review alarm history\n';
+    t += 'WEEKLY: Inspect connections, backup program to maintenance folder\n';
+    t += 'MONTHLY: Clean panel (LOTO), check battery backup\n';
+    t += 'ANNUALLY: Full functional test, calibration verification, update documentation\n\n';
+    t += 'Generated by ManualOS AI Manual Generator.\n';
+    return t;
+}
+
 function generatePDF(manualText, brand, codeRefPercentage) {
     return new Promise((resolve, reject) => {
-          const doc = new PDFDocument({ margin: 50 });
-          const buffers = [];
-
-                           doc.on('data', (chunk) => buffers.push(chunk));
-          doc.on('end', () => resolve(Buffer.concat(buffers)));
-          doc.on('error', reject);
-
-                           // --- Header ---
-                           doc.fontSize(20).font('Helvetica-Bold').text('ManualOS', { align: 'center' });
-          doc.fontSize(14).font('Helvetica').text('AI-Generated Operator Manual', { align: 'center' });
-          doc.moveDown(0.5);
-
-                           if (brand) {
-                                   doc.fontSize(12).text(`Brand / Manufacturer: ${brand}`, { align: 'center' });
-                           }
-
-                           doc.moveDown(0.5);
-
-                           // --- Code Reference Scale ---
-                           const barWidth = 400;
-          const barHeight = 18;
-          const barX = (doc.page.width - barWidth) / 2;
-          const barY = doc.y;
-
-                           // Label
-                           doc.fontSize(11).font('Helvetica-Bold').text('Code Coverage Referenced in This Report:', barX, barY, { lineBreak: false });
-          doc.moveDown(0.3);
-
-                           const labelY = doc.y;
-
-                           // Background bar (grey)
-                           doc.rect(barX, labelY, barWidth, barHeight).fillAndStroke('#e0e0e0', '#aaaaaa');
-
-                           // Filled bar (green gradient approximation)
-                           const fillWidth = Math.round((codeRefPercentage / 100) * barWidth);
-          if (fillWidth > 0) {
-                  doc.rect(barX, labelY, fillWidth, barHeight).fillAndStroke('#2ecc71', '#27ae60');
-          }
-
-                           // Percentage text centered on bar
-                           doc.fontSize(10).font('Helvetica-Bold').fillColor('#000000')
-            .text(`${codeRefPercentage}%`, barX, labelY + 4, { width: barWidth, align: 'center', lineBreak: false });
-
-                           doc.moveDown(0.2);
-          doc.y = labelY + barHeight + 8;
-
-                           // Scale labels: 0% ... 50% ... 100%
-                           doc.fontSize(8).font('Helvetica').fillColor('#555555')
-            .text('0%', barX, doc.y, { lineBreak: false })
-            .text('50%', barX + barWidth / 2 - 10, doc.y, { lineBreak: false })
-            .text('100%', barX + barWidth - 22, doc.y);
-
-                           doc.moveDown(1);
-          doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke('#cccccc');
-          doc.moveDown(1);
-
-                           // --- Manual Content ---
-                           doc.fontSize(11).font('Helvetica').fillColor('#000000');
-          const lines = manualText.split('\n');
-          for (const line of lines) {
-                  const trimmed = line.trim();
-                  if (trimmed.startsWith('#')) {
-                            // Markdown-style headings
-                    const level = (trimmed.match(/^#+/) || [''])[0].length;
-                            const headingText = trimmed.replace(/^#+\s*/, '');
-                            const fontSize = level === 1 ? 16 : level === 2 ? 13 : 11;
-                            doc.moveDown(0.5);
-                            doc.fontSize(fontSize).font('Helvetica-Bold').text(headingText);
-                            doc.font('Helvetica').fontSize(11);
-                  } else if (trimmed === '') {
-                            doc.moveDown(0.4);
-                  } else {
-                            doc.text(line);
-                  }
-          }
-
-                           // Footer
-                           doc.moveDown(2);
-          doc.fontSize(8).fillColor('#888888').text(
-                  `Generated by ManualOS | ${new Date().toLocaleDateString()}`,
-            { align: 'center' }
-                );
-
-                           doc.end();
+        const doc = new PDFDocument({ margin: 50 });
+        const buffers = [];
+        doc.on('data', (chunk) => buffers.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(buffers)));
+        doc.on('error', reject);
+        doc.fontSize(20).font('Helvetica-Bold').text('ManualOS', { align: 'center' });
+        doc.fontSize(14).font('Helvetica').text('AI-Generated Operator Manual', { align: 'center' });
+        doc.moveDown(0.5);
+        if (brand) doc.fontSize(12).text('Brand / Manufacturer: ' + brand, { align: 'center' });
+        doc.moveDown(0.5);
+        const barWidth = 400, barHeight = 18;
+        const barX = (doc.page.width - barWidth) / 2;
+        const barY = doc.y;
+        doc.fontSize(11).font('Helvetica-Bold').text('Code Coverage Referenced in This Report:', barX, barY, { lineBreak: false });
+        doc.moveDown(1.5);
+        const filledWidth = Math.round((codeRefPercentage / 100) * barWidth);
+        const barStartY = doc.y;
+        doc.rect(barX, barStartY, barWidth, barHeight).fillColor('#e0e0e0').fill();
+        if (filledWidth > 0) doc.rect(barX, barStartY, filledWidth, barHeight).fillColor('#4CAF50').fill();
+        doc.rect(barX, barStartY, barWidth, barHeight).strokeColor('#999').stroke();
+        doc.fillColor('black').fontSize(10).font('Helvetica-Bold').text(codeRefPercentage + '%', barX + barWidth + 10, barStartY + 3, { lineBreak: false });
+        doc.moveDown(2);
+        doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+        doc.moveDown(1);
+        doc.fillColor('black').fontSize(10).font('Helvetica');
+        const lines = manualText.split('\n');
+        for (const line of lines) {
+            if (line.startsWith('=====')) { doc.moveDown(0.3); doc.moveTo(50,doc.y).lineTo(doc.page.width-50,doc.y).strokeColor('#ccc').stroke(); doc.moveDown(0.3); }
+            else if (line.match(/^\d+\. [A-Z]/) || line.match(/^[A-Z ]{5,}:?\s*$/)) { doc.fontSize(12).font('Helvetica-Bold').text(line); doc.fontSize(10).font('Helvetica'); }
+            else if (line.startsWith('  -') || line.startsWith('  *')) doc.text(line, { indent: 20 });
+            else if (line.trim() === '') doc.moveDown(0.4);
+            else doc.text(line);
+        }
+        doc.end();
     });
 }
 
-// Generate manual via Claude - returns PDF
 app.post('/generate-manual', upload.single('file'), async (req, res) => {
-        try {
-                    let plcContent = '';
-                    const brand = (req.body && req.body.brand) || '';
-                    const sections = (req.body && req.body.sections) ? JSON.parse(req.body.sections) : [];
-
-                    if (req.file) {
-                                    // Handle binary file upload (ACD, L5X, ZIP, etc.)
-                                    const fileExt = req.file.originalname.split('.').pop().toLowerCase();
-                                    if (fileExt === 'acd' || fileExt === 'zip' || fileExt === 'zap15') {
-                                                        // ACD files are ZIP archives - extract XML content
-                                                        try {
-                                                                                const zip = new AdmZip(req.file.buffer);
-                                                                                const zipEntries = zip.getEntries();
-                                                                                const xmlEntries = zipEntries.filter(e => e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
-                                                                                if (xmlEntries.length > 0) {
-                                                                                                            // Use the largest XML file (likely the main program)
-                                                                                                            xmlEntries.sort((a, b) => b.header.size - a.header.size);
-                                                                                                            plcContent = zip.readAsText(xmlEntries[0]);
-                                                                                                            // Truncate if too large for Claude
-                                                                                                            if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated for processing]';
-                                                                                    } else {
-                                                                                                            // No XML found, use raw text representation
-                                                                                                            plcContent = `[ACD Binary File: ${req.file.originalname} - ${req.file.size} bytes. No XML content found in archive.]`;
-                                                                                    }
-                                                        } catch (zipErr) {
-                                                                                console.error('ZIP extraction error:', zipErr);
-                                                                                plcContent = `[File: ${req.file.originalname} - Could not extract content: ${zipErr.message}]`;
-                                                        }
-                                    } else {
-                                                        // Text-based file (L5X, XML, etc.) - read as UTF-8
-                                                        plcContent = req.file.buffer.toString('utf8');
-                                                        if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated for processing]';
-                                    }
-                    } else if (req.body && req.body.plcContent) {
-                                    // Fallback: JSON body with plcContent
-                                    plcContent = req.body.plcContent;
+    try {
+        let plcContent = '';
+        const brand = (req.body && req.body.brand) || '';
+        const sections = (req.body && req.body.sections) ? JSON.parse(req.body.sections) : [];
+        const filename = req.file ? req.file.originalname : 'unknown.acd';
+        if (req.file) {
+            const fileExt = req.file.originalname.split('.').pop().toLowerCase();
+            if (fileExt === 'acd' || fileExt === 'zip' || fileExt === 'zap15') {
+                try {
+                    const zip = new AdmZip(req.file.buffer);
+                    const zipEntries = zip.getEntries();
+                    const xmlEntries = zipEntries.filter(e => e.entryName.endsWith('.xml') || e.entryName.endsWith('.L5X') || e.entryName.endsWith('.l5x'));
+                    if (xmlEntries.length > 0) {
+                        xmlEntries.sort((a, b) => b.header.size - a.header.size);
+                        plcContent = zip.readAsText(xmlEntries[0]);
+                        if (plcContent.length > 200000) plcContent = plcContent.substring(0, 200000) + '\n... [truncated]';
+                    } else {
+                        plcContent = 'ACD Binary File: ' + req.file.originalname + ' - ' + req.file.size + ' bytes. Entries: ' + zipEntries.map(e=>e.entryName).join(', ');
                     }
+                } catch (zipErr) {
+                    console.error('ZIP error:', zipErr);
+                    plcContent = '[File: ' + req.file.originalname + '] - Extract error: ' + zipErr.message;
+                }
+            } else {
+                plcContent = req.file.buffer.toString('utf8');
+            }
+        } else if (req.body && req.body.plcContent) {
+            plcContent = req.body.plcContent;
+        }
+        if (!plcContent) return res.status(400).json({ error: 'No file or plcContent provided' });
 
-                    if (!plcContent) return res.status(400).json({ error: 'No file or plcContent provided' });
-      const prompt = `You are an expert industrial automation engineer. Generate a comprehensive operator manual for the following PLC program.
+        let manualText = '';
+        let usedAI = false;
 
-      Brand/Manufacturer: ${brand || 'Unknown'}
-      Sections requested: ${sections ? sections.join(', ') : 'All standard sections'}
+        if (_hasValidKey && anthropic) {
+            try {
+                console.log('Calling Anthropic API...');
+                const prompt = 'You are an expert industrial automation engineer. Generate a comprehensive operator manual for the following PLC program.\n\nBrand/Manufacturer: ' + (brand||'Unknown') + '\nSections: ' + (sections.join(', ')||'All standard') + '\n\nPLC Content:\n' + plcContent + '\n\nGenerate a professional operator manual with safety warnings and operational procedures.';
+                const message = await anthropic.messages.create({ model: 'claude-opus-4-5', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] });
+                manualText = message.content[0].text;
+                usedAI = true;
+                console.log('Anthropic API success.');
+            } catch (aiErr) {
+                console.error('Anthropic failed, using template:', aiErr.message);
+                manualText = generateTemplateManual(plcContent, brand, filename);
+            }
+        } else {
+            console.log('No valid Anthropic key - template generation.');
+            manualText = generateTemplateManual(plcContent, brand, filename);
+        }
 
-      PLC Program Content:
-      ${plcContent}
-
-      Generate a professional, detailed operator manual with clear sections, safety warnings, and operational procedures.`;
-
-      const message = await anthropic.messages.create({
-              model: 'claude-opus-4-5',
-              max_tokens: 4096,
-              messages: [{ role: 'user', content: prompt }],
-      });
-
-      const manualText = message.content[0].text;
-
-      // Calculate how much of the PLC code was referenced in the manual
-      const codeRefPercentage = calculateCodeReferencePercentage(plcContent, manualText);
-
-      // Generate PDF with code reference scale at the top
-      const pdfBuffer = await generatePDF(manualText, brand, codeRefPercentage);
-
-      res.set({
-              'Content-Type': 'application/pdf',
-              'Content-Disposition': 'attachment; filename="matrix-manual-report.pdf"',
-              'Content-Length': pdfBuffer.length,
-      });
-          res.send(pdfBuffer);
+        const codeRefPercentage = calculateCodeReferencePercentage(plcContent, manualText);
+        const pdfBuffer = await generatePDF(manualText, brand, codeRefPercentage);
+        res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': 'attachment; filename="matrix-manual-report.pdf"',
+            'Content-Length': pdfBuffer.length,
+            'X-Manual-Mode': usedAI ? 'ai-generated' : 'template-generated',
+        });
+        res.send(pdfBuffer);
     } catch (err) {
-          console.error('Manual generation error:', err);
-          res.status(500).json({ error: err.message });
+        console.error('Manual generation error:', err);
+        res.status(500).json({ error: err.message, stack: err.stack });
     }
 });
 
-// Stripe Webhook
 app.post('/webhook', async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let event;
     try {
-          event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     } catch (err) {
-          return res.status(400).send('Webhook signature verification failed');
+        return res.status(400).send('Webhook signature verification failed');
     }
-
-           switch (event.type) {
-             case 'checkout.session.completed':
-                     console.log('ManualOS - Payment completed:', event.data.object.customer_email);
-                     break;
-             case 'customer.subscription.created':
-                     console.log('ManualOS - Subscription created:', event.data.object);
-                     break;
-             case 'customer.subscription.deleted':
-                     console.log('ManualOS - Subscription cancelled:', event.data.object);
-                     break;
-             case 'invoice.payment_failed':
-                     console.log('ManualOS - Payment failed:', event.data.object.customer_email);
-                     break;
-             default:
-                     console.log('Unhandled event:', event.type);
-           }
-
-           res.json({ received: true });
+    switch (event.type) {
+        case 'checkout.session.completed': console.log('Payment completed:', event.data.object.customer_email); break;
+        case 'customer.subscription.created': console.log('Subscription created:', event.data.object); break;
+        case 'customer.subscription.deleted': console.log('Subscription cancelled:', event.data.object); break;
+        case 'invoice.payment_failed': console.log('Payment failed:', event.data.object.customer_email); break;
+        default: console.log('Unhandled event:', event.type);
+    }
+    res.json({ received: true });
 });
 
 app.listen(PORT, () => console.log('ManualOS backend running on port ' + PORT));
