@@ -136,282 +136,225 @@ function generateTemplateManual(plcContent, brand, filename) {
 
 function generatePDF(manualText, brand, codeRefPercentage) {
   return new Promise((resolve, reject) => {
-    // Colors
-    const C = { primary: '#1a3a5c', accent: '#e8f4f8', gold: '#c8a500', warn: '#d44000', danger: '#b00000', caution: '#e67e00', body: '#222', light: '#f7f9fb', border: '#c5d5e0', white: '#ffffff', muted: '#5a6a7a' };
-    const doc = new PDFDocument({ margin: 0, size: 'LETTER', info: { Title: 'PLC Operator Manual', Author: 'ManualOS', Creator: 'ManualForge AI' } });
-    const buffers = [];
-    doc.on('data', chunk => buffers.push(chunk));
-    doc.on('end', () => resolve(Buffer.concat(buffers)));
+    var CPRIMARY = [26, 58, 92];
+    var CACCENT = [232, 244, 248];
+    var CGOLD = [200, 165, 0];
+    var CWARN = [212, 68, 0];
+    var CDANGER = [176, 0, 0];
+    var CCAUTION = [230, 126, 0];
+    var CBODY = [34, 34, 34];
+    var CLIGHT = [247, 249, 251];
+    var CBORDER = [197, 213, 224];
+    var CWHITE = [255, 255, 255];
+    var CMUTED = [90, 106, 122];
+    var CWARNBG = [255, 244, 239];
+    var CDANGERBG = [255, 240, 240];
+    var CCAUTIONBG = [255, 250, 240];
+    var doc = new PDFDocument({ margin: 0, size: 'LETTER', info: { Title: 'PLC Operator Manual', Author: 'ManualOS' } });
+    var buffers = [];
+    doc.on('data', function(chunk) { buffers.push(chunk); });
+    doc.on('end', function() { resolve(Buffer.concat(buffers)); });
     doc.on('error', reject);
-
-    const W = doc.page.width;
-    const H = doc.page.height;
-    const ML = 54, MR = 54, MT = 50;
-    const CW = W - ML - MR;
-
-    // ---- HELPER FUNCTIONS ----
-    function hexToRgb(hex) {
-      const r = parseInt(hex.slice(1,3),16);
-      const g = parseInt(hex.slice(3,5),16);
-      const b = parseInt(hex.slice(5,7),16);
-      return [r, g, b];
-    }
-    function setFill(hex) { const [r,g,b]=hexToRgb(hex); doc.fillColor([r,g,b]); }
-    function setStroke(hex) { const [r,g,b]=hexToRgb(hex); doc.strokeColor([r,g,b]); }
-
+    var W = doc.page.width;
+    var H = doc.page.height;
+    var ML = 54, MR = 54, MT = 50;
+    var CW = W - ML - MR;
+    var pageNum = 1;
+    var currentSection = 'Overview';
     function drawPageHeader(title) {
-      doc.rect(0, 0, W, 38).fill(hexToRgb(C.primary));
-      doc.fillColor(hexToRgb(C.white)).fontSize(9).font('Helvetica-Bold').text('MANUALOS', ML, 13, { width: CW/2 });
-      doc.fillColor(hexToRgb(C.white)).fontSize(9).font('Helvetica').text(title, ML + CW/2, 13, { width: CW/2, align: 'right' });
+      doc.rect(0, 0, W, 38).fill(CPRIMARY);
+      doc.fillColor(CWHITE).fontSize(9).font('Helvetica-Bold').text('MANUALOS', ML, 13, { width: CW/2 });
+      doc.fillColor(CWHITE).fontSize(9).font('Helvetica').text(title, ML + CW/2, 13, { width: CW/2, align: 'right' });
     }
-
-    function drawPageFooter(pageNum) {
-      const y = H - 30;
-      doc.moveTo(ML, y - 4).lineTo(W - MR, y - 4).stroke(hexToRgb(C.border));
-      doc.fillColor(hexToRgb(C.muted)).fontSize(8).font('Helvetica').text('ManualOS AI-Generated Documentation - For reference only. Verify all safety-critical information.', ML, y, { width: CW - 60 });
-      doc.fillColor(hexToRgb(C.muted)).fontSize(8).text('Page ' + pageNum, ML, y, { width: CW, align: 'right' });
+    function drawPageFooter(pn) {
+      var fy = H - 30;
+      doc.moveTo(ML, fy - 4).lineTo(W - MR, fy - 4).strokeColor(CBORDER).stroke();
+      doc.fillColor(CMUTED).fontSize(8).font('Helvetica').text('ManualOS AI-Generated Documentation - For reference only.', ML, fy, { width: CW - 60 });
+      doc.fillColor(CMUTED).fontSize(8).text('Page ' + pn, ML, fy, { width: CW, align: 'right' });
     }
-
-    function sectionHeader(label, y, color) {
-      color = color || C.primary;
-      doc.rect(ML, y, CW, 26).fill(hexToRgb(color));
-      doc.fillColor(hexToRgb(C.white)).fontSize(12).font('Helvetica-Bold').text(label, ML + 12, y + 7, { width: CW - 20 });
-      return y + 30;
+    function sectionHeader(label, sy, isRed) {
+      var hc = isRed ? CDANGER : CPRIMARY;
+      doc.rect(ML, sy, CW, 26).fill(hc);
+      doc.fillColor(CWHITE).fontSize(12).font('Helvetica-Bold').text(label, ML + 12, sy + 7, { width: CW - 20 });
+      return sy + 30;
     }
-
     function checkY(y, needed) {
-      needed = needed || 60;
-      if (y + needed > H - 50) {
+      if (y + (needed || 60) > H - 50) {
         doc.addPage();
+        pageNum++;
         drawPageHeader(currentSection);
-        drawPageFooter(++pageNum);
+        drawPageFooter(pageNum);
         return MT + 40;
       }
       return y;
     }
-
-    function infoBox(x, y, w, h, bg, border) {
-      doc.rect(x, y, w, h).fill(hexToRgb(bg || C.accent));
-      if (border) { doc.rect(x, y, w, h).stroke(hexToRgb(border)); }
-      return y;
-    }
-
     function warningBox(type, text, y) {
-      const colors = { WARNING: [C.warn, '#fff4ef'], DANGER: [C.danger, '#fff0f0'], CAUTION: [C.caution, '#fffaf0'], NOTE: [C.primary, C.accent] };
-      const [bc, bg] = colors[type] || colors.NOTE;
-      const lineH = 14;
-      const lines = text.match(/.{1,85}/g) || [text];
-      const bh = 10 + lines.length * lineH + 6;
+      var bc = type === 'DANGER' ? CDANGER : type === 'WARNING' ? CWARN : type === 'CAUTION' ? CCAUTION : CPRIMARY;
+      var bg = type === 'DANGER' ? CDANGERBG : type === 'WARNING' ? CWARNBG : type === 'CAUTION' ? CCAUTIONBG : CACCENT;
+      var approxLines = Math.ceil(text.length / 85) || 1;
+      var bh = 10 + approxLines * 14 + 6;
       y = checkY(y, bh + 8);
-      doc.rect(ML, y, 4, bh).fill(hexToRgb(bc));
-      doc.rect(ML + 4, y, CW - 4, bh).fill(hexToRgb(bg));
-      doc.rect(ML + 4, y, CW - 4, bh).stroke(hexToRgb(bc));
-      doc.fillColor(hexToRgb(bc)).fontSize(8).font('Helvetica-Bold').text(type + ':', ML + 14, y + 7);
-      doc.fillColor(hexToRgb(C.body)).fontSize(9.5).font('Helvetica').text(text, ML + 14 + 52, y + 7, { width: CW - 70 });
+      doc.rect(ML, y, 4, bh).fill(bc);
+      doc.rect(ML + 4, y, CW - 4, bh).fill(bg);
+      doc.rect(ML + 4, y, CW - 4, bh).strokeColor(bc).stroke();
+      doc.fillColor(bc).fontSize(8).font('Helvetica-Bold').text(type + ':', ML + 14, y + 7);
+      doc.fillColor(CBODY).fontSize(9.5).font('Helvetica').text(text, ML + 66, y + 7, { width: CW - 70 });
       return y + bh + 6;
     }
-
     function tableHeader(cols, widths, y) {
       y = checkY(y, 30);
-      doc.rect(ML, y, CW, 22).fill(hexToRgb(C.primary));
-      let x = ML + 6;
-      cols.forEach((col, i) => {
-        doc.fillColor(hexToRgb(C.white)).fontSize(9).font('Helvetica-Bold').text(col, x, y + 6, { width: widths[i] - 4, lineBreak: false });
-        x += widths[i];
+      doc.rect(ML, y, CW, 22).fill(CPRIMARY);
+      var tx = ML + 6;
+      cols.forEach(function(col, i) {
+        doc.fillColor(CWHITE).fontSize(9).font('Helvetica-Bold').text(col, tx, y + 6, { width: widths[i] - 4, lineBreak: false });
+        tx += widths[i];
       });
       return y + 22;
     }
-
     function tableRow(cells, widths, y, isEven) {
-      const rh = 18;
+      var rh = 18;
       y = checkY(y, rh);
-      doc.rect(ML, y, CW, rh).fill(hexToRgb(isEven ? C.accent : C.white));
-      doc.rect(ML, y, CW, rh).stroke(hexToRgb(C.border));
-      let x = ML + 6;
-      cells.forEach((cell, i) => {
-        doc.fillColor(hexToRgb(C.body)).fontSize(8.5).font('Helvetica').text(String(cell||'').substring(0,60), x, y + 4, { width: widths[i] - 8, lineBreak: false });
-        x += widths[i];
+      doc.rect(ML, y, CW, rh).fill(isEven ? CACCENT : CWHITE);
+      doc.rect(ML, y, CW, rh).strokeColor(CBORDER).stroke();
+      var tx = ML + 6;
+      cells.forEach(function(cell, i) {
+        doc.fillColor(CBODY).fontSize(8.5).font('Helvetica').text(String(cell||'').substring(0, 60), tx, y + 4, { width: widths[i] - 8, lineBreak: false });
+        tx += widths[i];
       });
       return y + rh;
     }
-
-    // ---- PARSE MANUAL TEXT INTO SECTIONS ----
-    const lines = manualText.split('\n');
-    let pageNum = 1;
-    let currentSection = 'Overview';
-
-    // Extract title info from first lines
-    const titleLine = lines[0] || 'OPERATOR MANUAL';
-    const controllerLine = lines[1] || '';
-    const brandLine = lines[2] || brand || '';
-
-    // =========================================
-    // PAGE 1: COVER
-    // =========================================
-    // Top dark band
-    doc.rect(0, 0, W, 220).fill(hexToRgb(C.primary));
-    // Gold accent line
-    doc.rect(0, 220, W, 5).fill(hexToRgb(C.gold));
-    // White content area
-    doc.rect(0, 225, W, H - 225).fill(hexToRgb(C.white));
-
-    // Cover logo area
-    doc.fillColor(hexToRgb(C.white)).fontSize(36).font('Helvetica-Bold').text('MANUALOS', 0, 55, { align: 'center', width: W });
-    doc.fillColor(hexToRgb(C.gold)).fontSize(13).font('Helvetica').text('AI-POWERED DOCUMENTATION', 0, 96, { align: 'center', width: W });
-
-    // Horizontal divider in header
-    doc.moveTo(ML, 124).lineTo(W - MR, 124).strokeColor(hexToRgb(C.gold)).lineWidth(0.5).stroke();
-
-    // Document type
-    doc.fillColor(hexToRgb(C.white)).fontSize(10).font('Helvetica').text('OPERATOR MANUAL', 0, 135, { align: 'center', width: W });
-
-    // Equipment details box
-    const bx = ML + 20, bw = CW - 40, by = 250;
-    doc.rect(bx, by, bw, 130).fill(hexToRgb(C.light));
-    doc.rect(bx, by, bw, 130).stroke(hexToRgb(C.border));
-    doc.rect(bx, by, 4, 130).fill(hexToRgb(C.primary));
-
-    // Controller / system name
-    const sysName = controllerLine || (lines.find(l => l.match(/controller|system|plc/i)) || controllerLine || 'PLC SYSTEM');
-    doc.fillColor(hexToRgb(C.muted)).fontSize(9).font('Helvetica').text('SYSTEM / CONTROLLER', bx + 20, by + 18);
-    doc.fillColor(hexToRgb(C.primary)).fontSize(18).font('Helvetica-Bold').text(sysName.substring(0, 50), bx + 20, by + 32, { width: bw - 40 });
-    doc.fillColor(hexToRgb(C.muted)).fontSize(9).font('Helvetica').text('MANUFACTURER', bx + 20, by + 70);
-    doc.fillColor(hexToRgb(C.body)).fontSize(12).font('Helvetica-Bold').text(brandLine || brand || 'N/A', bx + 20, by + 83);
-    doc.fillColor(hexToRgb(C.muted)).fontSize(9).font('Helvetica').text('DATE GENERATED', bx + 20, by + 105);
-    doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}), bx + 20, by + 118);
-
-    // Code reference percentage badge
+    var lines = manualText.split('\n');
+    var controllerLine = lines[1] || '';
+    var brandLine = lines[2] || brand || '';
+    doc.rect(0, 0, W, 220).fill(CPRIMARY);
+    doc.rect(0, 220, W, 5).fill(CGOLD);
+    doc.rect(0, 225, W, H - 225).fill(CWHITE);
+    doc.fillColor(CWHITE).fontSize(36).font('Helvetica-Bold').text('MANUALOS', 0, 55, { align: 'center', width: W });
+    doc.fillColor(CGOLD).fontSize(13).font('Helvetica').text('AI-POWERED DOCUMENTATION', 0, 96, { align: 'center', width: W });
+    doc.moveTo(ML, 124).lineTo(W - MR, 124).strokeColor(CGOLD).lineWidth(0.5).stroke();
+    doc.fillColor(CWHITE).fontSize(10).font('Helvetica').text('OPERATOR MANUAL', 0, 135, { align: 'center', width: W });
+    var bx = ML + 20, bw = CW - 40, by = 250;
+    doc.rect(bx, by, bw, 130).fill(CLIGHT);
+    doc.rect(bx, by, bw, 130).strokeColor(CBORDER).stroke();
+    doc.rect(bx, by, 4, 130).fill(CPRIMARY);
+    doc.fillColor(CMUTED).fontSize(9).font('Helvetica').text('SYSTEM / CONTROLLER', bx + 20, by + 18);
+    doc.fillColor(CPRIMARY).fontSize(18).font('Helvetica-Bold').text((controllerLine || 'PLC SYSTEM').substring(0, 50), bx + 20, by + 32, { width: bw - 40 });
+    doc.fillColor(CMUTED).fontSize(9).font('Helvetica').text('MANUFACTURER', bx + 20, by + 70);
+    doc.fillColor(CBODY).fontSize(12).font('Helvetica-Bold').text(brandLine || brand || 'N/A', bx + 20, by + 83);
+    doc.fillColor(CMUTED).fontSize(9).font('Helvetica').text('DATE GENERATED', bx + 20, by + 105);
+    doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), bx + 20, by + 118);
     if (codeRefPercentage > 0) {
-      const bpx = W - MR - 100, bpy = by + 25;
-      doc.rect(bpx, bpy, 80, 80).fill(hexToRgb(C.primary));
-      doc.fillColor(hexToRgb(C.white)).fontSize(26).font('Helvetica-Bold').text(codeRefPercentage+'%', bpx, bpy + 14, { width: 80, align: 'center' });
-      doc.fillColor(hexToRgb(C.gold)).fontSize(7).font('Helvetica').text('CODE REFERENCE', bpx, bpy + 50, { width: 80, align: 'center' });
-      doc.fillColor(hexToRgb(C.gold)).fontSize(7).font('Helvetica').text('COVERAGE', bpx, bpy + 60, { width: 80, align: 'center' });
+      var bpx = W - MR - 100, bpy = by + 25;
+      doc.rect(bpx, bpy, 80, 80).fill(CPRIMARY);
+      doc.fillColor(CWHITE).fontSize(26).font('Helvetica-Bold').text(codeRefPercentage + '%', bpx, bpy + 14, { width: 80, align: 'center' });
+      doc.fillColor(CGOLD).fontSize(7).font('Helvetica').text('CODE REFERENCE', bpx, bpy + 50, { width: 80, align: 'center' });
+      doc.fillColor(CGOLD).fontSize(7).font('Helvetica').text('COVERAGE', bpx, bpy + 60, { width: 80, align: 'center' });
     }
-
-    // Footer notice on cover
-    doc.fillColor(hexToRgb(C.muted)).fontSize(8).font('Helvetica-Oblique').text('This document was generated by ManualOS AI. Verify all safety-critical information against official documentation before use.', ML, H - 60, { width: CW, align: 'center' });
-
-    // =========================================
-    // PAGE 2+: CONTENT
-    // =========================================
+    doc.fillColor(CMUTED).fontSize(8).font('Helvetica-Oblique').text('This document was generated by ManualOS AI. Verify all safety-critical information before use.', ML, H - 60, { width: CW, align: 'center' });
     doc.addPage();
-    pageNum++;
+    pageNum = 2;
     currentSection = 'Overview';
     drawPageHeader(currentSection);
     drawPageFooter(pageNum);
-
-    let y = MT + 45;
-
-    // Parse sections from manual text
-    let inSection = '';
-    let sectionBuf = [];
-    const sections = [];
-
-    for (let i = 4; i < lines.length; i++) {
-      const line = lines[i];
-      const isSep = line.startsWith('===') || line.startsWith('---');
-      const isHdr = line.match(/^[0-9]+.[s]/);
-      if (isSep && i + 1 < lines.length && lines[i+1].match(/^[0-9]+./)) continue;
+    var y = MT + 45;
+    var inSection = '';
+    var sectionBuf = [];
+    var sections = [];
+    for (var i = 4; i < lines.length; i++) {
+      var line = lines[i];
+      var isSep = line.indexOf('===') === 0 || line.indexOf('---') === 0;
+      var isHdr = /^[0-9]+[.] /.test(line);
+      if (isSep && i + 1 < lines.length && /^[0-9]+[.]/.test(lines[i + 1])) continue;
       if (isHdr || (isSep && sectionBuf.length > 0)) {
         if (inSection) sections.push({ title: inSection, lines: sectionBuf });
-        inSection = line.replace(/^[0-9]+.s+/, '').replace(/=+/g,'').trim();
+        inSection = line.replace(/^[0-9]+[.] +/, '').replace(/=+/g, '').trim();
         sectionBuf = [];
       } else {
         sectionBuf.push(line);
       }
     }
     if (inSection) sections.push({ title: inSection, lines: sectionBuf });
-
-    // If no structured sections found, fall back to raw text rendering
     if (sections.length === 0) {
-      for (let i = 4; i < lines.length; i++) {
-        sectionBuf.push(lines[i]);
-      }
-      sections.push({ title: 'Manual Content', lines: sectionBuf });
+      var fallback = [];
+      for (var j = 4; j < lines.length; j++) fallback.push(lines[j]);
+      sections.push({ title: 'Manual Content', lines: fallback });
     }
-
-    // Render each section
-    for (const sec of sections) {
+    for (var s = 0; s < sections.length; s++) {
+      var sec = sections[s];
       y = checkY(y, 60);
       currentSection = sec.title;
-
-      // Detect section type for styling
-      const isSafety = /safety|warning|danger|hazard/i.test(sec.title);
-      const isTag = /tag|reference/i.test(sec.title);
-      const isTask = /task/i.test(sec.title);
-      const isModule = /module|hardware/i.test(sec.title);
-      const isRoutine = /routine/i.test(sec.title);
-      const isProgram = /program/i.test(sec.title);
-      const isOp = /operat/i.test(sec.title);
-
-      const hColor = isSafety ? C.danger : C.primary;
-      y = sectionHeader(sec.title.toUpperCase(), y, hColor);
+      var isSafety = /safety|warning|danger|hazard/i.test(sec.title);
+      var isTag = /tag|reference/i.test(sec.title);
+      var isTask = /task/i.test(sec.title);
+      var isModule = /module|hardware/i.test(sec.title);
+      var isRoutine = /routine/i.test(sec.title);
+      var isProgram = /program/i.test(sec.title);
+      y = sectionHeader(sec.title.toUpperCase(), y, isSafety);
       y += 6;
-
-      // Detect and render table-like sections
-      if (isTag && sec.lines.some(l => l.match(/(BOOL|DINT|REAL|INT|UDINT|STRING/))) {
-        // Tag table
-        const widths = [200, 80, CW - 280];
-        y = tableHeader(['Tag Name', 'Data Type', 'Description'], widths, y);
-        let rowN = 0;
-        for (const l of sec.lines) {
-          const m = l.match(/([w.]+)s*(([w]+))(s*-s*(.*))?/);
-          if (m) { y = tableRow([m[1], m[2], m[4]||''], widths, y, rowN % 2 === 0); rowN++; }
+      var hasTypes = sec.lines.some(function(l) {
+        return l.indexOf('(BOOL') >= 0 || l.indexOf('(DINT') >= 0 || l.indexOf('(REAL') >= 0 || l.indexOf('(INT') >= 0 || l.indexOf('(STRING') >= 0;
+      });
+      if (isTag && hasTypes) {
+        var tw = [200, 80, CW - 280];
+        y = tableHeader(['Tag Name', 'Data Type', 'Description'], tw, y);
+        var rn = 0;
+        for (var ti = 0; ti < sec.lines.length; ti++) {
+          var tl = sec.lines[ti];
+          var tm = tl.match(/([\w.]+)\s*\(([\w]+)\)(?:\s*-\s*(.*))?/);
+          if (tm) { y = tableRow([tm[1], tm[2], tm[3] || ''], tw, y, rn % 2 === 0); rn++; }
         }
-      } else if ((isTask || isModule || isRoutine || isProgram) && sec.lines.some(l => l.match(/^s*[-*]|^Task:|^w/))) {
-        // Two-column list table
-        const widths = [CW/2, CW/2];
-        y = tableHeader(['Name', 'Details'], widths, y);
-        let rowN = 0;
-        for (const l of sec.lines) {
-          const clean = l.replace(/^s*[-*]s*/, '').trim();
+      } else if (isTask || isModule || isRoutine || isProgram) {
+        var tw2 = [CW / 2, CW / 2];
+        y = tableHeader(['Name', 'Details'], tw2, y);
+        var rn2 = 0;
+        for (var li = 0; li < sec.lines.length; li++) {
+          var clean = sec.lines[li].replace(/^\s*[-*]\s*/, '').trim();
           if (!clean) continue;
-          const parts = clean.split(/:s*|s{2,}/);
-          y = tableRow([parts[0]||'', parts.slice(1).join(' ')||''], widths, y, rowN % 2 === 0);
-          rowN++;
+          var parts = clean.split(/:\s*|\s{2,}/);
+          y = tableRow([parts[0] || '', parts.slice(1).join(' ') || ''], tw2, y, rn2 % 2 === 0);
+          rn2++;
         }
       } else if (isSafety) {
-        // Safety section: parse warning/danger/caution lines specially
-        for (const l of sec.lines) {
-          if (!l.trim()) { y += 4; continue; }
+        for (var si = 0; si < sec.lines.length; si++) {
+          var sl = sec.lines[si];
+          if (!sl.trim()) { y += 4; continue; }
           y = checkY(y, 30);
-          if (/^WARNING:/i.test(l)) { y = warningBox('WARNING', l.replace(/^WARNING:s*/i,''), y); }
-          else if (/^DANGER:/i.test(l)) { y = warningBox('DANGER', l.replace(/^DANGER:s*/i,''), y); }
-          else if (/^CAUTION:/i.test(l)) { y = warningBox('CAUTION', l.replace(/^CAUTION:s*/i,''), y); }
-          else if (/^NOTE:/i.test(l)) { y = warningBox('NOTE', l.replace(/^NOTE:s*/i,''), y); }
+          if (/^WARNING:/i.test(sl)) { y = warningBox('WARNING', sl.replace(/^WARNING:\s*/i, ''), y); }
+          else if (/^DANGER:/i.test(sl)) { y = warningBox('DANGER', sl.replace(/^DANGER:\s*/i, ''), y); }
+          else if (/^CAUTION:/i.test(sl)) { y = warningBox('CAUTION', sl.replace(/^CAUTION:\s*/i, ''), y); }
+          else if (/^NOTE:/i.test(sl)) { y = warningBox('NOTE', sl.replace(/^NOTE:\s*/i, ''), y); }
           else {
-            doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l, ML, y, { width: CW, lineGap: 2 });
-            y += doc.heightOfString(l, { width: CW }) + 4;
+            doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(sl, ML, y, { width: CW, lineGap: 2 });
+            y += doc.heightOfString(sl, { width: CW }) + 4;
           }
         }
       } else {
-        // General prose content
-        for (const l of sec.lines) {
+        for (var gi = 0; gi < sec.lines.length; gi++) {
+          var gl = sec.lines[gi];
           y = checkY(y, 16);
-          if (!l.trim()) { y += 5; continue; }
-          const isBullet = /^s*[-*]/.test(l);
-          const isSubHdr = l.match(/^[A-Z][A-Zs]{4,}:/) || l.match(/^[A-Zs]{5,}$/);
+          if (!gl.trim()) { y += 5; continue; }
+          var isBullet = /^\s*[-*]/.test(gl);
+          var isSubHdr = /^[A-Z][A-Z ]{4,}:/.test(gl) || /^[A-Z ]{5,}$/.test(gl);
           if (isSubHdr) {
             y += 4;
-            doc.fillColor(hexToRgb(C.primary)).fontSize(10).font('Helvetica-Bold').text(l.trim(), ML, y, { width: CW });
+            doc.fillColor(CPRIMARY).fontSize(10).font('Helvetica-Bold').text(gl.trim(), ML, y, { width: CW });
             y += 14;
           } else if (isBullet) {
-            doc.fillColor(hexToRgb(C.primary)).text('\u2022', ML + 8, y, { width: 14, lineBreak: false });
-            doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l.replace(/^s*[-*]s*/,'').trim(), ML + 22, y, { width: CW - 22, lineGap: 2 });
-            y += doc.heightOfString(l, { width: CW - 22 }) + 3;
+            doc.fillColor(CPRIMARY).fontSize(10).font('Helvetica').text('*', ML + 8, y, { width: 14, lineBreak: false });
+            doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(gl.replace(/^\s*[-*]\s*/, '').trim(), ML + 22, y, { width: CW - 22, lineGap: 2 });
+            y += doc.heightOfString(gl, { width: CW - 22 }) + 3;
           } else {
-            doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l, ML, y, { width: CW, lineGap: 2 });
-            y += doc.heightOfString(l, { width: CW }) + 3;
+            doc.fillColor(CBODY).fontSize(10).font('Helvetica').text(gl, ML, y, { width: CW, lineGap: 2 });
+            y += doc.heightOfString(gl, { width: CW }) + 3;
           }
         }
       }
       y += 14;
     }
-
     doc.end();
   });
 }
+
 app.post('/generate-manual', upload.single('file'), async (req, res) => {
     // Extend socket timeout to prevent Railway proxy 60s timeout
     if (req.socket) req.socket.setTimeout(0);
