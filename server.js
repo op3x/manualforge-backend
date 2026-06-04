@@ -71,18 +71,49 @@ async function extractXmlFromAcdBuffer(buffer) {
 }
 
 function extractRoutineNamesFromAcdBinary(buffer) {
-  const text = buffer.toString('latin1');
+  // The ACD binary contains an object index with entries like:
+  // "RxRoutine\0\0...\0\0\0<count>\0...RxRoutineCollection..."
+  // Real routine names in ACD appear as strings that:
+  // 1. Are embedded between null bytes in the binary (typical for binary DB formats)
+  // 2. Follow PLC naming conventions (CamelCase or underscore-separated)
+  // 3. Are NOT common English words from the header log
+  
+  // Strategy: scan for null-delimited strings of 4-40 chars that look like PLC routine names
+  const buf = buffer;
   const names = new Set();
-  const pat = /[A-Z][A-Z0-9_]{2,29}/g;
-  const blacklist = new Set(['RSLogix','Studio','Version','Object','System','False','True',
-    'File','Creation','Saved','WARNING','ALTER','NULL','BOOL','DINT','REAL','STRING',
-    'INT','SINT','LINT','USINT','UINT','ULINT','LREAL','BYTE','WORD','DWORD','LWORD']);
-  let m;
-  while ((m = pat.exec(text)) !== null) {
-    if (!blacklist.has(m[0]) && m[0].length >= 3 && m[0].length <= 30) names.add(m[0]);
+  
+  // Look for strings surrounded by null bytes (binary DB format)
+  let i = 0;
+  while (i < buf.length - 4) {
+    // Find null byte
+    if (buf[i] === 0) {
+      i++;
+      // Collect printable chars
+      let start = i;
+      while (i < buf.length && buf[i] >= 0x20 && buf[i] <= 0x7E) i++;
+      const str = buf.slice(start, i).toString('ascii');
+      // Next byte should be null or end of range
+      if (i < buf.length && (buf[i] === 0 || buf[i] < 0x20)) {
+        // Filter: PLC routine names are typically 4-30 chars, alphanumeric+underscore,
+        // start with a letter, contain at least one non-uppercase letter OR an underscore
+        // (to filter out all-caps abbreviations from the header)
+        if (str.length >= 4 && str.length <= 30 &&
+            /^[A-Za-z][A-Za-z0-9_]+$/.test(str) &&
+            (str.includes('_') || /[a-z]/.test(str)) &&
+            !str.match(/^(This|File|Version|Warning|Saved|Creation|System|Object|Type|Data|Base|Info|True|False)$/i)) {
+          names.add(str);
+        }
+      }
+    } else {
+      i++;
+    }
   }
-  return Array.from(names).slice(0, 40);
+  
+  const result = Array.from(names);
+  console.log('ACD binary routine candidates:', result.slice(0, 20).join(', '));
+  return result.slice(0, 40);
 }
+
 
 function calculateCodeReferencePercentage(plcContent, manualText) {
   if (!plcContent || !manualText) return 0;
