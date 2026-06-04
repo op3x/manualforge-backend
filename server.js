@@ -168,7 +168,7 @@ function generatePDF(manualText, brand, codeRefPercentage) {
     function drawPageFooter(pageNum) {
       const y = H - 30;
       doc.moveTo(ML, y - 4).lineTo(W - MR, y - 4).stroke(hexToRgb(C.border));
-      doc.fillColor(hexToRgb(C.muted)).fontSize(8).font('Helvetica')'ManualOS AI-Generated Documentation (.text For reference only. Verify all safety-critical information.', ML, y, { width: CW - 60 });
+      doc.fillColor(hexToRgb(C.muted)).fontSize(8).font('Helvetica').text('ManualOS AI-Generated Documentation - For reference only. Verify all safety-critical information.', ML, y, { width: CW - 60 });
       doc.fillColor(hexToRgb(C.muted)).fontSize(8).text('Page ' + pageNum, ML, y, { width: CW, align: 'right' });
     }
 
@@ -397,7 +397,7 @@ function generatePDF(manualText, brand, codeRefPercentage) {
             doc.fillColor(hexToRgb(C.primary)).fontSize(10).font('Helvetica-Bold').text(l.trim(), ML, y, { width: CW });
             y += 14;
           } else if (isBullet) {
-            doc.fillColor(hexToRgb(C.primary)).text('•', ML + 8, y, { width: 14, lineBreak: false });
+            doc.fillColor(hexToRgb(C.primary)).text('\u2022', ML + 8, y, { width: 14, lineBreak: false });
             doc.fillColor(hexToRgb(C.body)).fontSize(10).font('Helvetica').text(l.replace(/^s*[-*]s*/,'').trim(), ML + 22, y, { width: CW - 22, lineGap: 2 });
             y += doc.heightOfString(l, { width: CW - 22 }) + 3;
           } else {
