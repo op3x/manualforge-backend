@@ -250,10 +250,15 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
           plcContent = xmlFromGzip;
           console.log('ACD: found Routine XML, length:', plcContent.length);
         } else {
-          const ctrlMatch = xmlFromGzip ? xmlFromGzip.match(/Name="([^"]+)"/) : null;
-          const ctrlName = ctrlMatch ? ctrlMatch[1] : filename.replace(/\.ACD$/i,'');
-          plcContent = '<RSLogix5000Content><Controller Name="'+ctrlName+'"><Programs><Program Name="MainProgram"><Routines></Routines></Program></Programs></Controller></RSLogix5000Content>';
-          console.log('ACD: no Routine XML found â binary format limitation');
+        const ctrlMatch = xmlFromGzip ? xmlFromGzip.match(/Name="([^"]+)"/) : null;
+        const ctrlName = ctrlMatch ? ctrlMatch[1] : filename.replace(/\.ACD$/i,'');
+        const routineNameSet = new Set();
+        if (xmlFromGzip) { for (const rm2 of xmlFromGzip.matchAll(/(?:MainRoutineName|FaultRoutineName|EventRoutineName)="([^"]+)"/gi)) routineNameSet.add(rm2[1]); }
+        let routinesXml = '';
+        for (const rn of routineNameSet) routinesXml += '<Routine Name="'+rn+'" Type="RLL"/>';
+        if (!routinesXml) routinesXml = '<Routine Name="MainRoutine" Type="RLL"/>';
+        plcContent = '<RSLogix5000Content><Controller Name="'+ctrlName+'"><Programs><Program Name="MainProgram"><Routines>'+routinesXml+'</Routines></Program></Programs></Controller></RSLogix5000Content>';
+        console.log('ACD: built skeleton with', routineNameSet.size||1, 'routines');
         }
       } else if (ext === 'zip' || ext === 'zap15') {
         try {
@@ -272,12 +277,16 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
     console.log('Routines:', plcInfo.routines.length, 'Blocks:', Object.keys(routineBlocks).length);
     const routineSummaries = [];
     let usedAI = false;
+    const isAcdFile = req.file && req.file.originalname.toLowerCase().endsWith('.acd');
     if (_hasValidKey && anthropic) {
       for (const r of plcInfo.routines) {
         const xmlBlock = routineBlocks[r.name] || '';
-        const noXml = !xmlBlock || xmlBlock.length < 20;
+        const hasRealContent = xmlBlock.length > 50 && (xmlBlock.includes('<Rung') || xmlBlock.includes('<Text>') || xmlBlock.includes('Operand='));
+        const noXml = !hasRealContent;
         const truncBlock = xmlBlock.length > 8000 ? xmlBlock.substring(0,8000)+'\n...[truncated]' : xmlBlock;
-        const routinePrompt = 'You are an industrial automation engineer writing an operator manual.\n' + 'Produce a structured routine summary using ONLY these prefixes (no other formatting):\n' + '  ###ROUTINE### name\n  ####DETAIL#### text\n  >>Rung N: description\n\n' + 'Format:\n###ROUTINE### '+r.name+'\n####DETAIL#### Type: '+(r.type||'Ladder')+'\n####DETAIL#### Purpose: <overall purpose>\n####DETAIL#### Rung-by-rung functions:\n>>Rung 0: <describe>\n(one >>Rung line per rung)\n####DETAIL#### Key tags: <tags>\n####DETAIL#### Summary: <2-3 sentences>\n\n' + 'NO markdown, NO asterisks, NO bullets except >>\n\n' + 'Routine: '+r.name+'  Type: '+(r.type||'Ladder')+'\n' + (noXml ? 'NOTE: No XML available. Infer from routine name only based on common PLC patterns.' : 'XML:\n'+truncBlock);
+        const isAcdRoutine = isAcdFile && !hasRealContent;
+        const acdNote = isAcdRoutine ? 'NOTE: This is from an ACD binary file. Only the routine name and type are available (no ladder logic rungs). Infer the purpose entirely from the routine name and common PLC patterns.\n' : '';
+        const routinePrompt = 'You are an industrial automation engineer writing an operator manual.\n' + 'Produce a structured routine summary using ONLY these prefixes (no other formatting):\n' + '  ###ROUTINE### name\n  ####DETAIL#### text\n  >>Rung N: description\n\n' + 'Format:\n###ROUTINE### '+r.name+'\n####DETAIL#### Type: '+(r.type||'Ladder')+'\n####DETAIL#### Purpose: <overall purpose>\n####DETAIL#### Rung-by-rung functions:\n>>Rung 0: <describe>\n(one >>Rung line per rung)\n####DETAIL#### Key tags: <tags>\n####DETAIL#### Summary: <2-3 sentences>\n\n' + 'NO markdown, NO asterisks, NO bullets except >>\n\n' + 'Routine: '+r.name+'  Type: '+(r.type||'Ladder')+'\n' + (noXml ? acdNote + 'NOTE: No XML available. Infer from routine name only based on common PLC patterns.' : 'XML:\n'+truncBlock);
         try {
           const msg = await anthropic.messages.create({ model: 'claude-3-5-haiku-20241022', max_tokens: 1200, messages: [{ role: 'user', content: routinePrompt }] });
           routineSummaries.push(msg.content[0].text.trim());
