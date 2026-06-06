@@ -34,21 +34,73 @@ app.get('/verify-session', async (req, res) => {
 function gunzipAsync(buf) {
   return new Promise((resolve) => { zlib.gunzip(buf, (err, result) => { resolve(err ? null : result); }); });
 }
+
+function extractRoutineNamesFromBinary(buffer) {
+  const names = new Set();
+  const raw = buffer.toString('latin1');
+  const patterns = [
+    /MainRoutineName="([^"]{1,40})"/g,
+    /FaultRoutineName="([^"]{1,40})"/g,
+    /EventRoutineName="([^"]{1,40})"/g,
+    /Routine Name="([^"]{1,40})"/g,
+    /<Routine[\s][^>]*Name="([^"]{1,40})"/g
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+      const name = m[1].trim();
+      if (name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) names.add(name);
+    }
+  }
+  const routineKw = Buffer.from('Routine', 'ascii');
+  for (let i = 0; i < buffer.length - 50; i++) {
+    if (buffer.slice(i, i + 7).equals(routineKw)) {
+      for (let j = i + 7; j < Math.min(i + 80, buffer.length); j++) {
+        const c = buffer[j];
+        if (c >= 65 && c <= 90 || c >= 97 && c <= 122 || c >= 48 && c <= 57 || c === 95) {
+          let end = j;
+          while (end < buffer.length && (buffer[end] >= 65 && buffer[end] <= 90 || buffer[end] >= 97 && buffer[end] <= 122 || buffer[end] >= 48 && buffer[end] <= 57 || buffer[end] === 95)) end++;
+          const name = buffer.slice(j, end).toString('ascii');
+          if (name.length >= 2 && name.length <= 40 && /^[A-Za-z_]/.test(name)) { names.add(name); }
+          break;
+        }
+        if (c < 32 && c !== 9 && c !== 10 && c !== 13) break;
+      }
+    }
+  }
+  return Array.from(names);
+}
 async function extractXmlFromAcdBuffer(buffer) {
   const allXml = [];
+  const xmlChunks = [];
   let i = 0;
+  let gzipCount = 0;
+  // Scan ALL gzip blocks in the file
   while (i < buffer.length - 2) {
     if (buffer[i] === 0x1F && buffer[i + 1] === 0x8B) {
-      const result = await gunzipAsync(buffer.slice(i));
-      if (result && result.length > 20) {
-        let text = result.toString('utf16le');
-        if (!text.includes('<')) text = result.toString('utf8');
-        if (text.includes('<') && text.length > 20) { allXml.push(text); console.log('ACD GZIP @' + i + ' -> ' + result.length + 'B'); }
-        i += Math.max(50, Math.floor(result.length / 4));
-      } else { i++; }
+      try {
+        const result = await gunzipAsync(buffer.slice(i));
+        if (result && result.length > 10) {
+          gzipCount++;
+          // Try both encodings
+          let text = result.toString('utf8');
+          if (!text.includes('<') && !text.includes('Routine')) {
+            text = result.toString('utf16le');
+          }
+          if (text.includes('<') && text.length > 20) {
+            allXml.push(text);
+            console.log('ACD GZIP #' + gzipCount + ' @' + i + ' -> ' + result.length + 'B has XML');
+          } else if (result.length > 20) {
+            xmlChunks.push(text);
+          }
+          i += Math.max(4, result.length >> 3);
+        } else { i++; }
+      } catch(e) { i++; }
     } else { i++; }
   }
-  return allXml.join('\n');
+  console.log('ACD: found ' + gzipCount + ' gzip blocks, ' + allXml.length + ' with XML');
+  const combined = allXml.join('\n') + '\n' + xmlChunks.join('\n');
+  return combined;
 }
 function calculateCodeReferencePercentage(plcContent, manualText) {
   if (!plcContent || !manualText) return 0;
@@ -255,11 +307,16 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
         const ctrlName = ctrlMatch ? ctrlMatch[1] : filename.replace(/\.ACD$/i,'');
         const routineNameSet = new Set();
         if (xmlFromGzip) { for (const rm2 of xmlFromGzip.matchAll(/(?:MainRoutineName|FaultRoutineName|EventRoutineName)="([^"]+)"/gi)) routineNameSet.add(rm2[1]); }
+        // Also scan raw binary for routine names
+        const binaryNames = extractRoutineNamesFromBinary(buf);
+        const JUNK = new Set(['Routine','Program','Controller','Task','Tag','Description','Type','Name','Value','Module','Connection','RLL','ST','FBD','SFC','Data']);
+        for (const bn of binaryNames) { if (!JUNK.has(bn)) routineNameSet.add(bn); }
+        console.log('ACD binary scan found', binaryNames.length, 'names, routineNameSet size:', routineNameSet.size);
         let routinesXml = '';
         for (const rn of routineNameSet) routinesXml += '<Routine Name="'+rn+'" Type="RLL"/>';
         if (!routinesXml) routinesXml = '<Routine Name="MainRoutine" Type="RLL"/>';
         plcContent = '<RSLogix5000Content><Controller Name="'+ctrlName+'"><Programs><Program Name="MainProgram"><Routines>'+routinesXml+'</Routines></Program></Programs></Controller></RSLogix5000Content>';
-        console.log('ACD: built skeleton with', routineNameSet.size||1, 'routines');
+        console.log('ACD: built skeleton with', routineNameSet.size||1, 'routines:', Array.from(routineNameSet).join(','));
         }
       } else if (ext === 'zip' || ext === 'zap15') {
         try {
@@ -276,6 +333,14 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
     const plcInfo = extractPlcInfo(plcContent);
     const routineBlocks = extractRoutineBlocks(plcContent);
     console.log('Routines:', plcInfo.routines.length, 'Blocks:', Object.keys(routineBlocks).length);
+      // ACD fallback: if no routines from XML, use binary scan
+      if (plcInfo.routines.length === 0 && req.file && req.file.originalname.toLowerCase().endsWith('.acd')) {
+        const fallbackNames = extractRoutineNamesFromBinary(buf);
+        const JUNK2 = new Set(['Routine','Program','Controller','Task','Tag','Description','Type','Name','Value','Module','Connection','RLL','ST','FBD','SFC','Data','RoutineType']);
+        const useNames = fallbackNames.filter(n => !JUNK2.has(n) && n.length >= 2 && n.length <= 40);
+        console.log('ACD binary fallback found', useNames.length, 'routine names:', useNames.slice(0,10).join(','));
+        for (const rn of (useNames.length > 0 ? useNames : ['MainRoutine'])) plcInfo.routines.push({ name: rn, type: 'Ladder' });
+      }
     const routineSummaries = [];
     let usedAI = false;
     const isAcdFile = req.file && req.file.originalname.toLowerCase().endsWith('.acd');
