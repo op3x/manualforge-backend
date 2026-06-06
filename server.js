@@ -93,8 +93,9 @@ function summarizeRoutineTemplate(name, type, routineXml) {
   const lines = [];
   lines.push('###ROUTINE### ' + name);
   lines.push('####DETAIL#### Type: ' + (type || 'Ladder'));
-  if (!routineXml || routineXml.length < 20) {
-    lines.push('####DETAIL#### Purpose: Empty or binary-only â no XML content');
+  const hasRLContent = routineXml && (routineXml.includes('<Rung') || routineXml.includes('<Text>') || routineXml.includes('<ST>'));
+  if (!routineXml || routineXml.length < 20 || !hasRLContent) {
+    lines.push('####DETAIL#### Purpose: ACD binary file - ladder logic stored in proprietary format. Routine purpose inferred from name.');
     lines.push('####DETAIL#### Summary: Routine exists in program. Export as L5X for details.');
     return lines.join('\n');
   }
@@ -246,7 +247,7 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
       } else if (ext === 'acd') {
         console.log('ACD binary â scanning GZIP blocks...');
         const xmlFromGzip = await extractXmlFromAcdBuffer(buf);
-        if (xmlFromGzip && xmlFromGzip.includes('<Routine')) {
+        if (xmlFromGzip && xmlFromGzip.match(/<Routine[\s][^>]*Name=/)) {
           plcContent = xmlFromGzip;
           console.log('ACD: found Routine XML, length:', plcContent.length);
         } else {
