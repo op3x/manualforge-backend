@@ -1,6 +1,6 @@
 {
   "created": "2026-10-24",
-  "purpose": "Small committed corpus so CI can run npm test without the private manualos-test-corpus store.",
+  "purpose": "Committed corpus so CI can run npm test without the private manualos-test-corpus store. files is the small set the corpus walk builds. supporting_files are the redistributable sources for the parser and quality tests that otherwise skip.",
   "count": 2,
   "files": [
     {
@@ -15,5 +15,16 @@
       "redistributable": true,
       "machine": "Conveyor pulley fixture"
     }
+  ],
+  "supporting_files": [
+    "plc/acd_ACDTestsWithAOI.L5X",
+    "plc/emulator_Plc_emulator.L5X",
+    "plc/brewery_Cooker_1_AutoLogic_Program.L5X",
+    "plc/acd_CuteLogix.ACD",
+    "plc/grfics_simplified_te_plcopen.xml",
+    "cad/cadzinho_title_a1.dxf",
+    "cad/nist_ftc_08_asme1_rc.stp",
+    "cad/freecadlib_NEMA23_stepper.step",
+    "cad/creator_transfer_chamber_COMPLETE_FRAME_ASY.stp"
   ]
 }
