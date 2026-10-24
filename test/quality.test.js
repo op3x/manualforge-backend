@@ -24,6 +24,11 @@ test('dictionary routine names and template headings are not rewritten', () => {
   assert.equal(replaced.includes('WT_Level'), false);
   assert.match(replaced, /level/i);
   assert.equal(/the device/i.test(sanitizeProse('Control logic description and the PLC', project)), false);
+  const coded = sanitizeProse('dew_rh and DEW_RH feed the room', {
+    tags: [],
+    routines: [{ name: 'DEW_RH' }],
+  });
+  assert.equal(/dew_rh/i.test(coded), false);
 });
 
 test('structured text keeps a less-than comparison', () => {
