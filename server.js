@@ -1,36 +1,82 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const Stripe = require('stripe');
 const Anthropic = require('@anthropic-ai/sdk');
 const PDFDocument = require('pdfkit');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
 const zlib = require('zlib');
+const {
+  allowedOrigins,
+  anthropicModel,
+  frontendConfigProblem,
+  isProduction,
+} = require('./lib/config');
+const {
+  assertCanGenerate,
+  checkoutParams,
+  isStripeNotFound,
+  publicAccess,
+  recordStarterManual,
+  verifyCheckoutSession,
+} = require('./lib/billing');
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
-const app = express();
-const PORT = process.env.PORT || 3001;
-const _apiKey = process.env.ANTHROPIC_API_KEY || '';
-const _hasValidKey = _apiKey && _apiKey !== 'sk-ant-...' && _apiKey.startsWith('sk-ant-api');
-const anthropic = _hasValidKey ? new Anthropic({ apiKey: _apiKey }) : null;
-app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json());
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: _hasValidKey }));
-app.post('/create-checkout-session', async (req, res) => {
-  try {
-    const { email } = req.body;
-    const session = await stripe.checkout.sessions.create({ payment_method_types: ['card'], mode: 'subscription', line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }], customer_email: email, success_url: process.env.FRONTEND_URL + '/success?session_id={CHECKOUT_SESSION_ID}', cancel_url: process.env.FRONTEND_URL + '/cancel' });
-    res.json({ url: session.url });
-  } catch (err) { console.error('Checkout error:', err); res.status(500).json({ error: err.message }); }
-});
-app.get('/verify-session', async (req, res) => {
-  try {
-    const { session_id } = req.query;
-    const session = await stripe.checkout.sessions.retrieve(session_id, { expand: ['subscription', 'customer'] });
-    res.json({ paid: session.payment_status === 'paid', customer: session.customer_details, subscription: session.subscription });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+
+function createStripe(env) {
+  const key = env.STRIPE_SECRET_KEY;
+  if (!key || !String(key).trim()) return null;
+  return new Stripe(String(key).trim());
+}
+
+function createAnthropic(env) {
+  const apiKey = String(env.ANTHROPIC_API_KEY || '');
+  const hasValidKey = apiKey && apiKey !== 'sk-ant-...' && apiKey.startsWith('sk-ant-');
+  return hasValidKey ? new Anthropic({ apiKey }) : null;
+}
+
+function sendError(res, err) {
+  if (err && err.expose) {
+    if (err.logMessage) console.error(err.logMessage);
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+  console.error(err && err.stack ? err.stack : err);
+  return res.status(500).json({ error: 'Internal server error' });
+}
+
+function readSessionId(req) {
+  const fromBody = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+  if (fromBody) return fromBody;
+  const header = req.get('x-session-id');
+  return typeof header === 'string' ? header.trim() : '';
+}
+
+function extractModelText(message) {
+  const blocks = message && Array.isArray(message.content) ? message.content : [];
+  return blocks
+    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
+}
+
+function anthropicBody(model, prompt) {
+  const body = {
+    model,
+    max_tokens: 4096,
+    messages: [{ role: 'user', content: prompt }],
+  };
+  // Haiku 5.5 thinks adaptively and counts thinking toward max_tokens.
+  // Routine summaries are high-volume, so keep them on low effort with thinking off.
+  if (String(model).startsWith('claude-haiku-5')) {
+    body.max_tokens = 2000;
+    body.thinking = { type: 'disabled' };
+    body.output_config = { effort: 'low' };
+  }
+  return body;
+}
+
 function gunzipAsync(buf) {
   return new Promise((resolve) => { zlib.gunzip(buf, (err, result) => { resolve(err ? null : result); }); });
 }
@@ -141,6 +187,8 @@ function instrDesc(mn) {
   const map = { XIC:'Examine If Closed', XIO:'Examine If Open', OTE:'Output Energize', OTL:'Output Latch', OTU:'Output Unlatch', TON:'Timer On-Delay', TOF:'Timer Off-Delay', RTO:'Retentive Timer', CTU:'Count Up', CTD:'Count Down', RES:'Reset', MOV:'Move value', COP:'Copy block', CLR:'Clear', ADD:'Add', SUB:'Subtract', MUL:'Multiply', DIV:'Divide', EQU:'Equal', NEQ:'Not Equal', GRT:'Greater Than', GEQ:'Greater/Equal', LES:'Less Than', LEQ:'Less/Equal', AND:'Bitwise AND', OR:'Bitwise OR', JSR:'Jump to Sub', RET:'Return', SBR:'Subroutine', AFI:'Always False', NOP:'No Op', MSG:'Message', GSV:'Get Sys Val', SSV:'Set Sys Val', FLL:'Fill', CMP:'Compare', CPT:'Compute', LIM:'Limit', PID:'PID', PIDE:'Enhanced PID', BTD:'Bit Distribute', IOT:'Immediate Out' };
   return map[mn] || mn;
 }
+// Rung-level template retained with the PLC parser. Paid generation does not
+// substitute this text when the model request fails; that path returns an error.
 function summarizeRoutineTemplate(name, type, routineXml) {
   const lines = [];
   lines.push('###ROUTINE### ' + name);
@@ -283,16 +331,19 @@ function assembleManual(plcInfo, routineSummaries, brand, filename) {
   t += 'Generated by ManualOS AI Manual Generator.\n';
   return t;
 }
-app.post('/generate-manual', upload.single('file'), async (req, res) => {
+async function handleGenerate(req, res, { env, stripeClient, anthropicClient }) {
   if (req.socket) req.socket.setTimeout(0);
   res.setTimeout(0);
   try {
+    const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
     const brand = (req.body && req.body.brand) || '';
     const filename = req.file ? req.file.originalname : 'unknown';
     let plcContent = '';
+    let fileBuffer = null;
     if (req.file) {
       const ext = req.file.originalname.split('.').pop().toLowerCase();
       const buf = req.file.buffer;
+      fileBuffer = buf;
       if (ext === 'l5x' || ext === 'xml') {
         plcContent = buf.toString('utf8');
         console.log('L5X/XML, length:', plcContent.length);
@@ -335,16 +386,23 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
     console.log('Routines:', plcInfo.routines.length, 'Blocks:', Object.keys(routineBlocks).length);
       // ACD fallback: if no routines from XML, use binary scan
       if (plcInfo.routines.length === 0 && req.file && req.file.originalname.toLowerCase().endsWith('.acd')) {
-        const fallbackNames = extractRoutineNamesFromBinary(buf);
+        const fallbackNames = extractRoutineNamesFromBinary(fileBuffer);
         const JUNK2 = new Set(['Routine','Program','Controller','Task','Tag','Description','Type','Name','Value','Module','Connection','RLL','ST','FBD','SFC','Data','RoutineType']);
         const useNames = fallbackNames.filter(n => !JUNK2.has(n) && n.length >= 2 && n.length <= 40);
         console.log('ACD binary fallback found', useNames.length, 'routine names:', useNames.slice(0,10).join(','));
         for (const rn of (useNames.length > 0 ? useNames : ['MainRoutine'])) plcInfo.routines.push({ name: rn, type: 'Ladder' });
       }
     const routineSummaries = [];
-    let usedAI = false;
     const isAcdFile = req.file && req.file.originalname.toLowerCase().endsWith('.acd');
-    if (_hasValidKey && anthropic) {
+    if (plcInfo.routines.length > 0) {
+      if (!anthropicClient) {
+        console.error('ANTHROPIC_API_KEY is not configured');
+        const unavailable = new Error('Manual generation is temporarily unavailable.');
+        unavailable.status = 503;
+        unavailable.expose = true;
+        throw unavailable;
+      }
+      const model = anthropicModel(env);
       for (const r of plcInfo.routines) {
         const xmlBlock = routineBlocks[r.name] || '';
         const hasRealContent = xmlBlock.length > 50 && (xmlBlock.includes('<Rung') || xmlBlock.includes('<Text>') || xmlBlock.includes('Operand='));
@@ -354,37 +412,164 @@ app.post('/generate-manual', upload.single('file'), async (req, res) => {
         const acdNote = isAcdRoutine ? 'NOTE: This is from an ACD binary file. Only the routine name and type are available (no ladder logic rungs). Infer the purpose entirely from the routine name and common PLC patterns.\n' : '';
         const routinePrompt = 'You are an industrial automation engineer writing an operator manual.\n' + 'Produce a structured routine summary using ONLY these prefixes (no other formatting):\n' + '  ###ROUTINE### name\n  ####DETAIL#### text\n  >>Rung N: description\n\n' + 'Format:\n###ROUTINE### '+r.name+'\n####DETAIL#### Type: '+(r.type||'Ladder')+'\n####DETAIL#### Purpose: <overall purpose>\n####DETAIL#### Rung-by-rung functions:\n>>Rung 0: <describe>\n(one >>Rung line per rung)\n####DETAIL#### Key tags: <tags>\n####DETAIL#### Summary: <2-3 sentences>\n\n' + 'NO markdown, NO asterisks, NO bullets except >>\n\n' + 'Routine: '+r.name+'  Type: '+(r.type||'Ladder')+'\n' + (noXml ? acdNote + 'NOTE: No XML available. Infer from routine name only based on common PLC patterns.' : 'XML:\n'+truncBlock);
         try {
-          const msg = await anthropic.messages.create({ model: 'claude-3-5-haiku-20241022', max_tokens: 1200, messages: [{ role: 'user', content: routinePrompt }] });
-          routineSummaries.push(msg.content[0].text.trim());
-          usedAI = true;
-          console.log('AI:', r.name);
-        } catch(e) {
-          console.error('AI failed for', r.name, e.message);
-          routineSummaries.push(summarizeRoutineTemplate(r.name, r.type, xmlBlock));
+          const msg = await anthropicClient.messages.create(anthropicBody(model, routinePrompt));
+          const text = extractModelText(msg);
+          if (!text) throw new Error('Model returned no text');
+          routineSummaries.push(text);
+          console.log('AI:', model, r.name);
+        } catch (e) {
+          console.error('AI failed for', r.name, e && e.message ? e.message : e);
+          const failed = new Error('Manual generation failed. Please try again.');
+          failed.status = 502;
+          failed.expose = true;
+          throw failed;
         }
       }
-    } else {
-      for (const r of plcInfo.routines) routineSummaries.push(summarizeRoutineTemplate(r.name, r.type, routineBlocks[r.name]||''));
     }
     console.log('Summaries:', routineSummaries.length);
     const manualText = assembleManual(plcInfo, routineSummaries, brand, filename);
     const codeRef = calculateCodeReferencePercentage(plcContent, manualText);
     const pdfBuffer = await generatePDF(manualText, brand, codeRef);
+    if (access.plan === 'starter') {
+      await recordStarterManual(stripeClient, access.paymentIntentId);
+    }
     res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="matrix-manual-report.pdf"', 'Content-Length': pdfBuffer.length });
     res.send(pdfBuffer);
-  } catch (err) { console.error('Error:', err); res.status(500).json({ error: err.message, stack: err.stack }); }
-});
-app.post('/webhook', async (req, res) => {
-  const sig = req.headers['stripe-signature']; let event;
-  try { event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET); }
-  catch (err) { return res.status(400).send('Webhook signature verification failed'); }
-  switch (event.type) {
-    case 'checkout.session.completed': console.log('Payment completed:', event.data.object.customer_email); break;
-    case 'customer.subscription.created': console.log('Subscription created'); break;
-    case 'customer.subscription.deleted': console.log('Subscription cancelled'); break;
-    case 'invoice.payment_failed': console.log('Payment failed'); break;
-    default: console.log('Unhandled event:', event.type);
+  } catch (err) {
+    return sendError(res, err);
   }
-  res.json({ received: true });
-});
-app.listen(PORT, () => console.log('ManualOS backend running on port ' + PORT));
+}
+
+function logWebhookEvent(event) {
+  const object = event.data && event.data.object ? event.data.object : {};
+  switch (event.type) {
+    case 'checkout.session.completed':
+    case 'checkout.session.async_payment_succeeded':
+    case 'checkout.session.async_payment_failed':
+      console.log(event.type, object.id, object.payment_status);
+      break;
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted':
+      console.log(event.type, object.id, object.status);
+      break;
+    case 'invoice.paid':
+    case 'invoice.payment_failed':
+    case 'charge.refunded':
+    case 'charge.dispute.created':
+    case 'radar.early_fraud_warning.created':
+      console.log(event.type, object.id);
+      break;
+    default:
+      console.log('Unhandled event:', event.type);
+  }
+}
+
+function createApp({ env = process.env, stripe, anthropic } = {}) {
+  const stripeClient = stripe !== undefined ? stripe : createStripe(env);
+  const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
+  const app = express();
+  app.disable('x-powered-by');
+  app.use(cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins(env).has(origin)) return callback(null, true);
+      return callback(null, false);
+    },
+  }));
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: Boolean(anthropicClient) });
+  });
+  app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+    const secret = env.STRIPE_WEBHOOK_SECRET;
+    if (!stripeClient || !secret) {
+      console.error('Webhook rejected: STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET is not set');
+      return res.status(400).send('Webhook signature verification failed');
+    }
+    let event;
+    try {
+      event = stripeClient.webhooks.constructEvent(req.body, req.headers['stripe-signature'], secret);
+    } catch (err) {
+      console.error('Webhook signature verification failed:', err && err.message ? err.message : err);
+      return res.status(400).send('Webhook signature verification failed');
+    }
+    logWebhookEvent(event);
+    return res.json({ received: true });
+  });
+  app.use(express.json({ limit: '1mb' }));
+  app.post('/create-checkout-session', async (req, res) => {
+    try {
+      if (!stripeClient) {
+        console.error('STRIPE_SECRET_KEY is not set');
+        return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      }
+      const plan = req.body && req.body.plan;
+      const params = checkoutParams(plan, env);
+      const session = await stripeClient.checkout.sessions.create(params);
+      if (!session || !session.url) {
+        console.error('Stripe Checkout Session did not include a URL');
+        return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      }
+      return res.json({ url: session.url });
+    } catch (err) {
+      return sendError(res, err);
+    }
+  });
+  app.get('/verify-session', async (req, res) => {
+    try {
+      const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+      if (!sessionId) return res.status(400).json({ error: 'session_id is required' });
+      if (!stripeClient) {
+        console.error('STRIPE_SECRET_KEY is not set');
+        return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      }
+      const access = await verifyCheckoutSession(stripeClient, sessionId, env);
+      return res.json(publicAccess(access));
+    } catch (err) {
+      if (isStripeNotFound(err)) return res.json({ valid: false, plan: null, remaining: null });
+      return sendError(res, err);
+    }
+  });
+  app.post('/generate-manual', upload.single('file'), (req, res, next) => {
+    handleGenerate(req, res, { env, stripeClient, anthropicClient }).catch(next);
+  });
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    console.error(err && err.stack ? err.stack : err);
+    if (err && err.name === 'MulterError') {
+      const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
+      return res.status(400).json({ error: message });
+    }
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'Invalid JSON body.' });
+    }
+    return res.status(500).json({ error: 'Internal server error' });
+  });
+  return app;
+}
+
+function prepareListen(env = process.env, exit = process.exit) {
+  const problem = frontendConfigProblem(env);
+  if (!problem) return true;
+  const line = `FRONTEND_URL problem: ${problem}. Checkout redirects and browser CORS will not work.`;
+  if (isProduction(env)) {
+    console.error(`FATAL: ${line} Refusing to start.`);
+    exit(1);
+    return false;
+  }
+  console.warn(`WARNING: ${line}`);
+  return true;
+}
+
+function start() {
+  if (!prepareListen(process.env)) return null;
+  const port = process.env.PORT || 3001;
+  const app = createApp();
+  return app.listen(port, () => {
+    console.log('ManualOS backend running on port ' + port);
+  });
+}
+
+if (require.main === module) start();
+
+module.exports = { createApp, prepareListen, start };
