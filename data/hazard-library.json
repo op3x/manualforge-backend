@@ -1,0 +1,1034 @@
+{
+  "schema_version": "1.1",
+  "message_format": {
+    "layout": [
+      "safety_alert_symbol",
+      "SIGNAL WORD",
+      "hazard (type and source)",
+      "consequence",
+      "avoidance (imperative steps)"
+    ],
+    "signal_words": {
+      "DANGER": "Hazardous situation that, if not avoided, will result in death or serious injury.",
+      "WARNING": "Hazardous situation that, if not avoided, could result in death or serious injury.",
+      "CAUTION": "Hazardous situation that, if not avoided, could result in minor or moderate injury.",
+      "NOTICE": "Information about practices not related to personal injury, such as property damage (no safety alert symbol)."
+    },
+    "basis": "ANSI Z535.6 / ISO 3864-2 / ISO 3864-3; ISO 7010 pictogram codes. All message text is original ManualOS wording."
+  },
+  "trigger_semantics": "triggers describe the PLC/CAD/spec evidence that makes a hazard applicable; the generator should include the entry when any trigger matches and let the user confirm. On product.subsystem_function pages, include only hazards whose triggering evidence (motion component, valve output, heater, etc.) belongs to that subsystem, and reword the hazard source to name the subsystem.",
+  "hazards": [
+    {
+      "id": "elec.shock_live",
+      "category": "electrical",
+      "iso12100_group": "Electrical",
+      "signal_word": "DANGER",
+      "hazard": "Hazardous voltage inside electrical enclosures and terminal boxes.",
+      "consequence": "Contact with live parts will cause death or severe burns.",
+      "avoidance": [
+        "Only qualified electrical workers may open the enclosure.",
+        "Switch off and lock the main disconnect before opening.",
+        "Verify absence of voltage with a rated tester on every conductor before touching."
+      ],
+      "triggers": {
+        "spec": "supply_voltage > 50 V AC or > 120 V DC"
+      },
+      "ppe": [
+        "arc-rated clothing when testing live",
+        "insulated gloves"
+      ],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "maint.safety",
+        "install.utilities"
+      ],
+      "iso7010_symbol": "W012",
+      "standards": [
+        "NFPA 70E",
+        "IEC 60204-1 6"
+      ]
+    },
+    {
+      "id": "elec.stored_capacitor",
+      "category": "electrical",
+      "iso12100_group": "Electrical",
+      "signal_word": "DANGER",
+      "hazard": "Drive and power-supply capacitors stay charged after power is removed.",
+      "consequence": "Touching DC bus terminals before discharge will cause death or severe injury.",
+      "avoidance": [
+        "After isolation wait at least the stated discharge time ({discharge_time_min} min).",
+        "Measure the DC bus before work and confirm it is below 50 V."
+      ],
+      "triggers": {
+        "plc": "VFD/servo drive present",
+        "cad": "drive part numbers in BOM"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "maint.procedures"
+      ],
+      "iso7010_symbol": "W012",
+      "standards": [
+        "IEC 61800-5-1"
+      ]
+    },
+    {
+      "id": "elec.arc_flash",
+      "category": "electrical",
+      "iso12100_group": "Electrical",
+      "signal_word": "DANGER",
+      "hazard": "Arc flash and arc blast when working on or near energised equipment.",
+      "consequence": "An arc flash can cause fatal burns, blindness and hearing loss.",
+      "avoidance": [
+        "Work de-energised wherever possible.",
+        "If live work is unavoidable, follow an energised-work permit and the incident-energy label.",
+        "Wear arc-rated PPE matching the label category."
+      ],
+      "triggers": {
+        "spec": "supply_voltage >= 208 V or available fault current known"
+      },
+      "ppe": [
+        "arc-rated clothing",
+        "face shield/hood",
+        "voltage-rated gloves"
+      ],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "maint.safety"
+      ],
+      "iso7010_symbol": "W012",
+      "standards": [
+        "NFPA 70E 130.5",
+        "NFPA 79"
+      ]
+    },
+    {
+      "id": "elec.residual_voltage_external",
+      "category": "electrical",
+      "iso12100_group": "Electrical",
+      "signal_word": "WARNING",
+      "hazard": "Circuits supplied from outside the machine remain live when the main disconnect is off.",
+      "consequence": "Unexpected contact can cause electric shock.",
+      "avoidance": [
+        "Identify externally supplied circuits by their orange wiring or labels.",
+        "Isolate the external source as well before working on them."
+      ],
+      "triggers": {
+        "plc": "interlock signals from host line",
+        "cad": "orange wiring or separate supply"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.energy_isolation"
+      ],
+      "iso7010_symbol": "W012",
+      "standards": [
+        "NFPA 79 5.3.5",
+        "IEC 60204-1 5.3.5"
+      ]
+    },
+    {
+      "id": "elec.unexpected_restart",
+      "category": "electrical",
+      "iso12100_group": "Mechanical / control",
+      "signal_word": "WARNING",
+      "hazard": "Automatic restart after a power interruption or fault reset.",
+      "consequence": "Machine parts can start moving without warning and cause serious injury.",
+      "avoidance": [
+        "Do not rely on a stopped machine being safe; lock out before entering.",
+        "Confirm that auto-restart parameters are disabled unless the risk assessment allows them."
+      ],
+      "triggers": {
+        "plc": "auto-restart / flying restart enabled"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.residual_risks",
+        "ops.modes"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "IEC 60204-1 7.5",
+        "ISO 14118"
+      ]
+    },
+    {
+      "id": "mech.crushing",
+      "category": "crushing",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Crushing points between moving and fixed parts (axes, clamps, lifts, press tooling).",
+      "consequence": "Body parts caught in the gap can be crushed or amputated.",
+      "avoidance": [
+        "Keep hands and body clear of the motion path while the machine is energised.",
+        "Use setup mode with reduced speed and an enabling device for close-in work.",
+        "Block or lower gravity-loaded parts before reaching in."
+      ],
+      "triggers": {
+        "plc": "linear axis, cylinder or clamp outputs",
+        "cad": "moving assemblies"
+      },
+      "ppe": [
+        "safety shoes",
+        "gloves"
+      ],
+      "applies_to_sections": [
+        "safety.residual_risks",
+        "ops.setup",
+        "maint.safety",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W019",
+      "standards": [
+        "ISO 13857",
+        "ISO 13854"
+      ]
+    },
+    {
+      "id": "mech.shearing_cutting",
+      "category": "cutting",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Sharp tools, blades, knives and cut edges.",
+      "consequence": "Contact can cause deep cuts or amputation.",
+      "avoidance": [
+        "Handle tools and blades with cut-resistant gloves.",
+        "Use tool holders or guards when changing blades.",
+        "Never reach past a guard to remove scrap."
+      ],
+      "triggers": {
+        "cad": "cutting tool, knife, blade, saw"
+      },
+      "ppe": [
+        "cut-resistant gloves"
+      ],
+      "applies_to_sections": [
+        "ops.setup",
+        "maint.procedures",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W022",
+      "standards": []
+    },
+    {
+      "id": "mech.entanglement",
+      "category": "entanglement",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Rotating spindles, shafts, rollers, belts, chains and conveyors.",
+      "consequence": "Hair, clothing, gloves or jewellery can be drawn in, causing severe injury or death.",
+      "avoidance": [
+        "Keep guards closed while parts rotate.",
+        "Tie back long hair; no loose clothing, jewellery or gloves near rotating parts.",
+        "Wait for complete standstill before opening guards."
+      ],
+      "triggers": {
+        "plc": "spindle/motor run outputs",
+        "cad": "belt, chain, pulley, roller, shaft"
+      },
+      "ppe": [
+        "close-fitting clothing"
+      ],
+      "applies_to_sections": [
+        "safety.residual_risks",
+        "ops.normal",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W025",
+      "standards": []
+    },
+    {
+      "id": "mech.ejection",
+      "category": "ejected parts",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Workpieces, tools, chips or broken parts thrown from the machine.",
+      "consequence": "Ejected parts can cause eye injury or impact injuries.",
+      "avoidance": [
+        "Keep doors and windows closed during operation.",
+        "Replace damaged or aged guard windows at the specified interval.",
+        "Clamp workpieces securely and respect chuck/fixture speed limits."
+      ],
+      "triggers": {
+        "cad": "spindle, chuck, grinding wheel",
+        "spec": "spindle speed"
+      },
+      "ppe": [
+        "safety glasses"
+      ],
+      "applies_to_sections": [
+        "safety.residual_risks",
+        "maint.schedule",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "ISO 23125",
+        "ISO 16090-1"
+      ]
+    },
+    {
+      "id": "mech.robot_motion",
+      "category": "robot motion",
+      "iso12100_group": "Mechanical",
+      "signal_word": "DANGER",
+      "hazard": "Fast, unpredictable robot or manipulator movement inside the safeguarded space.",
+      "consequence": "Being struck or trapped by the robot will cause death or serious injury.",
+      "avoidance": [
+        "Do not enter the safeguarded space while the system is in automatic mode.",
+        "Teach only in reduced-speed manual mode with an enabling device held by the person inside.",
+        "Plan an escape path and stay out of pinch points against fixed objects."
+      ],
+      "triggers": {
+        "plc": "robot controller interface, robot I/O",
+        "cad": "robot model in assembly"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.danger_zones",
+        "ops.modes",
+        "trouble.emergency",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "ISO 10218-1",
+        "ISO 10218-2"
+      ]
+    },
+    {
+      "id": "mech.gravity",
+      "category": "gravity / falling loads",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Vertical axes, lifted loads and counterweights that can fall when power or brakes are released.",
+      "consequence": "A falling load can crush or kill.",
+      "avoidance": [
+        "Mechanically block or lower vertical axes before maintenance.",
+        "Never stand under suspended loads.",
+        "Test holding brakes at the specified interval."
+      ],
+      "triggers": {
+        "plc": "brake outputs, Z/vertical axis",
+        "cad": "vertical slide, hoist"
+      },
+      "ppe": [
+        "hard hat",
+        "safety shoes"
+      ],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "maint.inspection",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W035",
+      "standards": []
+    },
+    {
+      "id": "mech.lifting_transport",
+      "category": "transport and lifting",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Heavy machine or modules during lifting and transport, including off-centre centre of gravity.",
+      "consequence": "Tip-over or a dropped load can cause death or serious injury and damage the machine.",
+      "avoidance": [
+        "Use only the marked lifting points and lifting gear rated for the stated mass.",
+        "Fit transport locks before moving.",
+        "Keep people out of the lift area."
+      ],
+      "triggers": {
+        "cad": "total mass > 25 kg"
+      },
+      "ppe": [
+        "hard hat",
+        "safety shoes",
+        "gloves"
+      ],
+      "applies_to_sections": [
+        "transport.lifting",
+        "decom.decommission"
+      ],
+      "iso7010_symbol": "W015",
+      "standards": []
+    },
+    {
+      "id": "mech.stability",
+      "category": "stability / tip-over",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Machine or modules not anchored, or unstable during assembly and dismantling.",
+      "consequence": "The machine can tip over and crush people.",
+      "avoidance": [
+        "Anchor the machine as specified before operation.",
+        "Follow the stated dismantling order to keep it stable."
+      ],
+      "triggers": {
+        "cad": "high centre of gravity or unanchored base"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "install.mechanical",
+        "decom.decommission"
+      ],
+      "iso7010_symbol": "W015",
+      "standards": []
+    },
+    {
+      "id": "mech.slip_trip_fall",
+      "category": "slips, trips and falls",
+      "iso12100_group": "Mechanical",
+      "signal_word": "CAUTION",
+      "hazard": "Fluids, chips, cables and hoses on the floor; work on platforms.",
+      "consequence": "Slipping or falling can cause injury.",
+      "avoidance": [
+        "Keep the floor around the machine clean and dry.",
+        "Route cables and hoses in trays.",
+        "Use approved access platforms and fall protection when working at height."
+      ],
+      "triggers": {
+        "cad": "platform, ladder, height > 1 m"
+      },
+      "ppe": [
+        "anti-slip safety shoes",
+        "fall harness for work at height"
+      ],
+      "applies_to_sections": [
+        "ops.cleaning",
+        "maint.safety"
+      ],
+      "iso7010_symbol": "W011",
+      "standards": []
+    },
+    {
+      "id": "fluid.hydraulic_pressure",
+      "category": "stored energy",
+      "iso12100_group": "Fluid power / stored energy",
+      "signal_word": "WARNING",
+      "hazard": "Hydraulic systems and accumulators remain under pressure after the pump stops.",
+      "consequence": "Escaping fluid jets can penetrate skin, and unexpected cylinder movement can crush.",
+      "avoidance": [
+        "Depressurise the system and drain accumulators before opening any connection.",
+        "Check the gauge reads zero.",
+        "Never search for leaks with your hand."
+      ],
+      "triggers": {
+        "cad": "hydraulic unit, accumulator",
+        "spec": "hydraulic pressure"
+      },
+      "ppe": [
+        "safety glasses",
+        "gloves"
+      ],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "maint.procedures",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "ISO 4413"
+      ]
+    },
+    {
+      "id": "fluid.pneumatic_pressure",
+      "category": "stored energy",
+      "iso12100_group": "Fluid power / stored energy",
+      "signal_word": "WARNING",
+      "hazard": "Compressed air in lines, reservoirs and cylinders after the supply is shut off.",
+      "consequence": "Sudden movement of cylinders, whipping hoses or flying parts can cause injury.",
+      "avoidance": [
+        "Close and lock the air isolation valve and exhaust residual air before work.",
+        "Secure loads held by cylinders.",
+        "Never point compressed air at people."
+      ],
+      "triggers": {
+        "plc": "valve outputs",
+        "spec": "air_pressure"
+      },
+      "ppe": [
+        "safety glasses"
+      ],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "install.utilities",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "ISO 4414"
+      ]
+    },
+    {
+      "id": "fluid.pressure_vessel",
+      "category": "pressure equipment",
+      "iso12100_group": "Fluid power / stored energy",
+      "signal_word": "WARNING",
+      "hazard": "Pressure vessels, receivers and oil separators.",
+      "consequence": "Rupture of a vessel can cause death or serious injury.",
+      "avoidance": [
+        "Do not exceed the maximum allowable pressure on the vessel plate.",
+        "Do not weld or modify pressure parts.",
+        "Keep safety valves operable and test them periodically."
+      ],
+      "triggers": {
+        "cad": "receiver tank, vessel",
+        "spec": "PS x V above directive limit"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "maint.inspection",
+        "app.compliance"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "2014/68/EU PED",
+        "2014/29/EU SPVD"
+      ]
+    },
+    {
+      "id": "mech.spring_energy",
+      "category": "stored energy",
+      "iso12100_group": "Mechanical",
+      "signal_word": "WARNING",
+      "hazard": "Pre-loaded springs, tensioned belts and counterbalance cylinders.",
+      "consequence": "Uncontrolled release can strike or trap body parts.",
+      "avoidance": [
+        "Release spring or belt tension using the specified procedure and tools before disassembly."
+      ],
+      "triggers": {
+        "cad": "spring, gas spring, tensioner"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.energy_isolation",
+        "maint.procedures",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": []
+    },
+    {
+      "id": "therm.hot_surface",
+      "category": "hot surfaces",
+      "iso12100_group": "Thermal",
+      "signal_word": "WARNING",
+      "hazard": "Hot surfaces on motors, spindles, heaters, compressors, exhausts and hot-melt systems.",
+      "consequence": "Touching can cause burns.",
+      "avoidance": [
+        "Allow parts to cool before maintenance.",
+        "Wear heat-resistant gloves when work on warm parts is unavoidable."
+      ],
+      "triggers": {
+        "spec": "surface temperature > 60 C",
+        "cad": "heater, exhaust, compressor element"
+      },
+      "ppe": [
+        "heat-resistant gloves"
+      ],
+      "applies_to_sections": [
+        "safety.residual_risks",
+        "maint.safety",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W017",
+      "standards": [
+        "ISO 13732-1"
+      ]
+    },
+    {
+      "id": "therm.hot_fluids",
+      "category": "hot fluids",
+      "iso12100_group": "Thermal",
+      "signal_word": "WARNING",
+      "hazard": "Hot oil, coolant, steam or water under pressure.",
+      "consequence": "Spraying hot fluid can cause severe burns.",
+      "avoidance": [
+        "Let the system cool and depressurise before opening caps or drains."
+      ],
+      "triggers": {
+        "spec": "fluid temperature > 60 C"
+      },
+      "ppe": [
+        "face shield",
+        "gloves"
+      ],
+      "applies_to_sections": [
+        "maint.lubrication",
+        "maint.procedures",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W017",
+      "standards": []
+    },
+    {
+      "id": "therm.cold",
+      "category": "cold surfaces",
+      "iso12100_group": "Thermal",
+      "signal_word": "CAUTION",
+      "hazard": "Cryogenic or refrigerated parts.",
+      "consequence": "Contact can cause cold burns.",
+      "avoidance": [
+        "Wear insulated gloves when handling cold parts."
+      ],
+      "triggers": {
+        "spec": "surface temperature < 0 C"
+      },
+      "ppe": [
+        "insulated gloves"
+      ],
+      "applies_to_sections": [
+        "maint.safety"
+      ],
+      "iso7010_symbol": "W010",
+      "standards": []
+    },
+    {
+      "id": "noise.hearing",
+      "category": "noise",
+      "iso12100_group": "Noise and vibration",
+      "signal_word": "WARNING",
+      "hazard": "Noise levels at the workstation above 80 dB(A).",
+      "consequence": "Long exposure can cause permanent hearing loss.",
+      "avoidance": [
+        "Wear hearing protection when the declared level exceeds 80 dB(A) or as site rules require.",
+        "Keep acoustic covers closed."
+      ],
+      "triggers": {
+        "spec": "sound_pressure_dBA > 80"
+      },
+      "ppe": [
+        "hearing protection"
+      ],
+      "applies_to_sections": [
+        "safety.emissions",
+        "safety.ppe"
+      ],
+      "iso7010_symbol": "M003",
+      "standards": [
+        "ISO 11201",
+        "2003/10/EC"
+      ]
+    },
+    {
+      "id": "vib.hand_arm",
+      "category": "vibration",
+      "iso12100_group": "Noise and vibration",
+      "signal_word": "CAUTION",
+      "hazard": "Hand-arm or whole-body vibration from hand-held tools or platforms.",
+      "consequence": "Long exposure can cause circulatory and joint disorders.",
+      "avoidance": [
+        "Limit exposure time and use low-vibration tools."
+      ],
+      "triggers": {
+        "spec": "vibration declared > 2.5 m/s2"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.emissions"
+      ],
+      "iso7010_symbol": null,
+      "standards": []
+    },
+    {
+      "id": "rad.laser",
+      "category": "laser radiation",
+      "iso12100_group": "Radiation",
+      "signal_word": "DANGER",
+      "hazard": "Laser beam in Class 3B or Class 4 laser equipment, including reflected beams.",
+      "consequence": "Direct or reflected beams can cause permanent eye damage and skin burns, and ignite materials.",
+      "avoidance": [
+        "Operate only with the laser enclosure closed and interlocks active.",
+        "Use laser safety eyewear rated for the wavelength during service alignment.",
+        "Only trained laser personnel may service the beam path."
+      ],
+      "triggers": {
+        "spec": "laser_class in [3B,4]",
+        "cad": "laser source"
+      },
+      "ppe": [
+        "laser eyewear (wavelength-rated)"
+      ],
+      "applies_to_sections": [
+        "safety.emissions",
+        "maint.safety",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W004",
+      "standards": [
+        "IEC 60825-1",
+        "ANSI Z136.1",
+        "ISO 11553-1"
+      ]
+    },
+    {
+      "id": "rad.laser_low",
+      "category": "laser radiation",
+      "iso12100_group": "Radiation",
+      "signal_word": "CAUTION",
+      "hazard": "Class 2/2M/3R alignment or sensor lasers.",
+      "consequence": "Staring into the beam can injure the eye.",
+      "avoidance": [
+        "Do not look into the beam or at reflections."
+      ],
+      "triggers": {
+        "spec": "laser_class in [2,2M,3R]"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.emissions",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W004",
+      "standards": [
+        "IEC 60825-1"
+      ]
+    },
+    {
+      "id": "rad.emf_magnet",
+      "category": "electromagnetic fields / magnets",
+      "iso12100_group": "Radiation",
+      "signal_word": "WARNING",
+      "hazard": "Strong magnetic fields from permanent magnet motors, magnetic chucks, induction heaters or welding.",
+      "consequence": "Can interfere with pacemakers and implanted devices; magnets can pinch fingers.",
+      "avoidance": [
+        "Persons with active implants must keep the distance stated by the manufacturer.",
+        "Handle permanent magnet rotors only with the specified tools."
+      ],
+      "triggers": {
+        "cad": "PM motor, magnetic chuck, induction coil"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.emissions",
+        "maint.procedures",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W006",
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(w)",
+        "2013/35/EU"
+      ]
+    },
+    {
+      "id": "rad.uv_ir",
+      "category": "optical radiation",
+      "iso12100_group": "Radiation",
+      "signal_word": "WARNING",
+      "hazard": "UV or intense IR from curing lamps, welding arcs or heaters.",
+      "consequence": "Can burn eyes and skin.",
+      "avoidance": [
+        "Keep shields closed; wear filtering eyewear if exposed."
+      ],
+      "triggers": {
+        "cad": "UV lamp, welding torch"
+      },
+      "ppe": [
+        "filter eyewear"
+      ],
+      "applies_to_sections": [
+        "safety.emissions",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": "W027",
+      "standards": []
+    },
+    {
+      "id": "chem.fluids",
+      "category": "hazardous substances",
+      "iso12100_group": "Materials and substances",
+      "signal_word": "WARNING",
+      "hazard": "Oils, coolants, cleaning agents, adhesives and process chemicals.",
+      "consequence": "Skin contact, inhalation of mist or ingestion can cause dermatitis, respiratory problems or poisoning.",
+      "avoidance": [
+        "Read the safety data sheet for each substance before use.",
+        "Wear the gloves and eye protection specified in the SDS.",
+        "Use extraction where mist or vapour is produced."
+      ],
+      "triggers": {
+        "spec": "coolant/lubricant/chemical list"
+      },
+      "ppe": [
+        "chemical gloves",
+        "safety glasses"
+      ],
+      "applies_to_sections": [
+        "safety.emissions",
+        "maint.lubrication",
+        "ops.cleaning"
+      ],
+      "iso7010_symbol": "W016",
+      "standards": [
+        "OSHA 1910.1200",
+        "ISO 14123"
+      ]
+    },
+    {
+      "id": "chem.dust_fumes",
+      "category": "dust and fumes",
+      "iso12100_group": "Materials and substances",
+      "signal_word": "WARNING",
+      "hazard": "Dust, fumes or mist produced by the process (machining, welding, grinding, powder).",
+      "consequence": "Breathing these can cause lung disease; some dusts can explode.",
+      "avoidance": [
+        "Run the extraction system whenever the process runs.",
+        "Wear a respirator where exposure limits may be exceeded.",
+        "Keep the area free of dust deposits."
+      ],
+      "triggers": {
+        "cad": "extraction hood",
+        "spec": "process emits dust/fumes"
+      },
+      "ppe": [
+        "respirator"
+      ],
+      "applies_to_sections": [
+        "safety.emissions",
+        "install.utilities",
+        "product.subsystem_function"
+      ],
+      "iso7010_symbol": null,
+      "standards": [
+        "ISO 14123",
+        "ATEX 2014/34/EU"
+      ]
+    },
+    {
+      "id": "fire.flammable",
+      "category": "fire and explosion",
+      "iso12100_group": "Materials and substances",
+      "signal_word": "WARNING",
+      "hazard": "Flammable fluids, oil mist, fuel or combustible chips near ignition sources.",
+      "consequence": "Fire or explosion can cause death, serious injury and property loss.",
+      "avoidance": [
+        "Use only non-flammable coolant unless a fire suppression system is fitted.",
+        "Do not leave the machine unattended while machining flammable materials.",
+        "Keep a suitable extinguisher nearby."
+      ],
+      "triggers": {
+        "spec": "oil-based coolant, fuel, magnesium/titanium machining"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.fire"
+      ],
+      "iso7010_symbol": "W021",
+      "standards": [
+        "NFPA 79",
+        "ISO 19353"
+      ]
+    },
+    {
+      "id": "chem.asphyxiation",
+      "category": "asphyxiation",
+      "iso12100_group": "Materials and substances",
+      "signal_word": "DANGER",
+      "hazard": "Inert gases (nitrogen, CO2, argon) or exhaust gas in enclosed spaces.",
+      "consequence": "Can cause unconsciousness and death without warning.",
+      "avoidance": [
+        "Ventilate enclosed spaces; use gas monitoring before entry."
+      ],
+      "triggers": {
+        "spec": "inert gas supply, combustion engine"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.residual_risks",
+        "install.utilities"
+      ],
+      "iso7010_symbol": null,
+      "standards": []
+    },
+    {
+      "id": "ergo.manual_handling",
+      "category": "ergonomics",
+      "iso12100_group": "Ergonomic",
+      "signal_word": "CAUTION",
+      "hazard": "Manual lifting of parts, tools or change parts heavier than 23 kg or in awkward postures.",
+      "consequence": "Can cause back and muscle injuries.",
+      "avoidance": [
+        "Use lifting aids for loads above 23 kg (or local limit).",
+        "Lift with two people where aids are not available."
+      ],
+      "triggers": {
+        "cad": "component mass > 23 kg handled manually"
+      },
+      "ppe": [
+        "safety shoes"
+      ],
+      "applies_to_sections": [
+        "ops.setup",
+        "maint.procedures"
+      ],
+      "iso7010_symbol": null,
+      "standards": [
+        "ISO 11228-1",
+        "ISO 11226"
+      ]
+    },
+    {
+      "id": "ergo.workstation",
+      "category": "ergonomics",
+      "iso12100_group": "Ergonomic",
+      "signal_word": "NOTICE",
+      "hazard": "Repetitive tasks and poorly positioned controls or displays.",
+      "consequence": "Fatigue and errors may lead to damage or injury.",
+      "avoidance": [
+        "Adjust workstation height; rotate tasks."
+      ],
+      "triggers": {
+        "user_input": "repetitive loading"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.danger_zones"
+      ],
+      "iso7010_symbol": null,
+      "standards": [
+        "ISO 6385"
+      ]
+    },
+    {
+      "id": "ctrl.bypass",
+      "category": "defeated safeguards",
+      "iso12100_group": "Control system / software",
+      "signal_word": "DANGER",
+      "hazard": "Bypassing, removing or defeating interlocks, guards or safety functions.",
+      "consequence": "Exposes people to all machine hazards and will lead to death or serious injury.",
+      "avoidance": [
+        "Never bridge, remove or tamper with safety devices.",
+        "Report defective safety devices and take the machine out of service until repaired."
+      ],
+      "triggers": {
+        "plc": "any safety I/O present"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "safety.misuse",
+        "safety.devices"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "ISO 14119"
+      ]
+    },
+    {
+      "id": "ctrl.program_change",
+      "category": "unexpected behaviour after changes",
+      "iso12100_group": "Control system / software",
+      "signal_word": "WARNING",
+      "hazard": "Program, parameter or recipe changes, including unauthorised remote changes.",
+      "consequence": "The machine may move in unexpected ways and cause injury or damage.",
+      "avoidance": [
+        "Only authorised users may change programs or parameters.",
+        "Test changes in reduced speed or dry-run before production.",
+        "Protect remote access with user accounts and network segmentation."
+      ],
+      "triggers": {
+        "plc": "HMI-writable parameters, network connection"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "ops.parameters",
+        "safety.cyber"
+      ],
+      "iso7010_symbol": null,
+      "standards": [
+        "IEC 62443",
+        "EU 2023/1230 Annex III 1.1.9"
+      ]
+    },
+    {
+      "id": "ctrl.manual_mode",
+      "category": "reduced protection in manual / setup mode",
+      "iso12100_group": "Control system / software",
+      "signal_word": "WARNING",
+      "hazard": "Safeguards partly muted in setup, teach or maintenance mode.",
+      "consequence": "Moving parts can reach the operator.",
+      "avoidance": [
+        "Use the enabling device; release it to stop motion.",
+        "Only one person in the danger zone controls motion.",
+        "Return to automatic only after everyone has left the zone."
+      ],
+      "triggers": {
+        "plc": "mode selector, enabling device"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "ops.modes",
+        "ops.setup"
+      ],
+      "iso7010_symbol": "W001",
+      "standards": [
+        "EU 2023/1230 Annex III 1.2.5"
+      ]
+    },
+    {
+      "id": "prop.equipment_damage",
+      "category": "equipment damage",
+      "iso12100_group": "Property / process",
+      "signal_word": "NOTICE",
+      "hazard": "Wrong supply voltage, phase rotation, air quality, lubricant or fluid.",
+      "consequence": "Can damage the machine and void the warranty.",
+      "avoidance": [
+        "Check supply data against the nameplate before connecting.",
+        "Use only the specified lubricants and fluids."
+      ],
+      "triggers": {
+        "spec": "always"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "install.utilities",
+        "maint.lubrication"
+      ],
+      "iso7010_symbol": null,
+      "standards": []
+    },
+    {
+      "id": "prop.esd",
+      "category": "electrostatic discharge",
+      "iso12100_group": "Property / process",
+      "signal_word": "NOTICE",
+      "hazard": "Electrostatic discharge on electronic modules.",
+      "consequence": "Can damage control electronics.",
+      "avoidance": [
+        "Ground yourself before handling boards; use ESD packaging."
+      ],
+      "triggers": {
+        "plc": "electronic modules"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "maint.procedures"
+      ],
+      "iso7010_symbol": null,
+      "standards": []
+    },
+    {
+      "id": "hyg.food_contact",
+      "category": "hygiene / contamination",
+      "iso12100_group": "Property / process",
+      "signal_word": "WARNING",
+      "hazard": "Contamination of food, beverage or pharmaceutical product by lubricants, foreign bodies or cleaning agents.",
+      "consequence": "Contaminated product can harm consumers.",
+      "avoidance": [
+        "Use only food-grade (H1) lubricants where specified.",
+        "Follow the cleaning plan and verify cleanliness before restart."
+      ],
+      "triggers": {
+        "user_input": "food/pharma application"
+      },
+      "ppe": [],
+      "applies_to_sections": [
+        "ops.cleaning",
+        "maint.lubrication"
+      ],
+      "iso7010_symbol": null,
+      "standards": [
+        "ISO 14159",
+        "EN 1672-2"
+      ]
+    }
+  ]
+}

@@ -38,6 +38,10 @@ function starterSession(used) {
   };
 }
 
+function fakePdf() {
+  return async () => Buffer.from('%PDF-1.4\n%manualos\n');
+}
+
 function createHarness() {
   const calls = { create: [], updates: [], modelCalls: 0 };
   let used = 0;
@@ -206,7 +210,7 @@ test('health, checkout, verify, and webhook', async () => {
 
 test('generate requires payment, spends one starter credit after success, and hides model errors', async () => {
   const harness = createHarness();
-  const app = createApp({ env: baseEnv(), stripe: harness.stripe, anthropic: harness.anthropic });
+  const app = createApp({ env: baseEnv(), stripe: harness.stripe, anthropic: harness.anthropic, renderPdf: fakePdf() });
   await withServer(app, async (base) => {
     const unpaid = await fetch(base + '/generate-manual', {
       method: 'POST',
@@ -247,12 +251,12 @@ test('generate requires payment, spends one starter credit after success, and hi
       headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_starter' },
       body: JSON.stringify({ plcContent: L5X, brand: 'Acme' }),
     });
-    assert.equal(viaHeader.status, 502);
-    const failed = await viaHeader.json();
-    assert.equal(failed.error, 'Manual generation failed. Please try again.');
-    assert.equal(JSON.stringify(failed).includes('SUPER_SECRET_MODEL_DETAIL'), false);
-    assert.equal(Object.hasOwn(failed, 'stack'), false);
-    assert.equal(harness.calls.updates.length, 1);
+    assert.equal(viaHeader.status, 200);
+    const failedPdf = Buffer.from(await viaHeader.arrayBuffer());
+    assert.equal(failedPdf.subarray(0, 4).toString(), '%PDF');
+    assert.equal(failedPdf.includes(Buffer.from('SUPER_SECRET_MODEL_DETAIL')), false);
+    assert.equal(harness.calls.updates.length, 2);
+    assert.equal(harness.calls.updates[1].params.metadata.manuals_used, '2');
   });
 });
 
@@ -261,7 +265,7 @@ test('pro generation does not touch the starter counter and checkout failures st
   harness.stripe.checkout.sessions.create = async () => {
     throw new Error('SUPER_SECRET_DB_PASSWORD');
   };
-  const app = createApp({ env: baseEnv(), stripe: harness.stripe, anthropic: harness.anthropic });
+  const app = createApp({ env: baseEnv(), stripe: harness.stripe, anthropic: harness.anthropic, renderPdf: fakePdf() });
   await withServer(app, async (base) => {
     const boom = await fetch(base + '/create-checkout-session', {
       method: 'POST',
@@ -287,6 +291,7 @@ test('pro generation does not touch the starter counter and checkout failures st
       anthropic: {
         messages: { create: async () => { throw new Error('should not be called'); } },
       },
+      renderPdf: fakePdf(),
     });
     await withServer(exhausted, async (exhaustedBase) => {
       const res = await fetch(exhaustedBase + '/generate-manual', {

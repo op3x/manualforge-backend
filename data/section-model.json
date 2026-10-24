@@ -1,0 +1,1310 @@
+{
+  "schema_version": "1.1",
+  "description": "ManualOS master section model for industrial capital-equipment manuals. frequency = how many of the 10 primary reference manuals contain the section. sources: plc|cad|spec|user_input|standard|hazard_library. v1.1 (2026-10-24): chapter 2 reworked into 'Machine description and theory of operation' (function-centred); added product.layout, product.subsystem_function (repeatable), product.sequence, product.interlocks, product.control_logic, app.program_xref.",
+  "generation_rules": {
+    "purpose": "The manual describes the function of the equipment: what it does, how it does it, and how people operate and maintain it safely. PLC programs and CAD models are evidence to interpret, not content to transcribe.",
+    "plc": [
+      "Read every rung of every routine.",
+      "Group related rungs into functional statements (permissives + seal-in + output = one statement); summarise, do not paraphrase rung by rung.",
+      "Cite rungs only as small references, e.g. 'Rungs 4-11'.",
+      "Every rung must land in exactly one function group or be classed as housekeeping in app.program_xref; fail the build otherwise.",
+      "No instruction mnemonics, tag names, addresses or routine names in headings or prose; tags appear only in app.io_list and app.program_xref."
+    ],
+    "cad": [
+      "Infer each subsystem's function from assembly and part names, motion components (motors, servos, cylinders, vacuum, belts, guides, heaters), sensors, guards and layout along the product flow.",
+      "Describe what the equipment does and how the parts work together; part lists go to the spare-parts chapter.",
+      "Use human assembly names, not CAD file names."
+    ],
+    "merge": "When PLC and CAD are both supplied, write one narrative per subsystem: CAD gives the physical arrangement, PLC gives behaviour, timing and conditions.",
+    "inference": "Any statement inferred rather than read directly must carry an 'Inferred - please confirm' marker (rendered as a small badge) until the user confirms it.",
+    "headings": "Headings are plain-language function names (e.g. 'Case erector', 'Starting and stopping the infeed'), never 'Routine: ...' or tag names."
+  },
+  "sections": [
+    {
+      "id": "front.cover",
+      "title": "Cover and product identification",
+      "chapter": "0 Front matter",
+      "required": true,
+      "frequency": "10/10",
+      "sources": [
+        "spec",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(a)(b)",
+        "IEC/IEEE 82079-1"
+      ],
+      "input_fields": [
+        "manufacturer_name",
+        "manufacturer_address",
+        "model",
+        "doc_number",
+        "revision",
+        "language"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Product name, model/type designation exactly as on the nameplate, manual document number, revision, language (original vs translation), manufacturer legal name and full address, authorised representative if any. Leave serial number as a fill-in field.",
+      "order": 1
+    },
+    {
+      "id": "front.revision",
+      "title": "Revision history / summary of changes",
+      "chapter": "0 Front matter",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [
+        "IEC/IEEE 82079-1"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table: revision, date, sections changed, reason. Auto-append a row every time the manual is regenerated from new PLC/CAD inputs (record input file names + hashes).",
+      "order": 2
+    },
+    {
+      "id": "front.about",
+      "title": "About this manual",
+      "chapter": "0 Front matter",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "standard",
+        "user_input"
+      ],
+      "standards": [
+        "IEC/IEEE 82079-1",
+        "EU 2023/1230 Annex III 1.7.4.1"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Purpose and scope of the document, target audiences (operator, maintenance, installer), list of companion documents (electrical drawings, parts catalog, PLC program, vendor component manuals), where to keep the manual, how to get a digital copy (if supplied digitally it must be downloadable, printable and savable, with the access address marked on the machine).",
+      "order": 3
+    },
+    {
+      "id": "front.conventions",
+      "title": "Symbols, signal words and conventions",
+      "chapter": "0 Front matter",
+      "required": true,
+      "frequency": "10/10",
+      "sources": [
+        "standard"
+      ],
+      "standards": [
+        "ANSI Z535.6",
+        "ISO 3864-2",
+        "ISO 7010"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Fixed text: define DANGER / WARNING / CAUTION / NOTICE per ANSI Z535.6 / ISO 3864-2, show the hazard message layout (signal word, hazard type and source, consequence, avoidance steps), list pictograms used, typographic conventions for HMI buttons, PLC tags, step lists.",
+      "order": 4
+    },
+    {
+      "id": "safety.general",
+      "title": "General safety instructions",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "10/10",
+      "sources": [
+        "standard",
+        "hazard_library"
+      ],
+      "standards": [
+        "ISO 12100"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Short, mandatory rules that apply to every task: read the manual first, no modification without manufacturer approval, keep guards in place, report damage, follow site rules. Original wording, imperative voice.",
+      "order": 5
+    },
+    {
+      "id": "safety.personnel",
+      "title": "Personnel qualification and responsibilities",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "standard",
+        "user_input"
+      ],
+      "standards": [
+        "ISO 12100",
+        "NFPA 70E",
+        "OSHA 1910.147"
+      ],
+      "input_fields": [
+        "roles_and_permissions"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Define roles (operator, setter/programmer, maintenance mechanical, maintenance electrical, qualified electrical worker, service technician) and what each is permitted to do. Owner/operator obligations: training, PPE provision, site risk assessment.",
+      "order": 6
+    },
+    {
+      "id": "safety.intended_use",
+      "title": "Intended use",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "5/10 (gap-filled)",
+      "sources": [
+        "spec",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(g)",
+        "ISO 12100 5.3"
+      ],
+      "input_fields": [
+        "materials",
+        "workpiece_limits",
+        "environment_limits"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Describe exactly what the machine is for: materials/workpieces, size and weight limits, environment (indoor, temperature, humidity, atmosphere), operating limits from spec sheet. State that any other use is not intended.",
+      "order": 7
+    },
+    {
+      "id": "safety.misuse",
+      "title": "Reasonably foreseeable misuse",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "4/10 (gap-filled)",
+      "sources": [
+        "user_input",
+        "hazard_library"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(h)",
+        "ISO 12100 5.3.2"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Bulleted list of prohibited uses experience shows might occur: bypassing interlocks, operating with doors open, exceeding capacity, unapproved fluids, use in explosive atmosphere, riding/climbing on machine, untrained operation.",
+      "order": 8
+    },
+    {
+      "id": "safety.danger_zones",
+      "title": "Workstations, danger zones and safeguarded spaces",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "6/10",
+      "sources": [
+        "cad",
+        "plc"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(f)",
+        "ISO 10218-2",
+        "ISO 13857"
+      ],
+      "input_fields": [
+        "footprint",
+        "work_envelope",
+        "operator_positions"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Describe operator workstations and danger zones (robot envelope, press point, conveyor transfer points). Use CAD envelope/footprint; include a plan-view figure with zones marked.",
+      "order": 9
+    },
+    {
+      "id": "safety.devices",
+      "title": "Safety devices and safety functions",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc",
+        "cad"
+      ],
+      "standards": [
+        "ISO 13850",
+        "IEC 60204-1 / NFPA 79",
+        "ISO 13849-1",
+        "IEC 62061",
+        "ISO 14119"
+      ],
+      "input_fields": [
+        "safety_io_list",
+        "stop_categories",
+        "PL_SIL"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table: device, location, function, how to test, test interval. Pull from PLC safety I/O (E-stops, door interlocks, light curtains, area scanners, two-hand controls, enabling devices, STO, safe speed). Include stop categories (IEC 60204-1 cat 0/1/2) and performance level/SIL if known.",
+      "order": 10
+    },
+    {
+      "id": "safety.estop",
+      "title": "Emergency stop",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc",
+        "cad"
+      ],
+      "standards": [
+        "ISO 13850",
+        "IEC 60204-1 10.7"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Where every E-stop is, what it stops (stop category), what stays powered, how to reset and restart. Reset must not by itself restart the machine.",
+      "order": 11
+    },
+    {
+      "id": "safety.signs",
+      "title": "Safety signs and labels on the machine",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "cad",
+        "hazard_library",
+        "user_input"
+      ],
+      "standards": [
+        "ISO 7010",
+        "ANSI Z535.4",
+        "ISO 3864-2"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Figure of label locations plus table: label id/part number, pictogram, meaning, location. Derive candidate labels from hazard library matches; user confirms actual label part numbers.",
+      "order": 12
+    },
+    {
+      "id": "safety.ppe",
+      "title": "Personal protective equipment",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "hazard_library",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(m)",
+        "OSHA 1910.132"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Matrix of task vs required PPE (eye, hearing, hand, foot, head, arc-rated clothing, respirator, fall protection). Generated from hazard library matches.",
+      "order": 13
+    },
+    {
+      "id": "safety.energy_isolation",
+      "title": "Energy isolation and lockout/tagout",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "plc",
+        "cad",
+        "spec"
+      ],
+      "standards": [
+        "OSHA 1910.147",
+        "ANSI/ASSP Z244.1",
+        "IEC 60204-1 5.3"
+      ],
+      "input_fields": [
+        "energy_sources",
+        "isolation_points",
+        "capacitor_discharge_time"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "List every energy source and its isolation point (main disconnect, pneumatic dump valve, hydraulic isolation + accumulator bleed, gravity loads to block, stored spring energy, thermal, capacitor discharge time). Then the generic LOTO steps: prepare, notify, shut down, isolate, lock and tag, release stored energy, verify zero energy, perform work, restore. Machine-specific energy-control procedure table.",
+      "order": 14
+    },
+    {
+      "id": "safety.residual_risks",
+      "title": "Residual risks",
+      "chapter": "1 Safety",
+      "required": true,
+      "frequency": "2/10 explicit (gap-filled)",
+      "sources": [
+        "hazard_library",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(l)",
+        "ISO 12100 6.4"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "List hazards that remain after design and safeguarding, each in signal-word format, grouped by life-cycle phase. Generated from hazard library matches and confirmed against the integrator's risk assessment.",
+      "order": 15
+    },
+    {
+      "id": "safety.emissions",
+      "title": "Noise, vibration, radiation and hazardous substance emissions",
+      "chapter": "1 Safety",
+      "required": false,
+      "frequency": "5/10",
+      "sources": [
+        "spec",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(u)(w)(x)",
+        "ISO 4871"
+      ],
+      "input_fields": [
+        "sound_pressure_dBA",
+        "sound_power_dBA",
+        "laser_class",
+        "emissions"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Declared A-weighted emission sound pressure at workstation (or statement it is <=70 dB(A)), sound power if >80 dB(A), uncertainty and test conditions; vibration; non-ionising radiation (lasers, EMF for implant wearers); airborne emissions (mist, fumes) and capture/filtration needs.",
+      "order": 16
+    },
+    {
+      "id": "safety.fire",
+      "title": "Fire and explosion prevention",
+      "chapter": "1 Safety",
+      "required": false,
+      "frequency": "3/10",
+      "sources": [
+        "spec",
+        "user_input"
+      ],
+      "standards": [
+        "NFPA 79",
+        "ISO 19353"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Flammable fluids (oils, coolants, fuel, dust), ignition sources, fire suppression, extinguisher type. Include only if applicable.",
+      "order": 17
+    },
+    {
+      "id": "safety.cyber",
+      "title": "Cybersecurity and protection against corruption",
+      "chapter": "1 Safety",
+      "required": false,
+      "frequency": "1/10 (gap-filled)",
+      "sources": [
+        "plc",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.1.9",
+        "IEC 62443"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Network connections, remote access, password/user levels, firmware update policy, and how safety functions are protected against unauthorized changes.",
+      "order": 18
+    },
+    {
+      "id": "product.overview",
+      "title": "What the machine does",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "10/10",
+      "sources": [
+        "spec",
+        "plc",
+        "cad"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(d)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Two or three short paragraphs in plain language: the job the machine does, what goes in and what comes out, throughput, and the main stages the product passes through. Write it for a new operator who has never seen the machine. Derive the stages from the CAD top-level assemblies and the PLC main sequence; when both are present, use one merged description. No tag names, routine names, instruction mnemonics or file names anywhere in this chapter.",
+      "order": 19
+    },
+    {
+      "id": "product.layout",
+      "title": "Machine layout and product flow",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "6/10 (strengthened)",
+      "sources": [
+        "cad",
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [
+        "footprint",
+        "top_level_assemblies"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Plan-view figure with each subsystem numbered in product-flow order, plus operator positions and guard boundary. From CAD: arrange top-level assemblies by their position along the flow axis; from PLC: confirm flow order from which station hands off to which (handshake bits, sequence steps). Caption states the direction of flow.",
+      "order": 20
+    },
+    {
+      "id": "product.components",
+      "title": "Main assemblies and their functions",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "10/10",
+      "sources": [
+        "cad",
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [
+        "top_level_assemblies"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table: item no., assembly name (human name, not the CAD file name), one-line function. This is a summary index to the per-subsystem function sections that follow; part numbers belong in the spare-parts chapter.",
+      "order": 21
+    },
+    {
+      "id": "product.subsystem_function",
+      "title": "Subsystem function: {{subsystem_name}}",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "9/10 (ManualOS structure)",
+      "sources": [
+        "cad",
+        "plc",
+        "spec"
+      ],
+      "standards": [],
+      "input_fields": [
+        "subsystems",
+        "subsystem_routines",
+        "subsystem_assemblies"
+      ],
+      "uses_hazard_library": true,
+      "prompt_guidance": "REPEAT once per subsystem, in product-flow order. Each instance answers, in prose plus a short fact table: (1) Purpose: what this subsystem does for the product and why; (2) Main components: the functional parts (drives, cylinders, vacuum, heaters, guides), named by function; (3) How it moves: each motion, its actuator, direction/stroke/speed if known; (4) Sensors and what each one tells the control; (5) Interlocks and permissives: what must be true before it moves and what stops it; (6) Operator interaction: what the operator loads, adjusts, watches or clears here; (7) Hazards specific to this subsystem. PLC input: read every rung of the routine(s) that control this subsystem and describe the resulting behaviour; group related rungs into one functional statement and cite them only as a small reference (e.g. 'Rungs 4-11'). CAD input: infer function from assembly and part names, purchased motion components (motors, gearboxes, servos, cylinders, vacuum cups, linear guides, belts, heaters), sensors, guards and their placement along the flow; describe what the assembly does and how the parts work together, not a parts list. Both present: merge into one narrative; CAD supplies the physical arrangement, PLC supplies behaviour and conditions. Mark any statement that is inferred rather than read directly with an 'Inferred - please confirm' marker so the user can verify.",
+      "order": 22
+    },
+    {
+      "id": "product.sequence",
+      "title": "Sequence of operation",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "8/10 (strengthened)",
+      "sources": [
+        "plc",
+        "cad"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(d)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "The machine cycle from the product's point of view, as numbered steps (and an optional flow diagram): which subsystem acts, what triggers each step, what it waits for, and the hand-off to the next station. Include start-up/homing, the normal automatic cycle, cycle stop, and what happens after a fault or E-stop. Derived from the PLC main sequence / state machine, step logic and timers; if only CAD is available, infer the order from the product flow path and mark it inferred.",
+      "order": 23
+    },
+    {
+      "id": "product.interlocks",
+      "title": "Interlocks, permissives and machine states",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "6/10 (gap-filled)",
+      "sources": [
+        "plc"
+      ],
+      "standards": [
+        "IEC 60204-1 9",
+        "ISO 13849-1"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Plain-language table of conditions: condition, what it prevents or allows, which subsystems are affected, how it is cleared. Covers start permissives (doors closed, air OK, safety reset, glue ready), run interlocks between stations (e.g. no pick until a case is open), and machine states (stopped, ready, running, cycle-stopping, faulted). Safety-rated functions are cross-referenced to the Safety chapter, not repeated.",
+      "order": 24
+    },
+    {
+      "id": "product.control_logic",
+      "title": "Control logic description",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "ManualOS addition",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [
+        "plc_routines"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Describe what the control program makes the machine do, organised by machine function (not by routine or rung order). For each function: a plain-language heading, a short paragraph of what the logic does and under which conditions, and a small rung-range reference (e.g. 'Rungs 4-11'). Read every rung; summarise related rungs (a seal-in, its permissives and its output) as one statement; never paraphrase rung by rung. Every rung must be accounted for in exactly one function group or in the program cross-reference appendix as housekeeping (comments, spare, diagnostics). No instruction mnemonics (XIC, OTE, TON...), tag names or addresses in headings or prose; use device names (e.g. 'the case-present sensor'). If no PLC program was uploaded, emit 'NEEDS INPUT: upload the PLC program to generate this section' instead.",
+      "order": 25
+    },
+    {
+      "id": "product.identification",
+      "title": "Identification and nameplate",
+      "chapter": "2 Machine description and theory of operation",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "spec",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.3",
+        "NFPA 79 16.4"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Nameplate location and fields (manufacturer, model, serial, year, voltage, FLA, SCCR, air pressure, mass, CE/UKCA/UL marks).",
+      "order": 26
+    },
+    {
+      "id": "product.options",
+      "title": "Options and accessories",
+      "chapter": "2 Machine description and theory of operation",
+      "required": false,
+      "frequency": "7/10",
+      "sources": [
+        "spec",
+        "cad",
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Installed options and how they change what the machine does; detect from PLC option bits and CAD optional assemblies, and describe the functional effect.",
+      "order": 27
+    },
+    {
+      "id": "transport.lifting",
+      "title": "Transport and lifting",
+      "chapter": "3 Transport, handling and storage",
+      "required": true,
+      "frequency": "6/10",
+      "sources": [
+        "cad",
+        "spec"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(p)",
+        "ISO 12100"
+      ],
+      "input_fields": [
+        "mass_total",
+        "mass_modules",
+        "center_of_gravity",
+        "lifting_points"
+      ],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Total mass and mass of each separately shipped module, centre of gravity, lifting points, sling angles, forklift positions, transport locks to fit/remove. Weights from CAD mass properties.",
+      "order": 28
+    },
+    {
+      "id": "transport.unpacking",
+      "title": "Unpacking and inspection on receipt",
+      "chapter": "3 Transport, handling and storage",
+      "required": false,
+      "frequency": "4/10",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Checklist for damage and completeness against packing list.",
+      "order": 29
+    },
+    {
+      "id": "transport.storage",
+      "title": "Storage",
+      "chapter": "3 Transport, handling and storage",
+      "required": true,
+      "frequency": "6/10",
+      "sources": [
+        "spec"
+      ],
+      "standards": [],
+      "input_fields": [
+        "storage_temp",
+        "storage_humidity"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Storage temperature/humidity range, preservation (corrosion protection, battery, desiccant), maximum storage time before re-commissioning checks.",
+      "order": 30
+    },
+    {
+      "id": "install.site",
+      "title": "Site requirements and foundation",
+      "chapter": "4 Installation",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "cad",
+        "spec"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(i)(o)"
+      ],
+      "input_fields": [
+        "footprint",
+        "clearances",
+        "floor_load"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Footprint, service clearances, floor load, foundation/anchoring, leveling tolerance, ambient limits. Dimensions from CAD.",
+      "order": 31
+    },
+    {
+      "id": "install.mechanical",
+      "title": "Mechanical installation and leveling",
+      "chapter": "4 Installation",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "cad"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Step-by-step placement, anchoring, leveling, removal of shipping locks, fitting of guards shipped loose.",
+      "order": 32
+    },
+    {
+      "id": "install.utilities",
+      "title": "Utility connections (electrical, air, hydraulic, water, exhaust)",
+      "chapter": "4 Installation",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "spec",
+        "plc",
+        "cad"
+      ],
+      "standards": [
+        "NFPA 79",
+        "IEC 60204-1",
+        "ISO 8573-1"
+      ],
+      "input_fields": [
+        "voltage",
+        "FLA",
+        "SCCR",
+        "air_pressure",
+        "air_flow"
+      ],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Supply voltage/frequency, full-load current, SCCR, recommended fuse/breaker, grounding/PE, cable entry; compressed air pressure/flow/quality (ISO 8573-1); hydraulic fluid; coolant; exhaust/extraction.",
+      "order": 33
+    },
+    {
+      "id": "install.controls",
+      "title": "Control and network connections",
+      "chapter": "4 Installation",
+      "required": false,
+      "frequency": "6/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [
+        "IEC 60204-1"
+      ],
+      "input_fields": [
+        "io_list",
+        "network"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "External I/O interface, safety interface to host line, fieldbus/network addresses.",
+      "order": 34
+    },
+    {
+      "id": "install.noise_vibration",
+      "title": "Installation measures to reduce noise and vibration",
+      "chapter": "4 Installation",
+      "required": false,
+      "frequency": "2/10 (gap-filled)",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(j)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Mounting pads, enclosures, isolation recommendations.",
+      "order": 35
+    },
+    {
+      "id": "commission.prestart",
+      "title": "Pre-start checks",
+      "chapter": "5 Commissioning",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "plc",
+        "user_input"
+      ],
+      "standards": [
+        "IEC 60204-1 18"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Checklist: utilities, rotation direction, fluid levels, guards fitted, safety function tests (each E-stop, interlock) recorded.",
+      "order": 36
+    },
+    {
+      "id": "commission.first_start",
+      "title": "Initial start-up and test run",
+      "chapter": "5 Commissioning",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(k)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Sequence for first power-up, homing/referencing, dry cycle, first-article run. Derived from PLC init/home sequences.",
+      "order": 37
+    },
+    {
+      "id": "commission.recommission",
+      "title": "Re-commissioning after standstill or relocation",
+      "chapter": "5 Commissioning",
+      "required": false,
+      "frequency": "4/10",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "What to check after long storage or move.",
+      "order": 38
+    },
+    {
+      "id": "commission.training",
+      "title": "Operator training",
+      "chapter": "5 Commissioning",
+      "required": false,
+      "frequency": "3/10 (gap-filled)",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(k)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Training content and sign-off record.",
+      "order": 39
+    },
+    {
+      "id": "hmi.controls",
+      "title": "Control elements and indicators",
+      "chapter": "6 Controls and HMI",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc",
+        "cad"
+      ],
+      "standards": [
+        "IEC 60204-1 10",
+        "IEC 60073"
+      ],
+      "input_fields": [
+        "io_list"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table of every physical control (pushbutton, selector, key switch, indicator lamp, stack light colours) with location and what it makes the machine do. From PLC I/O list descriptions and the logic that uses each input. Device names only; tags belong in the I/O appendix.",
+      "order": 40
+    },
+    {
+      "id": "hmi.screens",
+      "title": "HMI screens and navigation",
+      "chapter": "6 Controls and HMI",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc",
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [
+        "hmi_screens",
+        "access_levels"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Screen map and description of each screen; user/access levels.",
+      "order": 41
+    },
+    {
+      "id": "ops.modes",
+      "title": "Operating modes",
+      "chapter": "7 Operation",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.2.5",
+        "ISO 10218-1"
+      ],
+      "input_fields": [
+        "mode_tags"
+      ],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Each mode (auto, manual/jog, setup, maintenance, cleaning) with: how to select, what the machine does in that mode, which safeguards are active or muted, speed limits. From the PLC mode logic, described functionally.",
+      "order": 42
+    },
+    {
+      "id": "ops.startup",
+      "title": "Daily start-up",
+      "chapter": "7 Operation",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Power-on, warm-up, homing, safety check, start production. Step list from PLC start sequence.",
+      "order": 43
+    },
+    {
+      "id": "ops.normal",
+      "title": "Normal operation and production",
+      "chapter": "7 Operation",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Operator tasks during production, loading/unloading, material replenishment; refer to the Sequence of operation rather than repeating it.",
+      "order": 44
+    },
+    {
+      "id": "ops.setup",
+      "title": "Setup, changeover and recipes",
+      "chapter": "7 Operation",
+      "required": false,
+      "frequency": "6/10",
+      "sources": [
+        "plc",
+        "cad"
+      ],
+      "standards": [],
+      "input_fields": [
+        "recipes"
+      ],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Changeover steps, change parts, recipe/parameter selection.",
+      "order": 45
+    },
+    {
+      "id": "ops.parameters",
+      "title": "Programming and parameters",
+      "chapter": "7 Operation",
+      "required": false,
+      "frequency": "7/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [
+        "parameters"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "User-adjustable parameters with ranges and defaults (from PLC tags flagged as HMI-writable).",
+      "order": 46
+    },
+    {
+      "id": "ops.stop",
+      "title": "Stopping and shutdown",
+      "chapter": "7 Operation",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [
+        "IEC 60204-1 9.2"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Normal stop, cycle stop, end-of-shift shutdown, emergency stop recovery.",
+      "order": 47
+    },
+    {
+      "id": "ops.cleaning",
+      "title": "Cleaning (operator level)",
+      "chapter": "7 Operation",
+      "required": false,
+      "frequency": "5/10",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Routine cleaning, approved agents, hygiene requirements (food/pharma).",
+      "order": 48
+    },
+    {
+      "id": "trouble.alarms",
+      "title": "Alarm and fault messages",
+      "chapter": "8 Alarms, faults and troubleshooting",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [
+        "alarm_list"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table generated from PLC alarm list: code, text, severity/class, cause, remedy, reset method. Group by subsystem. Derive cause from the rungs that set the alarm, written as a machine condition (e.g. 'case not detected open within 1.5 s'), not as logic.",
+      "order": 49
+    },
+    {
+      "id": "trouble.table",
+      "title": "Troubleshooting guide",
+      "chapter": "8 Alarms, faults and troubleshooting",
+      "required": true,
+      "frequency": "8/10",
+      "sources": [
+        "plc",
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Symptom -> probable cause -> remedy table for problems not tied to an alarm code.",
+      "order": 50
+    },
+    {
+      "id": "trouble.emergency",
+      "title": "Accidents, breakdowns, unblocking and rescue",
+      "chapter": "8 Alarms, faults and troubleshooting",
+      "required": true,
+      "frequency": "4/10 (gap-filled)",
+      "sources": [
+        "plc",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(q)(v)",
+        "ISO 10218-1"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "How to free a trapped person (e.g. moving axes/robot without drive power, releasing brakes), clearing jams safely, fire response.",
+      "order": 51
+    },
+    {
+      "id": "maint.safety",
+      "title": "Maintenance safety",
+      "chapter": "9 Maintenance",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "standard",
+        "hazard_library"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(s)",
+        "OSHA 1910.147"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Who may do which tasks; LOTO reference; working at height; hot surfaces; restore safeguards and test before return to service.",
+      "order": 52
+    },
+    {
+      "id": "maint.schedule",
+      "title": "Preventive maintenance schedule",
+      "chapter": "9 Maintenance",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "spec",
+        "cad",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(r)"
+      ],
+      "input_fields": [
+        "pm_tasks"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table: interval (daily/weekly/monthly/500 h/2000 h/yearly), component, task, who, reference procedure. Seed with vendor component intervals from CAD BOM purchased parts.",
+      "order": 53
+    },
+    {
+      "id": "maint.lubrication",
+      "title": "Lubrication and fluids",
+      "chapter": "9 Maintenance",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "cad",
+        "spec"
+      ],
+      "standards": [],
+      "input_fields": [
+        "lube_points",
+        "fluids"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Lube points figure and table: point, lubricant spec, quantity, interval; fluid capacities.",
+      "order": 54
+    },
+    {
+      "id": "maint.inspection",
+      "title": "Inspection and safety-function testing",
+      "chapter": "9 Maintenance",
+      "required": true,
+      "frequency": "6/10",
+      "sources": [
+        "plc"
+      ],
+      "standards": [
+        "ISO 13849-2",
+        "ISO 14119"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Periodic test of each safety device (from safety I/O list) with pass criteria.",
+      "order": 55
+    },
+    {
+      "id": "maint.procedures",
+      "title": "Maintenance and replacement procedures",
+      "chapter": "9 Maintenance",
+      "required": true,
+      "frequency": "7/10",
+      "sources": [
+        "cad"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Step-by-step for wear parts replacement (belts, filters, seals, guard windows), torque values.",
+      "order": 56
+    },
+    {
+      "id": "maint.adjustment",
+      "title": "Adjustment and calibration",
+      "chapter": "9 Maintenance",
+      "required": false,
+      "frequency": "6/10",
+      "sources": [
+        "plc",
+        "cad"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Homing/reference, sensor adjustment, mastering/calibration.",
+      "order": 57
+    },
+    {
+      "id": "parts.list",
+      "title": "Spare and wear parts list",
+      "chapter": "10 Spare parts",
+      "required": true,
+      "frequency": "6/10",
+      "sources": [
+        "cad"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(t)"
+      ],
+      "input_fields": [
+        "bom"
+      ],
+      "uses_hazard_library": false,
+      "prompt_guidance": "From CAD BOM: item, part number, description, qty, recommended spares (critical/wear), vendor. Mark safety-relevant parts (must be OEM spec).",
+      "order": 58
+    },
+    {
+      "id": "parts.ordering",
+      "title": "How to order parts and service",
+      "chapter": "10 Spare parts",
+      "required": false,
+      "frequency": "6/10",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Contact info, what to quote (model, serial).",
+      "order": 59
+    },
+    {
+      "id": "decom.decommission",
+      "title": "Decommissioning and dismantling",
+      "chapter": "11 Decommissioning and disposal",
+      "required": true,
+      "frequency": "5/10",
+      "sources": [
+        "cad",
+        "user_input"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(o)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": true,
+      "prompt_guidance": "Safe shutdown, draining fluids, releasing stored energy, dismantling order, stability during dismantling.",
+      "order": 60
+    },
+    {
+      "id": "decom.disposal",
+      "title": "Disposal and environmental",
+      "chapter": "11 Decommissioning and disposal",
+      "required": true,
+      "frequency": "5/10",
+      "sources": [
+        "cad"
+      ],
+      "standards": [
+        "WEEE 2012/19/EU"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Material breakdown from CAD BOM materials; batteries, electronics (WEEE), oils, refrigerants.",
+      "order": 61
+    },
+    {
+      "id": "app.techdata",
+      "title": "Technical data",
+      "chapter": "12 Appendices",
+      "required": true,
+      "frequency": "9/10",
+      "sources": [
+        "spec",
+        "cad"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Dimensions, mass, performance, electrical, pneumatic, hydraulic, environment, noise.",
+      "order": 62
+    },
+    {
+      "id": "app.diagrams",
+      "title": "Electrical, pneumatic and hydraulic diagrams",
+      "chapter": "12 Appendices",
+      "required": false,
+      "frequency": "6/10",
+      "sources": [
+        "cad",
+        "plc"
+      ],
+      "standards": [
+        "IEC 81346",
+        "ISO 1219"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Reference/attach schematics; include I/O list.",
+      "order": 63
+    },
+    {
+      "id": "app.io_list",
+      "title": "PLC I/O and tag list",
+      "chapter": "12 Appendices",
+      "required": false,
+      "frequency": "2/10 (ManualOS addition)",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Full I/O table: address, tag, description, device. This and the program cross-reference are the only places where tag names and addresses appear.",
+      "order": 64
+    },
+    {
+      "id": "app.program_xref",
+      "title": "Control program cross-reference",
+      "chapter": "12 Appendices",
+      "required": false,
+      "frequency": "ManualOS addition",
+      "sources": [
+        "plc"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Table mapping every PLC routine and rung range to the manual section that describes it (function group), plus rungs classed as housekeeping. Rung totals must equal the program's rung count; the generator fails the build if any rung is unaccounted for. Routine and tag names are allowed here.",
+      "order": 65
+    },
+    {
+      "id": "app.compliance",
+      "title": "Declaration of conformity and applied standards",
+      "chapter": "12 Appendices",
+      "required": true,
+      "frequency": "6/10",
+      "sources": [
+        "user_input",
+        "standard"
+      ],
+      "standards": [
+        "EU 2023/1230 Annex III 1.7.4.2(c)"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "DoC copy or link, list of applied standards.",
+      "order": 66
+    },
+    {
+      "id": "app.warranty",
+      "title": "Warranty and service contacts",
+      "chapter": "12 Appendices",
+      "required": false,
+      "frequency": "4/10",
+      "sources": [
+        "user_input"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Warranty terms reference and service contacts.",
+      "order": 67
+    },
+    {
+      "id": "app.glossary",
+      "title": "Glossary and abbreviations",
+      "chapter": "12 Appendices",
+      "required": true,
+      "frequency": "4/10 (gap-filled)",
+      "sources": [
+        "standard",
+        "plc"
+      ],
+      "standards": [
+        "IEC/IEEE 82079-1"
+      ],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Terms and abbreviations used; auto-collect abbreviations from tag descriptions.",
+      "order": 68
+    },
+    {
+      "id": "app.index",
+      "title": "Index",
+      "chapter": "12 Appendices",
+      "required": false,
+      "frequency": "5/10",
+      "sources": [
+        "standard"
+      ],
+      "standards": [],
+      "input_fields": [],
+      "uses_hazard_library": false,
+      "prompt_guidance": "Auto-generated.",
+      "order": 69
+    }
+  ]
+}
