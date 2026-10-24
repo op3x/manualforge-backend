@@ -169,7 +169,7 @@ async function main() {
   for (const item of card.checks) console.log(item.ok ? 'PASS' : 'FAIL', item.name);
 }
 
-main().catch((err) => {
+main().then(() => process.exit(0)).catch((err) => {
   console.error(err);
   process.exit(1);
 });
