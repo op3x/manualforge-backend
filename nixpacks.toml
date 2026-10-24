@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["nodejs_20", "chromium", "liberation_ttf"]
+nixPkgs = ["nodejs_24", "chromium", "liberation_ttf"]
 
 [start]
 cmd = "node server.js"
