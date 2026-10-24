@@ -1,0 +1,19 @@
+{
+  "created": "2026-10-24",
+  "purpose": "Small committed corpus so CI can run npm test without the private manualos-test-corpus store.",
+  "count": 2,
+  "files": [
+    {
+      "file": "plc/line.L5X",
+      "format": "Rockwell L5X",
+      "redistributable": true,
+      "machine": "One-rung conveyor fixture"
+    },
+    {
+      "file": "cad/pulley.stp",
+      "format": "STEP",
+      "redistributable": true,
+      "machine": "Conveyor pulley fixture"
+    }
+  ]
+}

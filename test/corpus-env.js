@@ -14,10 +14,14 @@ function corpusAvailable(root = corpusRoot()) {
   return fs.existsSync(path.join(root, 'manifest.json'));
 }
 
+function corpusHas(rel, root = corpusRoot()) {
+  return fs.existsSync(path.join(root, rel));
+}
+
 function corpusSkip(root = corpusRoot()) {
   if (corpusAvailable(root)) return false;
   if (process.env.CI || process.env.GITHUB_ACTIONS) return false;
   return true;
 }
 
-module.exports = { corpusRoot, corpusAvailable, corpusSkip };
+module.exports = { corpusRoot, corpusAvailable, corpusHas, corpusSkip };

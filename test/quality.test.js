@@ -11,7 +11,7 @@ const { parseUploads } = require('../lib/parsers');
 const { analyzeRoutine, coverageOf } = require('../lib/logic');
 const { buildDocument } = require('../lib/manual/assemble');
 const { renderHtml } = require('../lib/manual/html');
-const { corpusRoot, corpusAvailable, corpusSkip } = require('./corpus-env');
+const { corpusRoot, corpusAvailable, corpusHas } = require('./corpus-env');
 
 test('dictionary routine names and template headings are not rewritten', () => {
   const project = {
@@ -192,7 +192,7 @@ test('Beremiz ladder blocks become units and an empty body fails', async () => {
   );
 });
 
-test('GRFICS ladder POUs are all counted', { skip: corpusSkip() }, async () => {
+test('GRFICS ladder POUs are all counted', { skip: !corpusHas('plc/grfics_simplified_te_plcopen.xml') }, async () => {
   const root = corpusRoot();
   assert.ok(corpusAvailable(root), 'MANUALOS_CORPUS is not set and no corpus manifest was found. CI must provide the corpus.');
   const file = path.join(root, 'plc/grfics_simplified_te_plcopen.xml');
@@ -203,4 +203,7 @@ test('GRFICS ladder POUs are all counted', { skip: corpusSkip() }, async () => {
   const coverage = coverageOf(project);
   assert.equal(coverage.ok, true);
   assert.ok(coverage.units >= 9);
+  const html = renderHtml(buildDocument(project));
+  assert.equal((html.match(/writes its result to the connected output/g) || []).length, 0);
+  assert.match(html, /is set to/);
 });

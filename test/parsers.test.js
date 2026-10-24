@@ -6,7 +6,7 @@ const AdmZip = require('adm-zip');
 const { parseUploads } = require('../lib/parsers');
 const { analyzeRoutine, coverageOf } = require('../lib/logic');
 
-const { corpusRoot, corpusAvailable, corpusSkip } = require('./corpus-env');
+const { corpusRoot, corpusAvailable, corpusHas } = require('./corpus-env');
 const ROOT = corpusRoot();
 const hasCorpus = corpusAvailable(ROOT);
 
@@ -16,7 +16,7 @@ async function load(rel) {
   return parseUploads([{ name: path.basename(rel), buffer }]);
 }
 
-test('L5X keeps AOI routines, languages, aliases, and full coverage', { skip: corpusSkip(ROOT) }, async () => {
+test('L5X keeps AOI routines, languages, aliases, and full coverage', { skip: !corpusHas('plc/acd_ACDTestsWithAOI.L5X') }, async () => {
   assert.ok(hasCorpus, 'MANUALOS_CORPUS is not set and no corpus manifest was found. CI must provide the corpus.');
   const project = await load('plc/acd_ACDTestsWithAOI.L5X');
   assert.equal(project.routines.length, 5);
@@ -33,7 +33,7 @@ test('L5X keeps AOI routines, languages, aliases, and full coverage', { skip: co
   assert.ok(coverage.units >= 4);
 });
 
-test('duplicate routine names stay distinct and safety tasks are flagged', { skip: corpusSkip(ROOT) }, async () => {
+test('duplicate routine names stay distinct and safety tasks are flagged', { skip: !corpusHas('plc/emulator_Plc_emulator.L5X') }, async () => {
   const project = await load('plc/emulator_Plc_emulator.L5X');
   assert.equal(project.routines.length, 58);
   assert.ok(project.safetyPrograms.length > 0);
@@ -43,7 +43,7 @@ test('duplicate routine names stay distinct and safety tasks are flagged', { ski
   assert.equal(new Set(logic.map((routine) => routine.scopeKey)).size, logic.length);
 });
 
-test('Cooker AutoLogic keeps every program routine and AOI', { skip: corpusSkip(ROOT) }, async () => {
+test('Cooker AutoLogic keeps every program routine and AOI', { skip: !corpusHas('plc/brewery_Cooker_1_AutoLogic_Program.L5X') }, async () => {
   const project = await load('plc/brewery_Cooker_1_AutoLogic_Program.L5X');
   assert.equal(project.routines.length, 15);
   assert.equal(project.aois.length, 4);
@@ -53,7 +53,7 @@ test('Cooker AutoLogic keeps every program routine and AOI', { skip: corpusSkip(
   assert.equal(coverageOf(project).ok, true);
 });
 
-test('STEP assembly records bodies, units, and part-number names', { skip: corpusSkip(ROOT) }, async () => {
+test('STEP assembly records bodies, units, and part-number names', { skip: !corpusHas('cad/creator_transfer_chamber_COMPLETE_FRAME_ASY.stp') }, async () => {
   const frame = await load('cad/creator_transfer_chamber_COMPLETE_FRAME_ASY.stp');
   assert.equal(frame.cad.bodyCount, 111);
   assert.equal(frame.cad.lengthUnit, 'mm');
@@ -70,7 +70,7 @@ test('STEP assembly records bodies, units, and part-number names', { skip: corpu
   assert.match(motor.warnings.join(' '), /NEMA 23/);
 });
 
-test('DXF title block records drawing units', { skip: corpusSkip(ROOT) }, async () => {
+test('DXF title block records drawing units', { skip: !corpusHas('cad/cadzinho_title_a1.dxf') }, async () => {
   const project = await load('cad/cadzinho_title_a1.dxf');
   assert.equal(project.cad.lengthUnit, 'mm');
   assert.ok(project.cad.assemblies.length || project.cad.titleBlock.length);
@@ -101,7 +101,7 @@ test('rejects XXE, mismatched content, and zip paths without reading secrets', a
   );
 });
 
-test('ACD advice is limited to ACD files and does not invent routine names', { skip: corpusSkip(ROOT) }, async () => {
+test('ACD advice is limited to ACD files and does not invent routine names', { skip: !corpusHas('plc/acd_CuteLogix.ACD') }, async () => {
   const project = await load('plc/acd_CuteLogix.ACD');
   assert.equal(project.acdLimited, true);
   assert.equal(project.routines.some((routine) => /FloatingElement|CommentManager/.test(routine.name)), false);
