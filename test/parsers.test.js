@@ -55,8 +55,11 @@ test('STEP assembly records bodies, units, and part-number names', { skip: !hasC
   assert.equal(frame.cad.bodyCount, 111);
   assert.equal(frame.cad.lengthUnit, 'mm');
   assert.ok(frame.cad.assemblyLinks >= 200);
-  assert.equal(frame.identity.productName, 'COMPLETE FRAME ASY');
-  assert.ok(frame.cad.bom.some((part) => /Part /.test(part.description) || /NEEDS INPUT/.test(part.description)));
+  assert.match(frame.identity.productName, /Transfer Chamber Frame/);
+  assert.match(frame.cad.drawingName, /COMPLETE FRAME ASY/);
+  assert.ok(frame.cad.bom.some((part) => part.qty > 1));
+  assert.equal(frame.cad.bom.some((part) => /COMPLETE FRAME ASY/i.test(part.partNumber) || /COMPLETE FRAME ASY/i.test(part.description)), false);
+  assert.equal(frame.cad.bom.some((part) => /NEEDS INPUT/.test(part.description)), false);
   const inch = await load('cad/nist_ftc_08_asme1_rc.stp');
   assert.equal(inch.cad.lengthUnit, 'inch');
   const motor = await load('cad/freecadlib_NEMA23_stepper.step');
