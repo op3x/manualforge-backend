@@ -7,10 +7,12 @@ const { analyzeRoutine, coverageOf } = require('../lib/logic');
 const { buildDocument } = require('../lib/manual/assemble');
 const { renderHtml, headingsIn } = require('../lib/manual/html');
 
-const ROOT = process.env.MANUALOS_CORPUS || '/cursor/stores/bot/manualos-test-corpus/';
-const hasCorpus = fs.existsSync(path.join(ROOT, 'manifest.json'));
+const { corpusRoot, corpusAvailable, corpusSkip } = require('./corpus-env');
+const ROOT = corpusRoot();
+const hasCorpus = corpusAvailable(ROOT);
 
-test('every corpus file produces a manual or a clear rejection', { timeout: 180000, skip: !hasCorpus }, async () => {
+test('every corpus file produces a manual or a clear rejection', { timeout: 180000, skip: corpusSkip(ROOT) }, async () => {
+  assert.ok(hasCorpus, 'MANUALOS_CORPUS is not set and no corpus manifest was found. CI must provide the corpus.');
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
   const rows = [];
   for (const entry of manifest.files) {

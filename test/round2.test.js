@@ -26,7 +26,10 @@ test('ranges merge and alarms drop rulers and truncated codes', () => {
 test('a CAD manual describes motion and does not treat the frame as a product stage', async () => {
   const root = process.env.MANUALOS_CORPUS || '/cursor/stores/bot/manualos-test-corpus/';
   const file = path.join(root, 'cad/creator_transfer_chamber_COMPLETE_FRAME_ASY.stp');
-  if (!fs.existsSync(file)) return;
+  if (!fs.existsSync(file)) {
+    if (process.env.CI || process.env.GITHUB_ACTIONS) assert.fail(`Corpus file missing: ${file}. Set MANUALOS_CORPUS.`);
+    return;
+  }
   const project = await parseUploads([{ name: 'creator_transfer_chamber_COMPLETE_FRAME_ASY.stp', buffer: fs.readFileSync(file) }]);
   const doc = buildDocument(project);
   const html = renderHtml(doc);
@@ -40,12 +43,25 @@ test('a CAD manual describes motion and does not treat the frame as a product st
   assert.equal(project.cad.assemblies.some((item) => !item.leaf && item.role === 'process' && /bracket|acrylic|panel|screw|extrusion|fastener/i.test(item.name)), false);
   const flow = html.slice(html.indexOf('Machine layout'), html.indexOf('Main assemblies'));
   assert.equal(/Product flow/.test(flow), false);
+  assert.equal(/Read every rung|never paraphrase|Plain-language table of conditions|Table: device, location/i.test(html), false);
+  assert.equal(html.includes('None.;'), false);
+  assert.equal(/drain filters/i.test(html), false);
+  const scheduleAt = html.indexOf('Preventive maintenance schedule</h2>');
+  const schedule = html.slice(scheduleAt, html.indexOf('Lubrication and fluids</h2>', scheduleAt));
+  assert.equal((schedule.match(/<tr>/g) || []).length >= 16, true);
+  const troubleAt = html.indexOf('Troubleshooting guide</h2>');
+  const trouble = html.slice(troubleAt, html.indexOf('Accidents, breakdowns</h2>', troubleAt));
+  assert.match(trouble, /Subsystem/);
+  assert.equal((trouble.match(/<tr>/g) || []).length >= 4, true);
 });
 
 test('calculation logic is not described as a packaging line', async () => {
   const root = process.env.MANUALOS_CORPUS || '/cursor/stores/bot/manualos-test-corpus/';
   const file = path.join(root, 'plc/rockwell_WetBulbTemperature_AOI.L5X');
-  if (!fs.existsSync(file)) return;
+  if (!fs.existsSync(file)) {
+    if (process.env.CI || process.env.GITHUB_ACTIONS) assert.fail(`Corpus file missing: ${file}. Set MANUALOS_CORPUS.`);
+    return;
+  }
   const project = await parseUploads([{ name: path.basename(file), buffer: fs.readFileSync(file) }]);
   for (const routine of project.routines) analyzeRoutine(routine, project, null);
   const doc = buildDocument(project);
