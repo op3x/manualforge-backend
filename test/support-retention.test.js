@@ -3,8 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { installShutdown } = require('../server');
+const { acquireSupportLock, releaseSupportLock } = require('../lib/support/lock');
 const { createSupportStore } = require('../lib/support/store');
 const {
   DAY_MS,
@@ -151,11 +152,11 @@ function mockTwilio(recordings, transcriptions, hooks = {}) {
   };
 }
 
-test('retention days default to 90 and never drop below 1', () => {
-  assert.equal(retentionDays({}), 90);
-  assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '' }), 90);
-  assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '   ' }), 90);
-  assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: 'nope' }), 90);
+test('retention days default to 63 and never drop below 1', () => {
+  assert.equal(retentionDays({}), 63);
+  assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '' }), 63);
+  assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '   ' }), 63);
+  assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: 'nope' }), 63);
   assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '0' }), 1);
   assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '-4' }), 1);
   assert.equal(retentionDays({ SUPPORT_RETENTION_DAYS: '0.2' }), 1);
@@ -234,7 +235,7 @@ test('sweep deletes aged support artifacts and keeps durable records', async () 
   fs.writeFileSync(path.join(dir, 'keep.txt'), 'YOUNG_ARTIFACT');
   fs.writeFileSync(outside, 'OUTSIDE_SECRET');
   fs.symlinkSync(outside, path.join(dir, 'link-old'));
-  for (const name of ['messages/blob.txt', 'transcripts/clip.txt', 'recordings/vm.wav', 'stray.txt', 'link-old', 'opt-outs.json', 'consents.jsonl']) {
+  for (const name of ['threads.json', 'messages/blob.txt', 'transcripts/clip.txt', 'recordings/vm.wav', 'stray.txt', 'link-old', 'opt-outs.json', 'consents.jsonl']) {
     age(path.join(dir, name), old);
   }
   age(path.join(dir, 'keep.txt'), young);
@@ -254,9 +255,10 @@ test('sweep deletes aged support artifacts and keeps durable records', async () 
   assert.equal(first.value.files, 3);
   assert.equal(first.value.recordings, 0);
   assert.equal(first.value.transcriptions, 0);
+  assert.equal(first.value.sms, 0);
   assert.equal(first.value.twilio, 'off');
   assert.equal(first.value.errors, 0);
-  assert.match(log, /Support retention: days=90 threads=4 messages=6 transcripts=3 files=3 recordings=0 transcriptions=0 twilio=off errors=0/);
+  assert.match(log, /Support retention: days=90 threads=4 messages=6 transcripts=3 files=3 recordings=0 transcriptions=0 sms=0 twilio=off errors=0/);
   for (const secret of [
     'OLD_THREAD_MESSAGE',
     'YOUNG_THREAD_MESSAGE',
@@ -439,6 +441,7 @@ test('twilio deletion is skipped without credentials and filters by instant', as
     env: {
       NODE_ENV: 'test',
       SUPPORT_DATA_DIR: dir,
+      SUPPORT_RETENTION_DAYS: '90',
       TWILIO_ACCOUNT_SID: 'AC_test_account',
       TWILIO_AUTH_TOKEN: 'not-a-real-token',
     },
@@ -456,6 +459,8 @@ test('twilio deletion is skipped without credentials and filters by instant', as
   assert.equal(recordingList.params.pageSize, 200);
   assert.equal(recordingList.params.includeSoftDeleted, undefined);
   assert.equal(recordingList.params.dateCreatedBefore.getTime(), cutoff + DAY_MS);
+  assert.equal(recordingList.params.to, undefined);
+  assert.equal(recordingList.params.from, undefined);
   const transcriptionList = twilio.lists.find((entry) => entry.bucket === 'transcriptions');
   assert.equal(transcriptionList.params.dateCreatedBefore, undefined);
   const log = lines.join('\n');
@@ -563,4 +568,500 @@ test('store-shaped threads are pruned and opt-outs survive', async () => {
   assert.equal(reloaded.isOptedOut('+15551116666'), true);
   assert.equal(reloaded.getThread('+15551116777').history[0].content, 'still here');
   assert.equal(reloaded.listConsents().length, 1);
+});
+
+test('missing timestamps use file mtime and durable names survive at any depth', async () => {
+  const dir = tempDir();
+  const old = NOW - (100 * DAY_MS);
+  const young = NOW - (2 * DAY_MS);
+  const hour = 60 * 60 * 1000;
+
+  writeJson(path.join(dir, 'nested', 'opt-outs.json'), {
+    optOuts: { '+15551110001': { at: iso(old), source: 'sms' } },
+  });
+  writeJson(path.join(dir, 'opt-outs.json.bak'), { optOuts: { '+15551110002': { at: iso(old) } } });
+  writeJson(path.join(dir, 'archive', 'consents.jsonl'), [{ phone: '+15551110003', timestamp: iso(old) }]);
+  writeJson(path.join(dir, 'archive', 'Consents-old.json'), { phone: '+15551110004' });
+  writeJson(path.join(dir, 'fresh-notes.json'), { hello: 'FRESH_UNKNOWN' });
+  writeJson(path.join(dir, 'old-notes.json'), { hello: 'OLD_UNKNOWN' });
+  writeJson(path.join(dir, 'fresh-loose.json'), [{ body: 'UNDATED_FRESH' }]);
+  writeJson(path.join(dir, 'old-loose.json'), [{ body: 'UNDATED_OLD' }, 'UNDATED_STRING']);
+  writeJson(path.join(dir, 'threads.json'), {
+    '+15551110005': { history: [{ role: 'user', content: 'FUTURE_THREAD' }], updatedAt: iso(NOW + (10 * DAY_MS)) },
+  });
+  writeJson(path.join(dir, 'messages.json'), {
+    later: { at: NOW + (5 * DAY_MS), body: 'FUTURE_BODY' },
+  });
+  const futureFile = path.join(dir, 'future-loose.json');
+  writeJson(futureFile, [{ body: 'FUTURE_MTIME' }]);
+  fs.mkdirSync(path.join(dir, 'lost+found'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'lost+found', 'old.txt'), 'LOST_SECRET');
+  fs.writeFileSync(path.join(dir, 'stale.tmp'), 'OLD_TMP_SECRET');
+  fs.writeFileSync(path.join(dir, 'fresh.tmp'), 'YOUNG_TMP');
+  fs.writeFileSync(path.join(dir, 'hour.tmp'), 'HOUR_TMP');
+
+  for (const name of [
+    'nested/opt-outs.json',
+    'opt-outs.json.bak',
+    'archive/consents.jsonl',
+    'archive/Consents-old.json',
+    'old-notes.json',
+    'old-loose.json',
+    'lost+found/old.txt',
+  ]) {
+    age(path.join(dir, name), old);
+  }
+  age(path.join(dir, 'fresh-notes.json'), young);
+  age(path.join(dir, 'fresh-loose.json'), young);
+  age(path.join(dir, 'stale.tmp'), NOW - hour - 1000);
+  age(path.join(dir, 'fresh.tmp'), NOW - (30 * 60 * 1000));
+  age(path.join(dir, 'hour.tmp'), NOW - hour);
+  age(futureFile, NOW + (10 * DAY_MS));
+
+  const nestedBefore = fs.readFileSync(path.join(dir, 'nested', 'opt-outs.json'));
+  const bakBefore = fs.readFileSync(path.join(dir, 'opt-outs.json.bak'));
+  const consentBefore = fs.readFileSync(path.join(dir, 'archive', 'consents.jsonl'));
+
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+  }));
+  const log = lines.join('\n');
+  assert.equal(log.includes('FRESH_UNKNOWN'), false);
+  assert.equal(log.includes('OLD_UNKNOWN'), false);
+  assert.equal(log.includes('UNDATED_FRESH'), false);
+  assert.equal(log.includes('FUTURE_THREAD'), false);
+  assert.equal(log.includes('LOST_SECRET'), false);
+  assert.equal(log.includes('OLD_TMP_SECRET'), false);
+  assert.equal(log.includes('+15551110001'), false);
+
+  assert.equal(fs.readFileSync(path.join(dir, 'nested', 'opt-outs.json')).equals(nestedBefore), true);
+  assert.equal(fs.readFileSync(path.join(dir, 'opt-outs.json.bak')).equals(bakBefore), true);
+  assert.equal(fs.readFileSync(path.join(dir, 'archive', 'consents.jsonl')).equals(consentBefore), true);
+  assert.equal(fs.existsSync(path.join(dir, 'archive', 'Consents-old.json')), true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'fresh-notes.json'), 'utf8')).hello, 'FRESH_UNKNOWN');
+  assert.equal(fs.existsSync(path.join(dir, 'old-notes.json')), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'fresh-loose.json'), 'utf8'))[0].body, 'UNDATED_FRESH');
+  assert.equal(fs.existsSync(path.join(dir, 'old-loose.json')), false);
+  assert.equal(fs.readFileSync(path.join(dir, 'lost+found', 'old.txt'), 'utf8'), 'LOST_SECRET');
+  assert.equal(fs.existsSync(path.join(dir, 'stale.tmp')), false);
+  assert.equal(fs.readFileSync(path.join(dir, 'fresh.tmp'), 'utf8'), 'YOUNG_TMP');
+  assert.equal(fs.readFileSync(path.join(dir, 'hour.tmp'), 'utf8'), 'HOUR_TMP');
+
+  const threads = JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'));
+  assert.equal(threads['+15551110005'].updatedAt, iso(NOW));
+  assert.equal(threads['+15551110005'].history[0].content, 'FUTURE_THREAD');
+  const messages = JSON.parse(fs.readFileSync(path.join(dir, 'messages.json'), 'utf8'));
+  assert.equal(messages.later.at, NOW);
+  assert.equal(messages.later.body, 'FUTURE_BODY');
+  const futureLoose = JSON.parse(fs.readFileSync(futureFile, 'utf8'));
+  assert.equal(futureLoose[0].body, 'FUTURE_MTIME');
+  assert.ok(fs.statSync(futureFile).mtimeMs <= NOW + 2000);
+
+  assert.equal(value.threads, 0);
+  assert.equal(value.messages, 0);
+  assert.ok(value.files >= 2);
+  assert.equal(value.errors, 0);
+});
+
+test('a symlinked data directory is swept through its real path', async () => {
+  const real = tempDir();
+  const parent = tempDir();
+  const link = path.join(parent, 'support');
+  fs.symlinkSync(real, link);
+  const artifact = path.join(real, 'stray.txt');
+  fs.writeFileSync(artifact, 'LINKED_SECRET');
+  age(artifact, NOW - (100 * DAY_MS));
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: link,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: link, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+  }));
+  assert.equal(fs.existsSync(artifact), false);
+  assert.equal(fs.existsSync(path.join(real, '.support.lock')), false);
+  assert.equal(value.files, 1);
+  assert.equal(lines.join('\n').includes('LINKED_SECRET'), false);
+});
+
+test('the sweep refuses to overlap and a stale lock can be taken over', async () => {
+  const dir = tempDir();
+  const artifact = path.join(dir, 'stray.txt');
+  fs.writeFileSync(artifact, 'LOCKED_SECRET');
+  age(artifact, NOW - (100 * DAY_MS));
+  const held = acquireSupportLock(dir);
+  try {
+    assert.throws(
+      () => sweepSupportRetention({
+        directory: dir,
+        env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+        now: () => NOW,
+      }),
+      (err) => err && err.code === 'EBUSY',
+    );
+    assert.equal(fs.readFileSync(artifact, 'utf8'), 'LOCKED_SECRET');
+  } finally {
+    releaseSupportLock(held);
+  }
+
+  const stale = acquireSupportLock(dir);
+  const staleAt = new Date(Date.now() - (2 * 60 * 60 * 1000));
+  fs.utimesSync(stale.path, staleAt, staleAt);
+  try {
+    const { value } = await capture(() => sweepSupportRetention({
+      directory: dir,
+      env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+      now: () => NOW,
+    }));
+    assert.equal(value.files, 1);
+    assert.equal(value.errors, 0);
+    assert.equal(fs.existsSync(artifact), false);
+  } finally {
+    releaseSupportLock(stale);
+  }
+});
+
+test('a sweep in progress blocks another sweep and still allows a store write', async () => {
+  const dir = tempDir();
+  const oldFile = path.join(dir, 'stray.txt');
+  fs.writeFileSync(oldFile, 'OVERLAP_SECRET');
+  age(oldFile, NOW - (100 * DAY_MS));
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let listed = 0;
+  const recordings = (sid) => ({ async remove() { return sid; } });
+  recordings.list = async () => {
+    listed += 1;
+    await gate;
+    return [];
+  };
+  const transcriptions = { list: async () => [], calls: 0 };
+  transcriptions.list = async () => {
+    transcriptions.calls += 1;
+    return [];
+  };
+  const env = {
+    NODE_ENV: 'test',
+    SUPPORT_DATA_DIR: dir,
+    SUPPORT_RETENTION_DAYS: '90',
+    TWILIO_ACCOUNT_SID: 'AC_test',
+    TWILIO_AUTH_TOKEN: 'token',
+  };
+  const store = createSupportStore({ directory: dir, env, now: () => NOW });
+  const first = sweepSupportRetention({
+    directory: dir,
+    env,
+    now: () => NOW,
+    twilioClient: { recordings, transcriptions },
+  });
+  assert.equal(listed, 1);
+  assert.throws(
+    () => sweepSupportRetention({
+      directory: dir,
+      env,
+      now: () => NOW,
+      twilioClient: { recordings, transcriptions },
+    }),
+    (err) => err && err.code === 'EBUSY',
+  );
+  store.saveThread('+15551110077', {
+    turns: 1,
+    history: [{ role: 'user', content: 'DURING_SWEEP' }],
+    startedAt: iso(NOW),
+  });
+  release();
+  const { lines, value } = await capture(() => first);
+  assert.equal(transcriptions.calls, 1);
+  assert.equal(value.errors, 0);
+  assert.equal(fs.existsSync(oldFile), false);
+  assert.equal(lines.join('\n').includes('OVERLAP_SECRET'), false);
+  assert.equal(lines.join('\n').includes('DURING_SWEEP'), false);
+  const threads = JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'));
+  assert.equal(threads['+15551110077'].history[0].content, 'DURING_SWEEP');
+});
+
+test('the npm script exits when the support lock is held', () => {
+  const dir = tempDir();
+  writeJson(path.join(dir, 'threads.json'), {
+    '+15551110001': { history: [{ role: 'user', content: 'SCRIPT_LOCKED_SECRET' }], updatedAt: iso(NOW - (200 * DAY_MS)) },
+  });
+  const held = acquireSupportLock(dir);
+  try {
+    const result = spawnSync(process.execPath, ['scripts/support-retention.js'], {
+      cwd: ROOT,
+      env: {
+        PATH: process.env.PATH,
+        NODE_ENV: 'test',
+        SUPPORT_DATA_DIR: dir,
+        SUPPORT_RETENTION_DAYS: '90',
+        TWILIO_ACCOUNT_SID: '',
+        TWILIO_AUTH_TOKEN: '',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /EBUSY/);
+    assert.equal(result.stderr.includes('SCRIPT_LOCKED_SECRET'), false);
+    assert.equal(result.stdout.includes('SCRIPT_LOCKED_SECRET'), false);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'))['+15551110001'].history[0].content, 'SCRIPT_LOCKED_SECRET');
+  } finally {
+    releaseSupportLock(held);
+  }
+});
+
+test('store writes from two processes keep every thread, opt-out, and consent', async () => {
+  const dir = tempDir();
+  const script = `
+    const { createSupportStore } = require('./lib/support/store');
+    const phone = process.argv[1];
+    const store = createSupportStore({
+      directory: process.env.SUPPORT_DATA_DIR,
+      env: process.env,
+    });
+    for (let i = 1; i <= 25; i += 1) {
+      store.saveThread(phone, {
+        turns: i,
+        history: [{ role: 'user', content: 'n' }],
+        startedAt: new Date().toISOString(),
+      });
+    }
+    store.optOut(phone, 'sms');
+    store.addConsent({
+      phone,
+      consentTextVersion: 'v1',
+      timestamp: new Date().toISOString(),
+      source: 'website',
+    });
+  `;
+  const env = {
+    PATH: process.env.PATH,
+    NODE_ENV: 'test',
+    SUPPORT_DATA_DIR: dir,
+  };
+  function run(phone) {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, ['-e', script, phone], { cwd: ROOT, env });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+  }
+  const phones = ['+15551112001', '+15551112002'];
+  const results = await Promise.all(phones.map((phone) => run(phone)));
+  for (const result of results) assert.equal(result.status, 0, result.stderr);
+  const threads = JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'));
+  assert.equal(threads[phones[0]].turns, 25);
+  assert.equal(threads[phones[1]].turns, 25);
+  const optOuts = JSON.parse(fs.readFileSync(path.join(dir, 'opt-outs.json'), 'utf8'));
+  assert.ok(optOuts.optOuts[phones[0]]);
+  assert.ok(optOuts.optOuts[phones[1]]);
+  const consents = fs.readFileSync(path.join(dir, 'consents.jsonl'), 'utf8').trim().split('\n');
+  assert.equal(consents.length, 2);
+});
+
+test('twilio messages to and from the support number are deleted with the same error handling', async () => {
+  const dir = tempDir();
+  const cutoff = NOW - (90 * DAY_MS);
+  const support = '+15557650000';
+  const old = new Date(NOW - (91 * DAY_MS));
+  const twilio = mockTwilio([
+    { sid: 'RE_old', dateCreated: old, status: 'completed' },
+  ], [
+    { sid: 'TR_old', dateCreated: old, status: 'completed', transcriptionText: 'SECRET_TWILIO_TRANSCRIPT' },
+  ]);
+  const removed = [];
+  const attempted = [];
+  const lists = [];
+  const messages = [
+    { sid: 'SM_to', to: support, from: '+15551110001', dateSent: old, body: 'SECRET_SMS_BODY' },
+    { sid: 'SM_from', to: '+15551110002', from: support, dateSent: old, body: 'SECRET_SMS_OUT' },
+    { sid: 'SM_both', to: support, from: support, dateSent: old },
+    { sid: 'SM_pretty', to: '+1 (555) 765-0000', from: '+15551110004', dateSent: old },
+    { sid: 'SM_other', to: '+15551110009', from: '+15551110008', dateSent: old, body: 'OTHER_SMS' },
+    { sid: 'SM_young', to: support, from: '+15551110003', dateSent: new Date(cutoff + 1000) },
+    { sid: 'SM_missing', to: support, from: '+15551110005' },
+    { sid: 'SM_gone', to: support, from: '+15551110006', dateSent: old },
+    { sid: 'SM_fail', to: '+15551110007', from: support, dateSent: old },
+  ];
+  const gone = new Set(['SM_gone']);
+  const fail = new Set(['SM_fail']);
+  const messageFn = (sid) => ({
+    async remove() {
+      attempted.push(sid);
+      if (gone.has(sid)) {
+        const err = new Error('gone SECRET_SMS_ERROR');
+        err.status = 404;
+        err.code = 20404;
+        throw err;
+      }
+      if (fail.has(sid)) {
+        const err = new Error('boom SECRET_SMS_BODY');
+        err.status = 500;
+        err.code = 20500;
+        throw err;
+      }
+      removed.push(sid);
+    },
+  });
+  messageFn.list = async (params) => {
+    lists.push(params);
+    return messages.map((item) => ({ ...item }));
+  };
+  twilio.client.messages = messageFn;
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: {
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      SUPPORT_RETENTION_DAYS: '90',
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_SUPPORT_NUMBER: support,
+    },
+    now: () => NOW,
+    twilioClient: twilio.client,
+  }));
+  assert.deepEqual(removed.sort(), ['SM_both', 'SM_from', 'SM_pretty', 'SM_to']);
+  assert.deepEqual(attempted.sort(), ['SM_both', 'SM_fail', 'SM_from', 'SM_gone', 'SM_pretty', 'SM_to']);
+  assert.equal(lists.length, 2);
+  assert.equal(lists[0].to, support);
+  assert.equal(lists[0].from, undefined);
+  assert.equal(lists[1].from, support);
+  assert.equal(lists[1].to, undefined);
+  assert.equal(lists[0].dateSentBefore.getTime(), cutoff + DAY_MS);
+  assert.equal(lists[0].pageSize, 200);
+  assert.equal(value.sms, 5);
+  assert.equal(value.recordings, 1);
+  assert.equal(value.transcriptions, 1);
+  assert.equal(value.errors, 1);
+  const log = lines.join('\n');
+  assert.match(log, /sms=5/);
+  assert.match(log, /Support retention failed 20500/);
+  assert.equal(log.includes('SECRET_SMS_BODY'), false);
+  assert.equal(log.includes('SECRET_TWILIO_TRANSCRIPT'), false);
+  assert.equal(log.includes(support), false);
+});
+
+test('a surfaced 429 stops the rest of the twilio pass', async () => {
+  const dir = tempDir();
+  const old = new Date(NOW - (100 * DAY_MS));
+  const removed = [];
+  let transcriptions = 0;
+  let messages = 0;
+  const recordings = (sid) => ({
+    async remove() {
+      if (sid === 'RE_slow') {
+        const err = new Error('slow SECRET_RATE');
+        err.status = 429;
+        err.code = 20429;
+        throw err;
+      }
+      removed.push(sid);
+    },
+  });
+  recordings.list = async () => [
+    { sid: 'RE_ok', dateCreated: old, status: 'completed' },
+    { sid: 'RE_slow', dateCreated: old, status: 'completed' },
+    { sid: 'RE_later', dateCreated: old, status: 'completed' },
+  ];
+  const transcriptionList = { list: async () => { transcriptions += 1; return []; } };
+  const messageList = { list: async () => { messages += 1; return []; } };
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: {
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      SUPPORT_RETENTION_DAYS: '90',
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_SUPPORT_NUMBER: '+15557650000',
+    },
+    now: () => NOW,
+    twilioClient: { recordings, transcriptions: transcriptionList, messages: messageList },
+  }));
+  assert.deepEqual(removed, ['RE_ok']);
+  assert.equal(transcriptions, 0);
+  assert.equal(messages, 0);
+  assert.equal(value.recordings, 1);
+  assert.equal(value.sms, 0);
+  assert.equal(value.errors, 1);
+  const log = lines.join('\n');
+  assert.match(log, /Support retention failed 20429/);
+  assert.equal(log.includes('SECRET_RATE'), false);
+});
+
+test('a 429 on the next recording page stops before transcriptions', async () => {
+  const dir = tempDir();
+  const old = new Date(NOW - (100 * DAY_MS));
+  const removed = [];
+  let transcriptions = 0;
+  const recordings = (sid) => ({
+    async remove() { removed.push(sid); },
+  });
+  recordings.page = async (params) => {
+    assert.equal(params.pageSize, 200);
+    assert.equal(params.dateCreatedBefore.getTime(), (NOW - (90 * DAY_MS)) + DAY_MS);
+    return {
+      instances: [{ sid: 'RE_page', dateCreated: old, status: 'completed' }],
+      nextPage: async () => {
+        const err = new Error('page SECRET_PAGE');
+        err.status = 429;
+        err.code = 20429;
+        throw err;
+      },
+    };
+  };
+  recordings.list = async () => {
+    throw new Error('list should not be used when page exists');
+  };
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: {
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      SUPPORT_RETENTION_DAYS: '90',
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: 'token',
+    },
+    now: () => NOW,
+    twilioClient: {
+      recordings,
+      transcriptions: { list: async () => { transcriptions += 1; return []; } },
+    },
+  }));
+  assert.deepEqual(removed, ['RE_page']);
+  assert.equal(transcriptions, 0);
+  assert.equal(value.recordings, 1);
+  assert.equal(value.errors, 1);
+  assert.match(lines.join('\n'), /Support retention failed 20429/);
+  assert.equal(lines.join('\n').includes('SECRET_PAGE'), false);
+});
+
+test('the retention twilio client enables autoRetry', async () => {
+  const dir = tempDir();
+  let seen = null;
+  const recordings = () => ({ async remove() {} });
+  recordings.list = async () => [];
+  const transcriptions = { list: async () => [] };
+  const { value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: {
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      TWILIO_ACCOUNT_SID: 'AC_factory',
+      TWILIO_AUTH_TOKEN: 'factory-token',
+    },
+    now: () => NOW,
+    twilioFactory(sid, token, opts) {
+      seen = { sid, token, opts };
+      return { recordings, transcriptions };
+    },
+  }));
+  assert.equal(seen.sid, 'AC_factory');
+  assert.equal(seen.token, 'factory-token');
+  assert.equal(seen.opts.autoRetry, true);
+  assert.equal(seen.opts.maxRetries, 3);
+  assert.equal(value.twilio, 'on');
+  assert.equal(value.sms, 0);
+  assert.equal(value.errors, 0);
 });
