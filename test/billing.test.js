@@ -116,6 +116,8 @@ test('origins and defaults', () => {
   assert.equal(origins.has('https://manualos.com'), true);
   assert.equal(origins.has('https://www.manualos.com'), true);
   assert.equal(origins.has('https://evil.example'), false);
+  const apexAlways = allowedOrigins({ FRONTEND_URL: 'https://www.manualos.com' });
+  assert.equal(apexAlways.has('https://manualos.com'), true);
   assert.equal(starterCreditAllowance({}), 3);
   assert.equal(starterCreditAllowance({ STARTER_CREDITS: '5' }), 5);
   assert.equal(starterCreditAllowance({ STARTER_CREDITS: 'nope' }), 3);

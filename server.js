@@ -26,6 +26,7 @@ const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
+const { mountSupport } = require('./lib/support/http');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
@@ -98,7 +99,18 @@ function logWebhookEvent(event) {
   }
 }
 
-function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {}) {
+function createApp({
+  env = process.env,
+  stripe,
+  anthropic,
+  renderPdf,
+  jobs,
+  supportStore,
+  twilioClient,
+  supportComplete,
+  supportNow,
+  mailer,
+} = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const uploadLimit = limits(env).uploadBytes;
@@ -106,6 +118,8 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
   const store = jobs || createJobStore({ env });
   const app = express();
   app.disable('x-powered-by');
+  // Railway is one proxy hop. req.ip is the client that hop saw, not a header the client can rotate.
+  app.set('trust proxy', 1);
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
@@ -296,6 +310,21 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
       },
     }).catch(next);
   });
+
+  const support = mountSupport(app, {
+    env,
+    store: supportStore,
+    twilioClient,
+    complete: supportComplete,
+    now: supportNow,
+    mailer,
+  });
+  const listen = app.listen.bind(app);
+  app.listen = function listenWithRelay(...args) {
+    const server = listen(...args);
+    support.attach(server);
+    return server;
+  };
 
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
