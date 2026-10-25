@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createApp } = require('../server');
+const { createJobStore } = require('../lib/jobs/store');
 const {
   GENERATION_REFRESH_MS,
   clearGenerationStarted,
@@ -230,6 +231,42 @@ test('one job finishing does not clear another job that is still running', async
   await clearGenerationStarted(paid.stripe, access, 'cs_test_starter');
   assert.equal(Object.hasOwn(paid.meta, 'generation_started_at'), false);
   assert.equal(Object.hasOwn(paid.meta, 'generation_in_progress'), false);
+});
+
+test('a PDF save failure leaves no delivery stamp and the refund stays eligible', async () => {
+  const paid = starterStripe();
+  recentStarter(paid);
+  const jobs = createJobStore({ env: env() });
+  jobs.savePdf = () => {
+    const err = new Error('EACCES: permission denied');
+    err.code = 'EACCES';
+    throw err;
+  };
+  try {
+    await withServer(createApp({
+      env: env(),
+      stripe: paid.stripe,
+      anthropic: anthropic(),
+      renderPdf: async () => Buffer.from('%PDF-1.4\n%unsaved\n'),
+      jobs,
+    }), async (base) => {
+      const created = await postJob(base, 'line.L5X', L5X);
+      assert.equal(created.status, 202);
+      const done = await waitJob(base, (await created.json()).id);
+      assert.equal(done.status, 'failed');
+      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+      assert.equal(pdf.status, 409);
+      assert.equal(paid.calls.updates.some((metadata) => metadata.first_manual_at), false);
+      assert.equal(Object.hasOwn(paid.meta, 'first_manual_at'), false);
+      assert.equal(paid.meta.manuals_used, '0');
+      assert.equal(Object.hasOwn(paid.meta, 'generation_started_at'), false);
+      const check = await refundCheck(paid.stripe, 'pi_1');
+      assert.equal(check.purchases[0].delivered, false);
+      assert.equal(check.purchases[0].refund_eligible, true);
+    });
+  } finally {
+    jobs.close();
+  }
 });
 
 test('a stamp failure does not serve the pdf and refunds the credit', async () => {
