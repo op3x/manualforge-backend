@@ -236,6 +236,19 @@ async function postGenerate(base) {
   });
 }
 
+async function waitForSettledJob(base, id) {
+  const deadline = Date.now() + 60000;
+  let last = '';
+  while (Date.now() < deadline) {
+    const res = await fetch(`${base}/jobs/${id}`);
+    const body = await res.json();
+    last = body && body.status ? body.status : '';
+    if (last === 'succeeded' || last === 'failed') return body;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`job did not finish (${last})`);
+}
+
 function assertMetadataOnly(updates) {
   for (const update of updates) {
     assert.deepEqual(Object.keys(update), ['metadata']);
@@ -356,8 +369,17 @@ test('a partial pro refund is logged and does not block generation', async () =>
     assert.equal(lines.some((line) => /@|sk_|whsec_/.test(line)), false);
     const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
     assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null });
-    assert.equal((await postJob(base)).status, 202);
-    assert.equal((await postGenerate(base)).status, 200);
+    const created = await postJob(base);
+    assert.equal(created.status, 202);
+    const createdBody = await created.json();
+    await waitForSettledJob(base, createdBody.id);
+    const generated = await fetch(`${base}/generate-manual`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_pro' },
+      body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
+      signal: AbortSignal.timeout(120000),
+    });
+    assert.equal(generated.status, 200);
   });
 });
 

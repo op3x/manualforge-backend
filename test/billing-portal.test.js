@@ -8,6 +8,7 @@ const { removeTestJobDirectories } = require('../lib/jobs/store');
 const {
   EMAIL_LIMIT,
   INVALID_LINK,
+  CLAIM_RECLAIM_MS,
   IP_LIMIT,
   LINK_CANCEL_STEPS,
   LINK_CANCEL_URL,
@@ -1516,6 +1517,89 @@ test('a failed cancellation send releases the claim so a retry can send', async 
     assert.equal(sent.length, 1);
     assert.equal(fs.readdirSync(path.join(dir, 'cancel-confirmations')).length, 1);
   } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+function confirmationClaimFile(dir, end) {
+  return path.join(dir, 'cancel-confirmations', `sub_os_${end}.claim`);
+}
+
+test('an empty cancellation claim older than 15 minutes can be sent once', async () => exclusive(async () => {
+  const dir = confirmationDir();
+  const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
+  const file = confirmationClaimFile(dir, end);
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, '', { mode: 0o600 });
+  const payload = confirmationEvent(end);
+  const sent = [];
+  const app = createApp({
+    env: baseEnv({ SUPPORT_DATA_DIR: dir }),
+    stripe: confirmationStripe(),
+    anthropic: null,
+    mailer: { async sendMail(message) { sent.push(message); } },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const young = new Date(Date.now() - CLAIM_RECLAIM_MS + 60000);
+    fs.utimesSync(file, young, young);
+    const held = await postConfirmation(base, payload);
+    assert.equal(held.status, 200);
+    assert.equal(sent.length, 0);
+    assert.equal(fs.readFileSync(file, 'utf8'), '');
+
+    const stale = new Date(Date.now() - CLAIM_RECLAIM_MS - 60000);
+    fs.utimesSync(file, stale, stale);
+    const resent = await postConfirmation(base, payload);
+    assert.equal(resent.status, 200);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, 'buyer@example.com');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'sent\n');
+
+    fs.utimesSync(file, stale, stale);
+    const marked = await postConfirmation(base, payload);
+    assert.equal(marked.status, 200);
+    assert.equal(sent.length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('a failed cancellation send keeps the send error when the claim cannot be removed', async () => exclusive(async () => {
+  const dir = confirmationDir();
+  const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
+  const file = confirmationClaimFile(dir, end);
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const app = createApp({
+    env: baseEnv({ SUPPORT_DATA_DIR: dir }),
+    stripe: confirmationStripe(),
+    anthropic: null,
+    mailer: {
+      async sendMail() {
+        fs.rmSync(file);
+        fs.mkdirSync(file);
+        fs.writeFileSync(path.join(file, 'keep'), 'x');
+        throw new Error('smtp down');
+      },
+    },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const failed = await postConfirmation(base, confirmationEvent(end));
+    assert.equal(failed.status, 500);
+    assert.deepEqual(await failed.json(), { error: 'Webhook handler failed' });
+    assert.equal(logs.some((line) => line.includes('smtp down')), true);
+    assert.equal(logs.some((line) => line === 'cancellation confirmation claim was not removed EISDIR'), true);
+    assert.equal(logs.some((line) => line.includes('buyer@example.com')), false);
+    assert.equal(fs.statSync(file).isDirectory(), true);
+  } finally {
+    console.error = original;
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
   }
