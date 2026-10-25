@@ -3651,3 +3651,107 @@ test('round 7 review: cards, guard, refunds, opt-out, and timeouts', async () =>
     assert.doesNotMatch(threads, /4111 1111|4111111111111111/);
   });
 });
+
+test('round 8 spelled cards across texts and refund phrasing', async () => {
+  const env = aiEnv();
+  const visa = ['four', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one', 'one'];
+  const chunks = [
+    [visa.slice(0, 8).join(' '), visa.slice(8).join(' ')],
+    [visa.slice(0, 6).join(' '), visa.slice(6, 11).join(' '), visa.slice(11).join(' ')],
+    [visa.slice(0, 4).join(' '), visa.slice(4, 8).join(' '), visa.slice(8, 12).join(' '), visa.slice(12).join(' ')],
+    ['4111 1111', 'one one one one', '1111'],
+    ['cuatro uno uno uno uno uno uno uno', 'uno uno uno uno uno uno uno uno'],
+  ];
+  for (const parts of chunks) {
+    const session = state();
+    const store = tempStore();
+    const phone = '+15551119820';
+    let mainCalls = 0;
+    const seen = [];
+    let decision;
+    for (const text of parts) {
+      decision = await policy.triageTurn({
+        channel: 'sms',
+        text,
+        state: session,
+        env,
+        spentUsd: 0,
+        complete: async (request) => {
+          if (request.maxTokens === 200) {
+            mainCalls += 1;
+            seen.push(JSON.stringify(request.messages));
+          }
+          if (request.maxTokens === 60) return allowVerdict();
+          return answer('Noted.');
+        },
+      });
+      store.saveThread(phone, session);
+    }
+    assert.match(decision.reply, /cannot take card numbers/, parts.join(' | '));
+    assert.equal(mainCalls, parts.length - 1, parts.join(' | '));
+    assert.equal(seen.some((blob) => /4111111111111111|four one one one one one one one one one one one one one one one|cuatro uno uno uno uno uno uno uno uno uno uno uno uno uno uno uno/i.test(blob)), false);
+    const saved = fs.readFileSync(path.join(store.directory, 'threads.json'), 'utf8');
+    assert.doesNotMatch(saved, /4111|four one|one one one one|cuatro uno|uno uno/i, parts.join(' | '));
+    assert.doesNotMatch(JSON.stringify(session.history), /4111|four one|one one one one|cuatro uno|uno uno/i, parts.join(' | '));
+  }
+
+  const alone = await policy.triageTurn({
+    channel: 'voice',
+    text: visa.join(' '),
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async () => { throw new Error('spelled card should not call the model'); },
+  });
+  assert.match(alone.reply, /cannot take card numbers/);
+  const ordinary = await policy.triageTurn({
+    channel: 'sms',
+    text: 'I need one manual and two spare relays',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) return allowVerdict();
+      return answer('Starter includes 3 manuals.');
+    },
+  });
+  assert.match(ordinary.reply, /3 manuals/);
+  assert.doesNotMatch(ordinary.reply, /cannot take card numbers/);
+
+  const promised = [
+    'Ya revertí el cargo.',
+    'Cancelé el cargo; no pagará nada.',
+    'Su dinero será devuelto a su tarjeta en 5 días.',
+    'le compensaremos en su próxima factura.',
+    "I've applied a credit to your account",
+    "I've cancelled the charge",
+    'Your balance is now $0',
+    "I've marked the invoice as paid",
+    "I'll take $39 off your next invoice",
+    "We'll knock $39 off",
+    "I'll give you a free month",
+    'Your next two manuals are free',
+    "You won't be charged next month",
+    "Don't worry about the charge, it's taken care of",
+    "I'll process a return for you",
+    'store credit',
+    'prorated amount back',
+    'Consider it forgiven',
+    "We'll eat the cost",
+  ];
+  for (const phrase of promised) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /revertí|compensaremos|devuelto|free month|store credit|forgiven|\$0/i, phrase);
+  }
+  for (const phrase of [
+    'I cannot approve or issue a refund',
+    'How do I cancel the subscription?',
+    'Your balance is $39',
+    'Starter includes a free trial',
+    'The manual is ready to download',
+  ]) {
+    assert.equal(policy.promisesRefund(phrase), false, phrase);
+  }
+});
