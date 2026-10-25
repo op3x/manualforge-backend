@@ -17,6 +17,7 @@
         "fast-xml-parser": "^4.5.7",
         "multer": "^1.4.5-lts.1",
         "nodemailer": "^7.0.13",
+        "pdf-lib": "^1.17.1",
         "puppeteer-core": "^24.43.1",
         "stripe": "^23.0.1",
         "twilio": "^6.2.0",

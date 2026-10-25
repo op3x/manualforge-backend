@@ -6,8 +6,9 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 
 ## Pricing
 
-- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced.
-- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`.
+- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced. Starter generates the operating and maintenance manual only.
+- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`. Pro can also generate a preventive maintenance schedule, a shutdown procedure, a startup procedure, and up to five other equipment documents in the same run.
+- **Integrator** is the $249 monthly plan added on the integrator branch. The same extra documents are allowed when the session plan is `integrator`. Extra documents in that run do not add another manual credit. White-label company name and logo apply to every document when the integrator branding modules are present.
 
 ## API
 
@@ -32,15 +33,17 @@ Starter is valid when the Checkout Session `payment_status` is `paid`. `remainin
 
 ### `POST /jobs`
 
-Preferred upload. Multipart fields `file` and/or `files` (up to 25), plus `session_id` (form field or `X-Session-Id`). Optional fields: `brand`, `manufacturer_name`, `manufacturer_address`, `product_name`, `model`, `doc_number`, `revision`, `language`.
+Preferred upload. Multipart fields `file` and/or `files` (up to 25), plus `session_id` (form field or `X-Session-Id`). Optional fields: `brand`, `manufacturer_name`, `manufacturer_address`, `product_name`, `model`, `doc_number`, `revision`, `language`, `date`.
+
+Optional `documents` is a JSON list or a comma-separated list of `manual`, `pm_schedule`, `shutdown`, and `startup`. Omitted means `manual` only. Optional `requested_documents` is plain text, at most 1,500 characters, naming up to five other equipment documents (for example an alarm guide, a spare-parts list, or a training checklist). Requests that are not about the uploaded equipment are skipped and explained on the job. A Starter session that asks for anything beyond the manual receives **403** with an upgrade message and does not spend a credit. Pro and Integrator are allowed. Every document in the run shares the single manual credit. `POST /generate-manual` stays manual-only and returns **400** if extra documents are requested.
 
 `202` JSON:
 
 ```json
-{ "id": "job_…", "status": "queued", "progress": { "stage": "queued", "percent": 0, "message": "…" }, "error": null, "warnings": [], "coverage": null, "createdAt": "…", "expiresAt": "…" }
+{ "id": "job_…", "status": "queued", "progress": { "stage": "queued", "percent": 0, "message": "…" }, "documents": [{ "id": "manual", "title": "Operating and Maintenance Manual", "kind": "manual", "status": "pending", "download_url": null }], "downloads": { "combined_pdf": null, "zip": null }, "error": null, "warnings": [], "coverage": null, "createdAt": "…", "expiresAt": "…" }
 ```
 
-Poll `GET /jobs/:id` until `status` is `succeeded` or `failed`. `GET /jobs/:id/pdf` returns `application/pdf` when the job succeeded, `409` when it is not ready, and `404` when the id is unknown or older than 24 hours. Stages are `queued`, `parsing`, `analyzing`, `assembling`, `rendering`, `done`, and `failed`.
+Poll `GET /jobs/:id` until `status` is `succeeded` or `failed`. The job lists each document with `download_url`. `GET /jobs/:id/documents/:docId` returns that PDF. `GET /jobs/:id/pdf` remains the operating manual. `GET /jobs/:id/combined.pdf` returns one PDF of every ready document, and `GET /jobs/:id/documents.zip` returns the set. Each route returns **409** when the job is not ready and **404** when the id is unknown or older than 24 hours. The 24-hour cleanup removes every PDF and the zip for that job. Stages are `queued`, `parsing`, `analyzing`, `assembling`, `rendering`, `done`, and `failed`.
 
 Accepted content, detected from the bytes rather than the extension: Rockwell L5X and L5K, Rockwell ACD (converted to L5X with the vendored Apache-2.0 `acd-tools` package; a routine the converter cannot read is named in the manual), Siemens SIMATIC ML block XML (LAD, FBD, SCL, GRAPH, and statement list), Siemens SCL/ST and DATA_BLOCK source, Siemens STL/AWL (S7-300/400 and S7-200), PLCopen XML, TwinCAT TcPOU, CSV and XLSX tag lists, STEP, IGES, ASCII or binary DXF, and ASCII or binary STL (size and approximate shape only). A Zip may contain those files. `.zap` / `.ap` / `.s7p`, `.dwg`, and SolidWorks `.sldprt` / `.sldasm` / `.slddrw` are rejected with the export to use instead (SCL or SIMATIC ML XML, DXF, or STEP). Unknown or mismatched content returns **415**. A file that parses but contains no equipment data returns **422**. Neither spends a credit. Executable uploads are rejected. Zip entries are checked for path traversal, nesting, file count, and uncompressed size.
 

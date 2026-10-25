@@ -94,14 +94,67 @@ async function withServer(app, fn) {
 }
 
 async function waitJob(base, id) {
-  for (let i = 0; i < 50; i += 1) {
+  const deadline = Date.now() + 150000;
+  while (Date.now() < deadline) {
     const res = await fetch(`${base}/jobs/${id}`);
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error('job did not finish');
 }
+
+test('the extras job stamps delivery once when a manual pdf exists', async () => {
+  const calls = [];
+  const stripe = {
+    checkout: {
+      sessions: {
+        retrieve: async () => ({
+          id: 'cs_test_pro',
+          metadata: { plan: 'pro' },
+          payment_status: 'paid',
+          subscription: 'sub_1',
+        }),
+      },
+    },
+    subscriptions: { retrieve: async () => ({ id: 'sub_1', status: 'active' }) },
+    paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: {} }), update: async () => ({ id: 'pi_1', metadata: {} }) },
+  };
+  const app = createApp({
+    env: env(),
+    stripe,
+    anthropic: anthropic(),
+    renderPdf: async () => Buffer.from('%PDF-1.4\n%job\n'),
+    markDelivered: async (stripeClient, access, sessionId) => {
+      calls.push({ plan: access && access.plan, sessionId, hasStripe: Boolean(stripeClient) });
+      return { delivered: true };
+    },
+  });
+  await withServer(app, async (base) => {
+    const manual = new FormData();
+    manual.set('session_id', 'cs_test_pro');
+    manual.set('documents', JSON.stringify(['manual']));
+    manual.set('file', new Blob([L5X]), 'line.L5X');
+    const created = await fetch(`${base}/jobs`, { method: 'POST', body: manual });
+    assert.equal(created.status, 202);
+    const done = await waitJob(base, (await created.json()).id);
+    assert.equal(done.status, 'succeeded');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].plan, 'pro');
+    assert.equal(calls[0].sessionId, 'cs_test_pro');
+    assert.equal(calls[0].hasStripe, true);
+
+    const scheduleOnly = new FormData();
+    scheduleOnly.set('session_id', 'cs_test_pro');
+    scheduleOnly.set('documents', JSON.stringify(['pm_schedule']));
+    scheduleOnly.set('file', new Blob([L5X]), 'line.L5X');
+    const extra = await fetch(`${base}/jobs`, { method: 'POST', body: scheduleOnly });
+    assert.equal(extra.status, 202);
+    const extraDone = await waitJob(base, (await extra.json()).id);
+    assert.equal(extraDone.status, 'succeeded');
+    assert.equal(calls.length, 1);
+  });
+});
 
 test('jobs reserve one credit, return a pdf, and refund when rendering fails', async () => {
   const paid = stripeFor('0');

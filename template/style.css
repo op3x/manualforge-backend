@@ -33,6 +33,7 @@ p { margin: 0 0 2.2mm; orphans: 3; widows: 3; }
 .toc .tp { width: 8mm; text-align:right; flex:none; }
 .toc a .tp::after { content: target-counter(attr(href), page); }
 .chapter { page-break-before: always; }
+body.flow .chapter { page-break-before: auto; break-before: auto; }
 h1 { font-size: 19pt; color:#13314f; margin: 0 0 5mm; padding-bottom: 2.5mm; border-bottom: 2pt solid #13314f; }
 h1 .num { display:inline-block; background:#13314f; color:#fff; min-width: 10mm; text-align:center; margin-right: 4mm; padding: 0 2mm; border-radius: 1mm; }
 h2 { font-size: 12pt; color:#13314f; margin: 6mm 0 2.5mm; break-after: avoid; page-break-after: avoid; }
@@ -84,3 +85,13 @@ ol.steps > li .expect b { font-weight: 700; }
 .callouts { margin: 0 0 3mm; padding-left: 5mm; font-size: 8.6pt; }
 .callouts li { margin-bottom: .4mm; }
 .tagcol { font-family: "Liberation Mono", "DejaVu Sans Mono", ui-monospace, monospace; font-size: 7.6pt; color: #243140; }
+.publisher { display: flex; align-items: center; gap: 4mm; margin-top: 8mm; }
+.publisher-name { font-size: 14pt; letter-spacing: .3pt; color: #13314f; font-weight: 700; }
+.brand-logo { max-height: 12mm; max-width: 42mm; height: auto; width: auto; }
+.publisher .brand-logo { max-height: 18mm; max-width: 55mm; }
+.brand-header, .brand-footer { position: fixed; left: 18mm; display: flex; align-items: center; gap: 2mm; z-index: 2; }
+.brand-header { top: 6mm; }
+.brand-footer { bottom: 6mm; }
+.brand-name { font: 8pt Helvetica, Arial, sans-serif; color: #5b6b7b; }
+table.signoff td:last-child { letter-spacing: .4pt; color: #5b6b7b; }
+table.signoff td:first-child .inf { display: block; margin-top: 0.8mm; width: max-content; max-width: 100%; }
