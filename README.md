@@ -54,13 +54,13 @@ Kept for the current site. Same body as before (`file`, or JSON `plcContent`, pl
 
 ### `POST /webhook`
 
-Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`. Requests with a bad or missing signature get `400`. A proven HTS Atlas or other-brand event gets a quiet `200` and is not processed. A money event whose brand is still unknown is logged at error level and is not processed. ManualOS events run the refund, dispute, renewal, and overage handlers, then the event is logged. A handler failure returns `500` so Stripe retries it. The same event id is not applied twice. See [Shared Stripe account](#shared-stripe-account).
+Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`. Requests with a bad or missing signature get `400`. A proven HTS Atlas or other-brand event gets a quiet `200` and is not processed. A money event whose brand is still unknown is logged at error level, appended to `DATA_DIR/unknown-events.jsonl`, and is not processed. ManualOS events run the refund, dispute, renewal, and overage handlers, then the event is logged. A handler failure returns `500` so Stripe retries it. The same event id is not applied twice. See [Shared Stripe account](#shared-stripe-account).
 
 Each generate call re-reads the Checkout Session, PaymentIntent, and Subscription, so access stays correct even if a webhook is delayed. The endpoint is still required: subscription renewals, cancellations, and delayed payment methods are asynchronous, and the signature is what shows the call came from Stripe.
 
 ### `GET /health`
 
-`{ "status": "ok", "service": "manualos-backend", "aiEnabled": boolean }`.
+`{ "status": "ok", "service": "manualos-backend", "aiEnabled": boolean, "unknownEvents": number }`. `unknownEvents` is the number of lines in `DATA_DIR/unknown-events.jsonl`. It is `0` when `DATA_DIR` is unset or the file is missing.
 
 Errors returned to browsers are short JSON messages. Stack traces stay in the server log.
 
@@ -100,6 +100,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `LLM_USD_PER_1M_OUTPUT` | No | Default `0.60`, the gpt-4o-mini output rate. |
 | `PUBLIC_BASE_URL` | Recommended on Railway | Public origin only, for example `https://manualforge-backend-production.up.railway.app`. Signature checks and the `wss://` relay URL use it. |
 | `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, and the budget counter. Railway's disk is ephemeral; mount a volume. |
+| `DATA_DIR` | Recommended | Directory for `unknown-events.jsonl`. Mount the same volume. Each unknown money event appends its event id, type, object id, and timestamp so it can be replayed from the Stripe Dashboard. |
 | `SUPPORT_INTEGRATOR_ENABLED` | No | `true` mentions Integrator pricing. Default off, because that plan is not launched. |
 
 `STRIPE_PUBLISHABLE_KEY` is not read by this server. Hosted Checkout only needs the URL returned by `/create-checkout-session`. The old `STRIPE_PRICE_ID` variable is unused.
@@ -145,7 +146,7 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
    `https://manualforge-backend-production.up.railway.app/webhook`
    Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
-4. Create a restricted API key that can read and write Checkout Sessions, read and update PaymentIntents, read Charges, read and write Invoices, read Customers, read Invoice payments, read Prices, read Products, and read and write Subscriptions. Customers Write is not used. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. The server updates subscription metadata only after the brand gate accepts the event. A lost dispute also cancels that subscription with no proration. A refund does not cancel it.
+4. Create a restricted API key with read access to Charges, PaymentIntents, Invoices, Subscriptions, Prices, Products, Checkout Sessions, and Customers, and write access to PaymentIntents, Subscriptions, and Checkout Sessions. Customers Write is not used. Also grant read access to Invoice payments, because renewal classification lists them. The delivery stamp writes metadata on the period charge, or on the invoice when that invoice has no charge, so Charges write and Invoices write are required for that stamp. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. The server updates subscription metadata only after the brand gate accepts the event. A lost dispute also cancels that subscription with no proration. A refund does not cancel it.
 5. On the Starter price set lookup key `manualos_starter`. On the Pro price set lookup key `manualos_pro`. Checkout uses the lookup key when it finds one, and otherwise uses the price id variables above. Setting those lookup keys is a Dashboard change and is not done by this repository.
 
 ### Shared Stripe account
@@ -154,27 +155,27 @@ This Stripe account is also used by HTS Atlas (`metadata.brand=htsatlas`, price 
 
 The webhook returns **200** `{ "received": true }` for a proven other brand (`brand` other than `manualos`, or a lookup key that does not start with `manualos_`). That response does not log the event, write a file, change access, update Stripe, or send mail. Stripe will not retry it.
 
-Checkout, subscription, and invoice events are ManualOS when they have `brand=manualos`, a lookup key prefixed `manualos_`, a price id from `STRIPE_PRICE_*`, product metadata `brand=manualos` or a ManualOS `plan`, or `metadata.plan` of `starter`, `pro`, `integrator`, `overage`, or `integrator_overage`. A foreign brand, a non-ManualOS plan, or a lookup key that does not start with `manualos_` wins over those signals. `htsatlas_` is the HTS Atlas prefix and is ignored first.
+Checkout, subscription, and invoice events are ManualOS when they have `brand=manualos`, a lookup key prefixed `manualos_`, a price id from `STRIPE_PRICE_*`, or product metadata `brand=manualos`. `metadata.plan` of `starter`, `integrator`, `overage`, or `integrator_overage` is enough on its own. `metadata.plan` of `pro` is not: `plan=pro` counts only together with `brand=manualos`, a configured ManualOS price, or a `manualos_` lookup key. A foreign brand, a non-ManualOS plan, or a lookup key that does not start with `manualos_` wins over those signals. `htsatlas_` is the HTS Atlas prefix and is ignored first.
 
 `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`, and `radar.early_fraud_warning.created` (and other `charge.*`, `refund.*`, and `radar.early_fraud_warning.*` events) are classified from the charge, then the PaymentIntent if the charge metadata does not decide. Dispute and early-fraud objects carry no metadata, so the charge is fetched. Refund metadata is ignored, including refunds issued by Stripe or Link support. A subscription renewal often has no brand on the charge or PaymentIntent. Those charges are followed from the charge to the PaymentIntent to Invoice Payments to the invoice, then matched on invoice or subscription metadata, a `STRIPE_PRICE_*` id, a `manualos_` lookup key, or the product. Checkout Session metadata is used when the PaymentIntent has no plan, which is how a Starter or overage purchase is recognized. Customer metadata is consulted only when every one of those is empty.
 
 There is no in-memory charge or customer set. Recognition does not reset on restart.
 
-A money event that is not a proven other brand and is not a positive ManualOS match is logged at error level as `Webhook brand unknown` plus the event type, event id, and object id. It is not processed. A deleted object or a 404 is that unknown case and returns 200. A 5xx or network error from Stripe returns 500 so Stripe retries. The log line has no email address, card data, or API key.
+A money event that is not a proven other brand and is not a positive ManualOS match is logged at error level as `Webhook brand unknown` plus the event type, event id, and object id. The same record is appended to `DATA_DIR/unknown-events.jsonl` with the event id, type, object id, and a timestamp, and nothing else, so the event can be replayed from the Stripe Dashboard. `GET /health` reports that file's line count as `unknownEvents`. The event is not processed. A deleted object or a 404 is that unknown case and returns 200. A 5xx or network error from Stripe returns 500 so Stripe retries. The log line and the JSONL record have no email address, customer id, card data, or API key.
 
 The live endpoint is subscribed to `charge.refunded` and `charge.dispute.created`. It is not subscribed to `charge.dispute.closed`. Restore-on-won and revoke-on-lost do not run in production until that event is added. Adding it is a webhook settings change and is not part of this repository. Do not describe `charge.dispute.closed` as already enabled on the live endpoint.
 
 Before relying on refund, dispute, or early-fraud handling for purchases made before this change:
 
 - Set lookup key `manualos_starter` on the existing Starter price and `manualos_pro` on the existing Pro price. Until the keys exist, Checkout keeps using `STRIPE_PRICE_STARTER` and `STRIPE_PRICE_PRO`. No Railway variable changes.
-- Brand on the charge and PaymentIntent is stamped at Checkout. Existing charges that have only a ManualOS plan on the PaymentIntent, a configured price, or a `manualos_` lookup key are still recognized. Do not backfill `metadata.brand` onto Customers. Customer metadata is not the signal.
-- The restricted key needs the read scopes above. It does not need Customers Write. This repository does not create prices, webhook endpoints, or live-mode changes.
+- Brand on the charge and PaymentIntent is stamped at Checkout. Existing charges that have only `plan=starter` on the PaymentIntent are still recognized. A charge or subscription with only `plan=pro` is not. A configured price or a `manualos_` lookup key is still recognized. Do not backfill `metadata.brand` onto Customers. Customer metadata is not the signal.
+- The restricted key needs the read and write scopes above. It does not need Customers Write. This repository does not create prices, webhook endpoints, or live-mode changes.
 
 ### Merge notes
 
-The refund, dispute, renewal, and overage handlers from `cursor/starter-refund-disputes-3d59` (PR #9) are on this branch. They run only after the brand gate returns ManualOS. Unbranded fixtures still pass when the PaymentIntent, subscription, price, Checkout Session, or invoice says the purchase is ManualOS.
+The refund, dispute, renewal, and overage handlers from `cursor/starter-refund-disputes-3d59` (PR #9, head `68e3144`) are on this branch. They run only after the brand gate returns ManualOS. Unbranded fixtures still pass when the PaymentIntent, subscription, price, Checkout Session, or invoice says the purchase is ManualOS. `plan=pro` by itself does not.
 
-Do not reintroduce `customers.create`, a `customer` id, or `customer_update` when merging Managed Payments checkout (PR #17). Starter keeps `customer_creation: always`. `customer_update` conflicts with Managed Payments, which removes it. PRs #6, #10, #11, and #15 are not merged here; they still conflict in the README, server, or billing files.
+Keep removing customer creation and `customer_update` from Starter and Pro checkouts. Starter keeps `customer_creation: always`. `customer_update` conflicts with Managed Payments, which removes it. One exemption: PR #6's Integrator extra-manual and overage Checkouts may pass `customer=<existing ManualOS customer id>` (never `customer_update`, never creating a customer). Classification for them must work from session, charge, and PaymentIntent metadata `brand=manualos` and `plan=integrator`. An HTS customer reused there is ignored. `applyManualosCheckout` deletes `customer` only when it is empty, and always deletes `customer_update`. PRs #6, #10, #11, and #15 are not merged here; they still conflict in the README, server, or billing files.
 
 Starter stays valid while the Checkout Session is `paid` and the PaymentIntent `credit_status` is not `revoked` or `suspended`. Stripe does not change `payment_status` when a charge is refunded later. `/webhook` does, by writing `credit_status` on the Starter PaymentIntent.
 

@@ -406,12 +406,12 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
 test('unknown charge is acknowledged and does not change credits', async () => {
   const { stripe, intents, updates } = createStripe({
     intents: {
-      pi_pro: { plan: 'pro', manuals_used: '0' },
+      pi_pro: { plan: 'pro', brand: 'manualos', manuals_used: '0' },
       pi_starter: starterMeta(0),
     },
     sessions: { cs_starter: 'pi_starter' },
     listed: {
-      pi_other: [{ id: 'cs_other', metadata: { plan: 'pro' } }],
+      pi_other: [{ id: 'cs_other', metadata: { plan: 'pro', brand: 'manualos' } }],
     },
   });
   intents.pi_other = { id: 'pi_other', metadata: {} };

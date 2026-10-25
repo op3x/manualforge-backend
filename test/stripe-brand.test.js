@@ -9,6 +9,7 @@ const {
   BRAND,
   HANDLED_EVENT_TYPES,
   LOOKUP_KEYS,
+  applyManualosCheckout,
   classifyStripeEvent,
 } = require('../lib/stripeBrand');
 
@@ -326,7 +327,11 @@ test('webhook brand matrix for every handled event', async () => {
     for (const type of HANDLED_EVENT_TYPES) {
       assertProcessed(await post(fixture(type, 'manualos')), `${type} manualos`);
       assertIgnored(await post(fixture(type, 'htsatlas')), `${type} htsatlas`);
-      assertProcessed(await post(fixture(type, 'unbranded')), `${type} unbranded`);
+      if (type.startsWith('customer.subscription.') || type.startsWith('invoice.')) {
+        assertIgnored(await post(fixture(type, 'unbranded')), `${type} unbranded`);
+      } else {
+        assertProcessed(await post(fixture(type, 'unbranded')), `${type} unbranded`);
+      }
       assertIgnored(await post(fixture(type, 'blank')), `${type} blank`);
     }
 
@@ -787,7 +792,7 @@ test('managed payments fixtures classify from the charge, payment intent, or inv
               invoice: {
                 id: 'in_renew',
                 metadata: {},
-                parent: { subscription_details: { metadata: { plan: 'pro' }, subscription: 'sub_pro' } },
+                parent: { subscription_details: { metadata: { plan: 'pro', brand: 'manualos' }, subscription: 'sub_pro' } },
               },
             }],
           };
@@ -1003,6 +1008,435 @@ test('managed payments fixtures classify from the charge, payment intent, or inv
     assert.equal(logs.join('\n').includes('sk_live'), false);
   } finally {
     console.error = originalError;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('plan=pro alone is not ManualOS and a starter PaymentIntent still is', async () => {
+  const proOnly = await classifyStripeEvent({
+    type: 'invoice.paid',
+    data: { object: { id: 'in_pro_only', object: 'invoice', metadata: { plan: 'pro' } } },
+  }, { env });
+  assert.equal(proOnly, 'unknown');
+
+  const proOnIntent = await classifyStripeEvent({
+    type: 'charge.refunded',
+    data: {
+      object: {
+        id: 'ch_pro_only',
+        object: 'charge',
+        metadata: {},
+        payment_intent: { id: 'pi_pro_only', metadata: { plan: 'pro' } },
+      },
+    },
+  }, { env });
+  assert.equal(proOnIntent, 'unknown');
+
+  const proBrand = await classifyStripeEvent({
+    type: 'customer.subscription.updated',
+    data: { object: { id: 'sub_pro_brand', object: 'subscription', metadata: { plan: 'pro', brand: 'manualos' } } },
+  }, { env });
+  assert.equal(proBrand, 'ours');
+
+  const proPrice = await classifyStripeEvent({
+    type: 'invoice.paid',
+    data: {
+      object: {
+        id: 'in_pro_price',
+        object: 'invoice',
+        metadata: { plan: 'pro' },
+        lines: { data: [{ price: 'price_pro' }] },
+      },
+    },
+  }, { env });
+  assert.equal(proPrice, 'ours');
+
+  const proLookup = await classifyStripeEvent({
+    type: 'invoice.paid',
+    data: {
+      object: {
+        id: 'in_pro_lookup',
+        object: 'invoice',
+        metadata: { plan: 'pro' },
+        lines: { data: [{ price: { id: 'price_other', lookup_key: 'manualos_pro' } }] },
+      },
+    },
+  }, { env });
+  assert.equal(proLookup, 'ours');
+
+  const starterIntent = await classifyStripeEvent({
+    type: 'charge.refunded',
+    data: {
+      object: {
+        id: 'ch_starter_legacy',
+        object: 'charge',
+        metadata: {},
+        payment_intent: { id: 'pi_starter_legacy', metadata: { plan: 'starter' } },
+      },
+    },
+  }, { env });
+  assert.equal(starterIntent, 'ours');
+});
+
+test('integrator overage checkout keeps a caller-set customer and drops customer_update', async () => {
+  const created = [];
+  const stripe = {
+    customers: {
+      create: async (params) => {
+        created.push(params);
+        return { id: 'cus_created' };
+      },
+    },
+    prices: { list: async () => ({ data: [] }) },
+  };
+  const overage = await applyManualosCheckout(stripe, {
+    mode: 'payment',
+    customer: ' cus_test123 ',
+    customer_update: { name: 'auto' },
+    metadata: {
+      plan: 'integrator_overage',
+      kind: 'overage',
+      brand: 'manualos',
+    },
+    payment_intent_data: {
+      description: 'ManualOS Integrator: one extra manual',
+      metadata: { plan: 'integrator_overage', kind: 'overage', brand: 'manualos' },
+    },
+  }, 'integrator_overage');
+  assert.equal(overage.customer, 'cus_test123');
+  assert.equal(overage.customer_update, undefined);
+  assert.deepEqual(created, []);
+
+  const empty = await applyManualosCheckout(stripe, {
+    customer: '   ',
+    customer_update: { address: 'auto' },
+    metadata: { plan: 'integrator_overage' },
+  }, 'overage');
+  assert.equal(empty.customer, undefined);
+  assert.equal(empty.customer_update, undefined);
+
+  const starter = await applyManualosCheckout(stripe, checkoutParams('starter', env), 'starter');
+  assert.equal(starter.customer, undefined);
+  assert.equal(starter.customer_update, undefined);
+  assert.equal(starter.customer_creation, 'always');
+
+  const pro = await applyManualosCheckout(stripe, {
+    ...checkoutParams('pro', env),
+    customer_update: { name: 'auto' },
+  }, 'pro');
+  assert.equal(pro.customer, undefined);
+  assert.equal(pro.customer_update, undefined);
+});
+
+test('integrator overage charge with a customer is ManualOS and an HTS customer is ignored', async () => {
+  const handled = [];
+  const customerReads = [];
+  const logs = [];
+  const originalError = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const stripe = {
+    customers: {
+      create: async () => {
+        throw new Error('customers.create');
+      },
+      retrieve: async (id) => {
+        customerReads.push(id);
+        if (id === 'cus_hts') return { id, metadata: { brand: 'htsatlas' } };
+        return { id, metadata: {} };
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => {
+        if (id === 'pi_over_pi') return { id, metadata: { brand: 'manualos', plan: 'integrator' } };
+        if (id === 'pi_over_session') return { id, metadata: {} };
+        return { id, metadata: {} };
+      },
+    },
+    checkout: {
+      sessions: {
+        list: async ({ payment_intent: paymentIntentId }) => {
+          if (paymentIntentId === 'pi_over_session') {
+            return {
+              data: [{
+                id: 'cs_over',
+                object: 'checkout.session',
+                customer: 'cus_test123',
+                metadata: { brand: 'manualos', plan: 'integrator', kind: 'overage', subscription_id: 'sub_int' },
+              }],
+            };
+          }
+          return { data: [] };
+        },
+      },
+    },
+    webhooks: { constructEvent },
+  };
+  const app = createApp({
+    env,
+    stripe,
+    anthropic: null,
+    jobs: {},
+    supportStore: {},
+    onStripeEvent: async (event) => handled.push(event.id),
+  });
+  const server = await listen(app);
+  async function post(event) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify(event),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+  const integratorMeta = {
+    brand: 'manualos',
+    plan: 'integrator',
+    kind: 'overage',
+    subscription_id: 'sub_int',
+  };
+  try {
+    const onCharge = await post({
+      id: 'evt_over_charge',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_over_charge',
+          object: 'charge',
+          customer: 'cus_test123',
+          metadata: integratorMeta,
+          payment_intent: { id: 'pi_over_charge', metadata: integratorMeta },
+        },
+      },
+    });
+    assert.equal(onCharge.status, 200);
+    assert.equal(handled.includes('evt_over_charge'), true);
+
+    const onIntent = await post({
+      id: 'evt_over_pi',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_over_pi',
+          object: 'charge',
+          customer: 'cus_test123',
+          metadata: {},
+          payment_intent: 'pi_over_pi',
+        },
+      },
+    });
+    assert.equal(onIntent.status, 200);
+    assert.equal(handled.includes('evt_over_pi'), true);
+
+    const onSession = await post({
+      id: 'evt_over_session',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_over_session',
+          object: 'charge',
+          customer: 'cus_test123',
+          metadata: {},
+          payment_intent: 'pi_over_session',
+        },
+      },
+    });
+    assert.equal(onSession.status, 200);
+    assert.equal(handled.includes('evt_over_session'), true);
+
+    const htsCustomerOnManualos = await post({
+      id: 'evt_over_hts_customer',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_over_hts_customer',
+          object: 'charge',
+          customer: { id: 'cus_hts', metadata: { brand: 'htsatlas' }, email: 'buyer@example.com' },
+          metadata: integratorMeta,
+          payment_intent: { id: 'pi_over_hts_customer', metadata: integratorMeta },
+        },
+      },
+    });
+    assert.equal(htsCustomerOnManualos.status, 200);
+    assert.equal(handled.includes('evt_over_hts_customer'), true);
+
+    const beforeHts = logs.length;
+    const htsBrand = await post({
+      id: 'evt_over_hts',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_over_hts',
+          object: 'charge',
+          customer: 'cus_hts',
+          metadata: { brand: 'htsatlas', plan: 'integrator', kind: 'overage' },
+          payment_intent: {
+            id: 'pi_over_hts',
+            metadata: { brand: 'htsatlas', plan: 'integrator', kind: 'overage' },
+          },
+        },
+      },
+    });
+    assert.equal(htsBrand.status, 200);
+    assert.equal(handled.includes('evt_over_hts'), false);
+    assert.equal(logs.length, beforeHts);
+
+    const htsReused = await post({
+      id: 'evt_hts_reused',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_hts_reused',
+          object: 'charge',
+          customer: { id: 'cus_hts', metadata: { brand: 'htsatlas' }, email: 'buyer@example.com' },
+          metadata: {},
+        },
+      },
+    });
+    assert.equal(htsReused.status, 200);
+    assert.equal(handled.includes('evt_hts_reused'), false);
+    assert.equal(logs.some((line) => line.includes('evt_hts_reused')), false);
+    assert.deepEqual(customerReads, []);
+  } finally {
+    console.error = originalError;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('unknown money events are recorded for dashboard replay and counted on health', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-unknown-'));
+  const handled = [];
+  const app = createApp({
+    env: { ...env, DATA_DIR: dir },
+    stripe: { webhooks: { constructEvent } },
+    anthropic: null,
+    jobs: {},
+    supportStore: {},
+    onStripeEvent: async (event) => handled.push(event.id),
+  });
+  const server = await listen(app);
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const first = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_unknown_1',
+        type: 'charge.refunded',
+        data: {
+          object: {
+            id: 'ch_unknown_1',
+            object: 'charge',
+            metadata: {},
+            customer: 'cus_secret',
+            billing_details: { email: 'buyer@example.com' },
+          },
+        },
+      }),
+    });
+    assert.equal(first.status, 200);
+    const second = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_unknown_2',
+        type: 'invoice.paid',
+        data: { object: { id: 'in_unknown_2', object: 'invoice', metadata: { plan: 'pro' } } },
+      }),
+    });
+    assert.equal(second.status, 200);
+    const foreign = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_foreign_quiet',
+        type: 'charge.refunded',
+        data: { object: { id: 'ch_foreign_quiet', object: 'charge', metadata: { brand: 'htsatlas' } } },
+      }),
+    });
+    assert.equal(foreign.status, 200);
+    assert.deepEqual(handled, []);
+
+    const file = path.join(dir, 'unknown-events.jsonl');
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 2);
+    const rows = lines.map((line) => JSON.parse(line));
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['eventId', 'objectId', 'timestamp', 'type']);
+    assert.equal(rows[0].eventId, 'evt_unknown_1');
+    assert.equal(rows[0].type, 'charge.refunded');
+    assert.equal(rows[0].objectId, 'ch_unknown_1');
+    assert.match(rows[0].timestamp, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(rows[1].eventId, 'evt_unknown_2');
+    assert.equal(rows[1].type, 'invoice.paid');
+    assert.equal(rows[1].objectId, 'in_unknown_2');
+    const raw = fs.readFileSync(file, 'utf8');
+    assert.equal(raw.includes('buyer@example.com'), false);
+    assert.equal(raw.includes('cus_secret'), false);
+    assert.equal(raw.includes('evt_foreign_quiet'), false);
+
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).unknownEvents, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a Pro dispute retrieves the charge once', async () => {
+  const chargeReads = [];
+  const stripe = {
+    charges: {
+      retrieve: async (id) => {
+        chargeReads.push(id);
+        return {
+          id,
+          object: 'charge',
+          metadata: {},
+          invoice: 'in_pro',
+          payment_intent: 'pi_pro_dispute',
+          customer: 'cus_pro',
+        };
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => ({ id, metadata: { brand: 'manualos', plan: 'pro' } }),
+    },
+    invoices: {
+      retrieve: async (id) => ({ id, subscription: 'sub_pro', metadata: {} }),
+    },
+    subscriptions: {
+      retrieve: async (id) => ({
+        id,
+        status: 'active',
+        metadata: { plan: 'pro', brand: 'manualos' },
+        latest_invoice: 'in_pro',
+      }),
+      update: async () => ({ id: 'sub_pro', metadata: {} }),
+    },
+    checkout: { sessions: { list: async () => ({ data: [] }) } },
+    webhooks: { constructEvent },
+  };
+  const app = createApp({
+    env,
+    stripe,
+    anthropic: null,
+    jobs: {},
+    supportStore: {},
+  });
+  const server = await listen(app);
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_pro_dispute_once',
+        type: 'charge.dispute.created',
+        data: { object: { id: 'dp_pro_once', object: 'dispute', metadata: {}, charge: 'ch_pro_once' } },
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(chargeReads, ['ch_pro_once']);
+  } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });

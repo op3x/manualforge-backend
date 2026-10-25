@@ -126,12 +126,13 @@ function mergeMeta(target, params) {
 }
 
 function createSubscriptionWorld({ plan = 'pro', cancelFails = 0 } = {}) {
+  const planMetadata = plan === 'pro' ? { plan, brand: 'manualos' } : { plan };
   const subscription = {
     id: 'sub_review',
     status: 'active',
     customer: 'cus_review',
     latest_invoice: 'in_current',
-    metadata: { plan },
+    metadata: { ...planMetadata },
   };
   const customer = { id: 'cus_review', metadata: {} };
   const invoices = {
@@ -166,7 +167,7 @@ function createSubscriptionWorld({ plan = 'pro', cancelFails = 0 } = {}) {
       sessions: {
         retrieve: async (id) => ({
           id,
-          metadata: { plan },
+          metadata: { ...planMetadata },
           payment_status: 'paid',
           payment_intent: null,
           subscription: 'sub_review',
@@ -174,7 +175,7 @@ function createSubscriptionWorld({ plan = 'pro', cancelFails = 0 } = {}) {
       },
     },
     paymentIntents: {
-      retrieve: async (id) => ({ id, metadata: { plan } }),
+      retrieve: async (id) => ({ id, metadata: { ...planMetadata } }),
     },
     customers: {
       update: async (id, params) => {
@@ -1221,7 +1222,7 @@ test('N5 a lost dispute revokes only that purchase and a new checkout stays acti
   const customer = { id: 'cus_same', metadata: {} };
   const customerUpdates = [];
   const subscriptions = {
-    sub_a: { id: 'sub_a', status: 'active', customer: customer.id, latest_invoice: 'in_a', metadata: { plan: 'pro' } },
+    sub_a: { id: 'sub_a', status: 'active', customer: customer.id, latest_invoice: 'in_a', metadata: { plan: 'pro', brand: 'manualos' } },
     sub_b: { id: 'sub_b', status: 'active', customer: customer.id, latest_invoice: 'in_b', metadata: { plan: 'integrator' } },
   };
   const intents = {

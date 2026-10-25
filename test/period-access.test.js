@@ -39,7 +39,7 @@ function createProStripe() {
     status: 'active',
     customer: 'cus_pro',
     latest_invoice: 'in_current',
-    metadata: { plan: 'pro' },
+    metadata: { plan: 'pro', brand: 'manualos' },
   };
   const customer = { id: 'cus_pro', metadata: {} };
   const invoices = {
@@ -77,9 +77,9 @@ function createProStripe() {
     ch_old: { id: 'ch_old', amount: 7900, amount_refunded: 7900, refunded: true, invoice: 'in_old', payment_intent: 'pi_old' },
   };
   const intents = {
-    pi_pro: { id: 'pi_pro', metadata: { plan: 'pro' } },
-    pi_next: { id: 'pi_next', metadata: { plan: 'pro' } },
-    pi_old: { id: 'pi_old', metadata: { plan: 'pro' } },
+    pi_pro: { id: 'pi_pro', metadata: { plan: 'pro', brand: 'manualos' } },
+    pi_next: { id: 'pi_next', metadata: { plan: 'pro', brand: 'manualos' } },
+    pi_old: { id: 'pi_old', metadata: { plan: 'pro', brand: 'manualos' } },
   };
   const subUpdates = [];
   const cancels = [];
@@ -88,7 +88,7 @@ function createProStripe() {
       sessions: {
         retrieve: async (id) => ({
           id,
-          metadata: { plan: 'pro' },
+          metadata: { plan: 'pro', brand: 'manualos' },
           payment_status: 'paid',
           payment_intent: null,
           subscription: 'sub_pro',

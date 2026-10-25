@@ -23,6 +23,8 @@ const {
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
+const { withStripeReadCache } = require('./lib/stripe-read-cache');
+const { countUnknownEvents, recordUnknownEvent } = require('./lib/unknown-events');
 const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
 const { applyPeriodAccessEvent } = require('./lib/period-access');
 const { applyOverageCreditEvent } = require('./lib/overage-credit');
@@ -158,7 +160,18 @@ function createApp({
     },
   }));
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: Boolean(anthropicClient) });
+    let unknownEvents = 0;
+    try {
+      unknownEvents = countUnknownEvents(env);
+    } catch {
+      console.error('Unknown event count failed');
+    }
+    res.json({
+      status: 'ok',
+      service: 'manualos-backend',
+      aiEnabled: Boolean(anthropicClient),
+      unknownEvents,
+    });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const secret = env.STRIPE_WEBHOOK_SECRET;
@@ -173,9 +186,10 @@ function createApp({
       console.error('Webhook signature verification failed:', err && err.message ? err.message : err);
       return res.status(400).send('Webhook signature verification failed');
     }
+    const stripeForEvent = withStripeReadCache(stripeClient);
     let decision;
     try {
-      decision = await classifyStripeEvent(event, { stripe: stripeClient, env });
+      decision = await classifyStripeEvent(event, { stripe: stripeForEvent, env });
     } catch {
       console.error('Webhook classification failed', safeLogToken(event && event.type), safeLogToken(event && event.id));
       return res.status(500).json({ error: 'Webhook processing failed' });
@@ -190,6 +204,15 @@ function createApp({
           safeLogToken(event.id),
           safeLogToken(object && object.id),
         );
+        try {
+          recordUnknownEvent(env, {
+            eventId: event && event.id,
+            type: event && event.type,
+            objectId: object && object.id,
+          });
+        } catch {
+          console.error('Unknown event record failed');
+        }
       }
       return res.json({ received: true });
     }
@@ -197,9 +220,9 @@ function createApp({
       if (typeof onStripeEvent === 'function') {
         await onStripeEvent(event);
       } else {
-        const starterResult = await applyStarterChargeEvent(stripeClient, event);
-        await applyPeriodAccessEvent(stripeClient, event, starterResult);
-        await applyOverageCreditEvent(stripeClient, event, starterResult);
+        const starterResult = await applyStarterChargeEvent(stripeForEvent, event);
+        await applyPeriodAccessEvent(stripeForEvent, event, starterResult);
+        await applyOverageCreditEvent(stripeForEvent, event, starterResult);
         logWebhookEvent(event);
       }
     } catch (err) {
