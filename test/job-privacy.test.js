@@ -4,6 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createJobStore, CLEANUP_INTERVAL_MS, ORPHAN_GRACE_MS, removeTestJobDirectories } = require('../lib/jobs/store');
+const { createCreditLedger } = require('../lib/credit-ledger');
+const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE } = require('../lib/job-timeout');
 const { redactCustomerLog } = require('../lib/redact-log');
 const { emptyProject, applyFields } = require('../lib/project');
 const { buildDocument } = require('../lib/manual/assemble');
@@ -210,6 +212,150 @@ test('a restart through SUPPORT_DATA_DIR keeps a two-hour-old PDF and drops a tr
     }
   } finally {
     first.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a job left running at restart is failed and its credit is handed back once', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-abandon-'));
+  const supportEnv = { SUPPORT_DATA_DIR: root };
+  const clock = fakeClock(Date.UTC(2026, 4, 1, 12));
+  const heldAt = new Date(clock.time).toISOString();
+  const token = '0123456789abcdef';
+  const paymentIntentId = 'pi_restart';
+  const deadBody = '[{"paymentIntentId":"pi_keep","token":"abcdefabcdefabcd"}]\n';
+  const pendingBody = '[]\n';
+  fs.writeFileSync(path.join(root, 'credit-handbacks-dead.json'), deadBody);
+  fs.writeFileSync(path.join(root, 'credit-handbacks.json'), pendingBody);
+  const meta = {
+    manuals_used: '1',
+    plan: 'starter',
+    credit_generation: '1',
+    credit_hold: token,
+    credit_hold_at: heldAt,
+  };
+  const decrements = { count: 0 };
+  const stripe = {
+    paymentIntents: {
+      retrieve: async () => ({ id: paymentIntentId, metadata: { ...meta } }),
+      update: async (id, params) => {
+        const prev = Number(meta.manuals_used || 0);
+        for (const [key, value] of Object.entries(params.metadata || {})) {
+          if (value === '') delete meta[key];
+          else meta[key] = value;
+        }
+        if (params.metadata && params.metadata.manuals_used != null && Number(params.metadata.manuals_used) < prev) {
+          decrements.count += 1;
+        }
+        return { id, metadata: { ...meta } };
+      },
+    },
+  };
+  const ledger = createCreditLedger({ env: supportEnv, intervalMs: 0 });
+  ledger.note({ paymentIntentId, token, heldAt });
+  const calls = [];
+  function open(onAbandonedCredit) {
+    return createJobStore({
+      env: supportEnv,
+      now: () => clock.now(),
+      setInterval: (fn, ms) => clock.setInterval(fn, ms),
+      clearInterval: (timer) => clock.clearInterval(timer),
+      onAbandonedCredit,
+    });
+  }
+  const first = open();
+  try {
+    const running = first.create({ sessionId: 'cs_runner' });
+    running.status = 'running';
+    running.creditHold = { paymentIntentId, token };
+    first.savePdf(running.id, Buffer.from('%PDF-1.4\n%running\n'));
+    first.persist(running);
+    const pro = first.create({ sessionId: 'cs_pro_run' });
+    pro.status = 'running';
+    first.savePdf(pro.id, Buffer.from('%PDF-1.4\n%pro\n'));
+    first.persist(pro);
+    const bad = first.create();
+    bad.status = 'running';
+    first.persist(bad);
+    const badFile = path.join(first.dir, `${bad.id}.json`);
+    const badRecord = JSON.parse(fs.readFileSync(badFile, 'utf8'));
+    badRecord.creditHold = { paymentIntentId: 'not-a-pi', token: 'nope' };
+    fs.writeFileSync(badFile, JSON.stringify(badRecord));
+    const done = first.create({ sessionId: 'cs_done' });
+    first.savePdf(done.id, Buffer.from('%PDF-1.4\n%done\n'));
+    done.status = 'succeeded';
+    first.persist(done);
+    const doneFile = path.join(first.dir, `${done.id}.json`);
+    const doneRecord = JSON.parse(fs.readFileSync(doneFile, 'utf8'));
+    doneRecord.creditHold = { paymentIntentId: 'pi_donehold', token: 'fedcba9876543210' };
+    fs.writeFileSync(doneFile, JSON.stringify(doneRecord));
+    const queued = first.create({ sessionId: 'cs_wait' });
+    const runningFile = JSON.parse(fs.readFileSync(path.join(first.dir, `${running.id}.json`), 'utf8'));
+    assert.equal(runningFile.status, 'running');
+    assert.deepEqual(runningFile.creditHold, { paymentIntentId, token });
+    assert.equal(runningFile.sessionId, undefined);
+    assert.equal(fs.readFileSync(path.join(root, 'open-holds.json'), 'utf8').includes(token), true);
+    const ids = { running: running.id, pro: pro.id, bad: bad.id, done: done.id, queued: queued.id };
+    first.close();
+
+    const restarted = open((hold) => {
+      calls.push(hold);
+      return ledger.handBack(stripe, hold.paymentIntentId, hold.token);
+    });
+    try {
+      await restarted.releasesSettled();
+      assert.deepEqual(calls, [{ paymentIntentId, token }]);
+      const failed = restarted.get(ids.running);
+      assert.equal(failed.status, 'failed');
+      assert.equal(failed.error, CREDIT_RETURN_MESSAGE);
+      assert.equal(failed.progress.message, CREDIT_RETURN_MESSAGE);
+      assert.equal(failed.creditHold, undefined);
+      assert.equal(restarted.readPdf(ids.running), null);
+      const failedFile = JSON.parse(fs.readFileSync(path.join(restarted.dir, `${ids.running}.json`), 'utf8'));
+      assert.equal(failedFile.status, 'failed');
+      assert.equal(failedFile.creditHold, undefined);
+      const proJob = restarted.get(ids.pro);
+      assert.equal(proJob.status, 'failed');
+      assert.equal(proJob.error, JOB_TIMEOUT_MESSAGE);
+      assert.equal(restarted.readPdf(ids.pro), null);
+      const badJob = restarted.get(ids.bad);
+      assert.equal(badJob.status, 'failed');
+      assert.equal(badJob.error, JOB_TIMEOUT_MESSAGE);
+      assert.equal(badJob.creditHold, undefined);
+      const finished = restarted.get(ids.done);
+      assert.equal(finished.status, 'succeeded');
+      assert.equal(finished.creditHold, undefined);
+      assert.equal(restarted.readPdf(ids.done).toString().includes('%done'), true);
+      const finishedFile = JSON.parse(fs.readFileSync(path.join(restarted.dir, `${ids.done}.json`), 'utf8'));
+      assert.equal(finishedFile.creditHold, undefined);
+      assert.equal(restarted.get(ids.queued).status, 'queued');
+      assert.equal(meta.manuals_used, '0');
+      assert.equal(meta.credit_hold, undefined);
+      assert.equal(decrements.count, 1);
+      const openAfter = fs.readFileSync(path.join(root, 'open-holds.json'), 'utf8');
+      assert.equal(openAfter.includes(token), false);
+      assert.equal(openAfter.includes(paymentIntentId), false);
+      assert.equal(fs.readFileSync(path.join(root, 'credit-handbacks-dead.json'), 'utf8'), deadBody);
+      assert.equal(fs.readFileSync(path.join(root, 'credit-handbacks.json'), 'utf8'), pendingBody);
+    } finally {
+      restarted.close();
+    }
+
+    const again = open(() => {
+      calls.push('again');
+    });
+    try {
+      await again.releasesSettled();
+      assert.deepEqual(calls, [{ paymentIntentId, token }]);
+      assert.equal(again.get(ids.running).status, 'failed');
+      assert.equal(decrements.count, 1);
+      assert.equal(meta.manuals_used, '0');
+    } finally {
+      again.close();
+    }
+  } finally {
+    first.close();
+    ledger.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

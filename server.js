@@ -253,7 +253,12 @@ function createApp({
   const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
-  const store = jobs || createJobStore({ env });
+  const store = jobs || createJobStore({
+    env,
+    onAbandonedCredit(hold) {
+      return ledger.handBack(stripeClient, hold.paymentIntentId, hold.token);
+    },
+  });
   logPortalTokenStatus(env);
   loadRevocations(env);
   sweepStaleAcdTemps();
@@ -806,6 +811,7 @@ function createApp({
                 : (timeout
                   ? JOB_TIMEOUT_MESSAGE
                   : 'Manual generation failed. Please try again.'));
+            delete job.creditHold;
             job.status = 'failed';
             job.error = message;
             job.progress = { stage: 'failed', percent: (job.progress && job.progress.percent) || 0, message };
@@ -833,6 +839,10 @@ function createApp({
           res.status(202).json(publicJob(job));
           job.status = 'running';
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
+          if (credit && credit.paymentIntentId && credit.token) {
+            job.creditHold = { paymentIntentId: credit.paymentIntentId, token: credit.token };
+          }
+          rememberJob(job);
           const abort = new AbortController();
           const timeoutMs = jobTimeoutMs(env);
           timer = scheduleTimeout(() => {
@@ -892,11 +902,13 @@ function createApp({
             }
             job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
             job.warnings = result.warnings || [];
+            delete job.creditHold;
             job.status = 'succeeded';
             job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
           } catch (err) {
             await failJob(err, false);
           }
+          if (job) delete job.creditHold;
           rememberJob(job);
         } finally {
           if (timer) cancelTimeout(timer);
