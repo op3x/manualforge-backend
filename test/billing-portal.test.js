@@ -6,6 +6,11 @@ const {
   EMAIL_LIMIT,
   INVALID_LINK,
   IP_LIMIT,
+  LINK_CANCEL_STEPS,
+  LINK_CANCEL_URL,
+  MP_NO_PORTAL_WARNING,
+  ONLINE_CANCEL_LOG,
+  ONLINE_CANCEL_UNAVAILABLE,
   PORTAL_UNAVAILABLE,
   SESSION_PORTAL_MAX_AGE_MS,
   SMTP_SKIP_WARNING,
@@ -13,11 +18,15 @@ const {
   TOKEN_TTL_MS,
   customerOwnsManualos,
   isManualosPurchase,
+  linkCancelOffer,
   normalizeEmail,
+  portalMailText,
+  renderCancelOffer,
   sessionOpensPortal,
   sessionWithinPortalWindow,
   signPortalToken,
   verifyPortalToken,
+  warnIfManagedPaymentsWithoutPortal,
   warnIfSmtpUnconfigured,
 } = require('../lib/billing-portal');
 
@@ -40,6 +49,7 @@ function baseEnv(extra = {}) {
     STRIPE_PRICE_PRO: 'price_pro',
     STRIPE_WEBHOOK_SECRET: 'whsec_test',
     PORTAL_TOKEN_SECRET: 'portal-test-secret',
+    STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_manualos',
     STARTER_CREDITS: '3',
     ...extra,
   };
@@ -426,10 +436,10 @@ test('unknown and known emails match, and a token cannot open another customer',
 
     const opened = await post(base, '/billing-portal', { token: tokens[0] }, '198.51.100.11');
     assert.equal(opened.status, 200);
-    assert.deepEqual(Object.keys(await opened.json()), ['url']);
+    assert.deepEqual(Object.keys(await opened.json()), ['method', 'url']);
     assert.equal(created[0].customer, customers[0]);
     assert.equal(created[0].return_url, 'https://manualos.com/cancel');
-    assert.equal(created[0].configuration, undefined);
+    assert.equal(created[0].configuration, 'bpc_manualos');
     assert.equal(opened.headers.get('referrer-policy'), 'no-referrer');
 
     const same = await post(base, '/billing-portal', { token: tokens[1], customer: customers[1] }, '198.51.100.12');
@@ -498,7 +508,7 @@ test('unknown and known emails match, and a token cannot open another customer',
   }
 }));
 
-test('portal configuration is optional and rate limits match the consent route', async () => exclusive(async () => {
+test('a portal configuration id is sent and rate limits match the consent route', async () => exclusive(async () => {
   const created = [];
   const lists = [];
   const stripe = {
@@ -584,11 +594,13 @@ test('portal configuration is optional and rate limits match the consent route',
 }));
 
 test('a bad portal configuration and a Stripe failure stay generic', async () => exclusive(async () => {
+  let created = 0;
   const stripe = {
     checkout: { sessions: { retrieve: async () => proSession('cus_config') } },
     billingPortal: {
       sessions: {
         create: async () => {
+          created += 1;
           throw new Error('SUPER_SECRET_PORTAL');
         },
       },
@@ -603,11 +615,13 @@ test('a bad portal configuration and a Stripe failure stay generic', async () =>
   const badServer = await listen(bad);
   try {
     const res = await post(badServer.base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.50');
-    assert.equal(res.status, 500);
+    assert.equal(res.status, 503);
     const body = await res.json();
-    assert.equal(body.error, 'Checkout is temporarily unavailable.');
+    assert.equal(body.error, ONLINE_CANCEL_UNAVAILABLE);
+    assert.equal(created, 0);
     assert.equal(JSON.stringify(body).includes('not-a-config'), false);
     assert.equal(JSON.stringify(body).includes('SUPER_SECRET_PORTAL'), false);
+    assert.equal(/email/i.test(body.error), false);
   } finally {
     await new Promise((resolve) => badServer.server.close(resolve));
   }
@@ -621,10 +635,12 @@ test('a bad portal configuration and a Stripe failure stay generic', async () =>
   const boomServer = await listen(boom);
   try {
     const res = await post(boomServer.base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.51');
-    assert.equal(res.status, 500);
+    assert.equal(res.status, 503);
     const body = await res.json();
-    assert.equal(body.error, 'Internal server error');
+    assert.equal(body.error, ONLINE_CANCEL_UNAVAILABLE);
+    assert.equal(created, 1);
     assert.equal(JSON.stringify(body).includes('SUPER_SECRET_PORTAL'), false);
+    assert.equal(/email/i.test(body.error), false);
   } finally {
     await new Promise((resolve) => boomServer.server.close(resolve));
   }
@@ -780,6 +796,224 @@ test('each skipped cancel email warns when SMTP is not configured', async () => 
     assert.equal(warnings.some((line) => line.includes('nobody@example.com')), false);
   } finally {
     console.warn = original;
+    await new Promise((resolve) => server.close(resolve));
+  }
+}));
+
+function assertOnlineCancelRendered(text) {
+  const body = String(text || '');
+  const online = /https:\/\/link\.com\b/i.test(body)
+    || /https:\/\/billing\.stripe\.com\b/i.test(body)
+    || /\/cancel\?token=/.test(body);
+  const emailOnly = /\b(e-mail|email)\b/i.test(body) && !online;
+  assert.equal(emailOnly, false, body);
+  assert.equal(online, true, body);
+}
+
+test('email-only cancellation is never rendered', () => {
+  const portal = renderCancelOffer({ method: 'portal', url: 'https://billing.stripe.com/p/session/bps_test' });
+  const link = renderCancelOffer(linkCancelOffer());
+  const mailed = portalMailText(['https://manualos.com/cancel?token=abc']);
+  for (const rendered of [portal, link, mailed]) assertOnlineCancelRendered(rendered);
+  const emailOnly = 'To cancel your subscription, email support@manualos.com.';
+  assert.throws(() => assertOnlineCancelRendered(emailOnly));
+});
+
+test('startup warns when Managed Payments is on without a portal configuration', () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => {
+    const line = args.join(' ');
+    if (line === MP_NO_PORTAL_WARNING) warnings.push(line);
+  };
+  try {
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1', STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_manualos' }), false);
+    assert.equal(warnings.length, 0);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_PORTAL_CONFIGURATION_ID: '' }), false);
+    assert.equal(warnings.length, 0);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1' }), true);
+    assert.equal(warnings.at(-1), MP_NO_PORTAL_WARNING);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1', STRIPE_PORTAL_CONFIGURATION_ID: 'not-a-config' }), true);
+    assert.equal(MP_NO_PORTAL_WARNING.includes('not-a-config'), false);
+  } finally {
+    console.warn = original;
+  }
+});
+
+test('customer portal is the cancel path when a configuration can open a session', async () => exclusive(async () => {
+  const created = [];
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => proSession('cus_portal') } },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/portal' };
+        },
+      },
+    },
+  };
+  const app = createApp({
+    env: baseEnv({ STRIPE_MANAGED_PAYMENTS: '1' }),
+    stripe,
+    anthropic: null,
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const res = await post(base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.90');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, { method: 'portal', url: 'https://billing.stripe.com/p/session/portal' });
+    assert.equal(created.length, 1);
+    assert.equal(created[0].configuration, 'bpc_manualos');
+    assert.equal(JSON.stringify(body).includes('link.com'), false);
+    assertOnlineCancelRendered(renderCancelOffer(body));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}));
+
+test('Managed Payments shows link.com when the portal session cannot be created', async () => exclusive(async () => {
+  const created = [];
+  const sent = [];
+  const stripe = {
+    checkout: {
+      sessions: {
+        list: async () => ({ data: [proSession('cus_link')] }),
+        retrieve: async () => proSession('cus_link'),
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          throw Object.assign(new Error('portal down'), { code: 'portal_down' });
+        },
+      },
+    },
+    ...manualosStripeExtras(),
+  };
+  const app = createApp({
+    env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '', STRIPE_MANAGED_PAYMENTS: '1' }),
+    stripe,
+    anthropic: null,
+    mailer: { async sendMail(message) { sent.push(message); } },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const res = await post(base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.91');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(created.length, 0);
+    assert.equal(body.method, 'link');
+    assert.equal(body.url, LINK_CANCEL_URL);
+    assert.deepEqual(body.steps, LINK_CANCEL_STEPS);
+    assert.equal(body.backup, 'email');
+    assert.equal(body.text.indexOf(LINK_CANCEL_URL) < body.text.indexOf('Email is only a backup'), true);
+    for (const step of LINK_CANCEL_STEPS) assert.equal(body.text.includes(step), true);
+    assertOnlineCancelRendered(body.text);
+
+    const mailed = await post(base, '/access-link', { email: 'buyer@example.com' }, '198.51.100.92');
+    assert.equal(mailed.status, 202);
+    await app.settle();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].subject, 'Cancel your ManualOS subscription');
+    assertOnlineCancelRendered(sent[0].text);
+    assert.equal(sent[0].text.includes(LINK_CANCEL_URL), true);
+    assert.equal(sent[0].text.includes('Email is only a backup'), true);
+  } finally {
+    await app.settle();
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  const failedCreate = [];
+  const failed = createApp({
+    env: baseEnv({ STRIPE_MANAGED_PAYMENTS: '1' }),
+    stripe: {
+      checkout: { sessions: { retrieve: async () => proSession('cus_link') } },
+      billingPortal: {
+        sessions: {
+          create: async () => {
+            failedCreate.push(true);
+            throw Object.assign(new Error('SUPER_SECRET_PORTAL'), { code: 'portal_down' });
+          },
+        },
+      },
+    },
+    anthropic: null,
+    now: () => FIXED,
+  });
+  const failedServer = await listen(failed);
+  try {
+    const res = await post(failedServer.base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.93');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(failedCreate.length, 1);
+    assert.equal(body.method, 'link');
+    assert.equal(body.url, LINK_CANCEL_URL);
+    assertOnlineCancelRendered(body.text);
+    assert.equal(JSON.stringify(body).includes('SUPER_SECRET_PORTAL'), false);
+  } finally {
+    await new Promise((resolve) => failedServer.server.close(resolve));
+  }
+}));
+
+test('portal unavailable without Managed Payments returns an error and does not email', async () => exclusive(async () => {
+  const logs = [];
+  const sent = [];
+  const lists = [];
+  const created = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const stripe = {
+    checkout: {
+      sessions: {
+        list: async (params) => {
+          lists.push(params);
+          return { data: [proSession('cus_buyer')] };
+        },
+        retrieve: async () => proSession('cus_buyer'),
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/should-not-open' };
+        },
+      },
+    },
+  };
+  const app = createApp({
+    env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '' }),
+    stripe,
+    anthropic: null,
+    mailer: { async sendMail(message) { sent.push(message); } },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const res = await post(base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.94');
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.deepEqual(body, { error: ONLINE_CANCEL_UNAVAILABLE });
+    assert.equal(created.length, 0);
+    assert.equal(/email/i.test(JSON.stringify(body)), false);
+    assert.equal(logs.some((line) => line === ONLINE_CANCEL_LOG), true);
+
+    const mailed = await post(base, '/access-link', { email: 'buyer@example.com' }, '198.51.100.95');
+    assert.equal(mailed.status, 202);
+    await app.settle();
+    assert.equal(sent.length, 0);
+    assert.equal(lists.length, 0);
+    assert.equal(logs.filter((line) => line === ONLINE_CANCEL_LOG).length >= 2, true);
+    assert.equal(logs.some((line) => line.includes('buyer@example.com')), false);
+    for (const line of logs) assert.equal(/\bemail support@/i.test(line), false);
+  } finally {
+    console.error = original;
+    await app.settle();
     await new Promise((resolve) => server.close(resolve));
   }
 }));

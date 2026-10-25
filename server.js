@@ -38,7 +38,7 @@ const {
 } = require('./lib/delivery');
 const { applyCheckoutConsent, withManualosBrand } = require('./lib/checkout-consent');
 const { requestIp } = require('./lib/client-ip');
-const { mountBillingPortal, warnIfSmtpUnconfigured } = require('./lib/billing-portal');
+const { mountBillingPortal, warnIfSmtpUnconfigured, warnIfManagedPaymentsWithoutPortal } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -624,6 +624,7 @@ function installShutdown(server, {
 function start() {
   if (!prepareListen(process.env)) return null;
   warnIfSmtpUnconfigured(process.env);
+  warnIfManagedPaymentsWithoutPortal(process.env);
   logPythonAvailability();
   const port = process.env.PORT || 3001;
   const app = createApp();
