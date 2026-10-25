@@ -13,6 +13,8 @@ const {
 const {
   assertCanGenerate,
   checkoutParams,
+  lineItemsMissingTaxCode,
+  managedPaymentsEnabled,
   isStripeNotFound,
   publicAccess,
   recordStarterManual,
@@ -131,6 +133,10 @@ function createApp({
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: Boolean(anthropicClient) });
   });
+  app.get('/api/checkout-config', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ managedPayments: managedPaymentsEnabled(env) });
+  });
   app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
     const secret = env.STRIPE_WEBHOOK_SECRET;
     if (!stripeClient || !secret) {
@@ -156,8 +162,19 @@ function createApp({
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       const plan = req.body && req.body.plan;
-      const params = checkoutParams(plan, env);
-      const session = await stripeClient.checkout.sessions.create(withCheckoutPolicy(params, { plan, env }));
+      const built = checkoutParams(plan, env);
+      // #13 order, once #10 is merged: withCheckoutPolicy(withAttribution(built, attribution), { plan, env }).
+      // #16 applyManualosCheckout runs after that and can replace the price. The
+      // tax-code check has to see the line items that Checkout will actually create.
+      let sessionParams = withCheckoutPolicy(built, { plan, env });
+      if (managedPaymentsEnabled(env)) {
+        const missing = await lineItemsMissingTaxCode(stripeClient, sessionParams);
+        if (missing.length) {
+          console.error(`MANAGED PAYMENTS skipped for this Checkout Session because a product has no tax_code: ${missing.join('; ')}. Sending the non-Managed Payments Checkout instead.`);
+          sessionParams = withCheckoutPolicy(built, { plan, env: { ...env, MANUALOS_MANAGED_PAYMENTS: '' } });
+        }
+      }
+      const session = await stripeClient.checkout.sessions.create(sessionParams);
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });

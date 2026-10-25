@@ -22,7 +22,15 @@ Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mo
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
 
-Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard.
+Managed Payments is off unless `MANUALOS_MANAGED_PAYMENTS` is exactly `1`. Unset, empty, `true`, and `false` all leave the previous Checkout. `GET /api/checkout-config` returns `{ "managedPayments": false }` in that case and `{ "managedPayments": true }` when the variable is `1`. The response is only that field, with `Cache-Control: no-store`. The site should gate its seller and merchant-of-record copy on this value.
+
+When the variable is `1`, Checkout sends `managed_payments[enabled]=true`. It still requires a billing address (`billing_address_collection=required`) and, when `CHECKOUT_REQUIRE_TOS=1`, `consent_collection.terms_of_service=required`. It does not send `custom_text`, `automatic_tax`, `tax_id_collection`, or `payment_method_types`. `payment_intent_data.statement_descriptor_suffix` is not sent: Stripe rejects it with "You cannot use payment_intent_data.statement_descriptor_suffix with Managed Payments." Under Managed Payments the card statement reads `LINK.COM* ` plus the account's shortened descriptor (currently `MANUALOS`), including subscription renewals. A per-brand suffix would have to be the product's own `statement_descriptor`. That field is not verified under Managed Payments, and this service does not change products. Link is the merchant of record and collects the tax. The pay-button refund line is not shown in that mode.
+
+Before the session is created, each line item's product is read. If any product has no `tax_code`, or the price cannot be read, that session is created with the previous Checkout instead and the server logs `MANAGED PAYMENTS skipped`. The public config endpoint still reports the flag, so turn the flag on only after every ManualOS product used at checkout has tax code `txcd_10103001`.
+
+With the flag unset, Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel.
+
+Either mode sets a PaymentIntent or Subscription description that names the plan. Starter's description uses `STARTER_CREDITS` (default 3). Leave `CHECKOUT_REQUIRE_TOS` unset until a Terms of service URL is saved in the Dashboard under Checkout settings. Stripe rejects `consent_collection.terms_of_service` when that URL is missing. That rejection is the Dashboard rule, not a Managed Payments incompatibility ([update guide](https://docs.stripe.com/payments/managed-payments/update-checkout) does not list `consent_collection`). Once the URL is saved, `CHECKOUT_REQUIRE_TOS=1` sends the checkbox in both modes. Link still shows its own payment terms.
 
 ### `GET /verify-session?session_id=cs_...`
 
@@ -77,7 +85,8 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_PRICE_STARTER` | Yes | Price id for the $39 one-time Starter price |
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
-| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. |
+| `MANUALOS_MANAGED_PAYMENTS` | No | Off unless set to `1`. Checkout then sends `managed_payments[enabled]=true`. Any other value, including unset, keeps the previous Checkout. |
+| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required` in either mode. Leave unset until a Terms of service URL is saved in the Dashboard. Stripe rejects the session without that URL. |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
@@ -149,9 +158,18 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 
-Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md) only after the account has an active registration. Turning on automatic tax without a registration collects no tax and returns no error.
+Managed Payments (Link as merchant of record) stays off until `MANUALOS_MANAGED_PAYMENTS=1`. The Stripe Node SDK 23 pins API version `2026-09-30.endive`, which is later than the required `2025-03-31.basil`. No preview header is set. Do not also set `automatic_tax`: Managed Payments calculates and withholds tax itself, and that parameter is one of the fields the [update guide](https://docs.stripe.com/payments/managed-payments/update-checkout) says to remove. The same guide removes `payment_intent_data.statement_descriptor_suffix`. Stripe rejects that field on a Managed Payments session. The statement the buyer sees is `LINK.COM* ` plus the account descriptor, currently `MANUALOS`, on the first charge and on subscription renewals. Per-brand control would be the product `statement_descriptor`, which is not verified under Managed Payments. Do not change products for that.
 
-`CHECKOUT_REQUIRE_TOS` stays unset. Stripe rejects Checkout when `consent_collection.terms_of_service` is `required` and the Dashboard has no terms of service URL. Set the variable to `1` only after that URL is saved. Any other value, including omitting it, leaves the checkbox off.
+Each ManualOS product needs tax code `txcd_10103001` (SaaS, business use) before a Managed Payments session will open. The live Starter and Pro products have no `metadata.brand` and no price `lookup_key`, so this script finds them only when `STRIPE_PRICE_STARTER` and `STRIPE_PRICE_PRO` are set to those price ids. Integrator products, once PR #6 adds them, are found through `MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY`, `MANUALOS_STRIPE_PRICE_INTEGRATOR_ANNUAL`, and `MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE`. A product whose brand is anything other than `manualos` (including `htsatlas`) or whose `lookup_key` starts with `htsatlas_` is printed as refused and is not updated, even if one of those env vars points at it. Preview the change, then apply it yourself:
+
+```bash
+node scripts/set-manualos-tax-codes.js
+node scripts/set-manualos-tax-codes.js --apply
+```
+
+The first command only prints. The update writes `tax_code` only. It does not change `metadata` or `lookup_key`.
+
+In the Dashboard, turn on Managed Payments, confirm those tax codes, and save the Terms of service URL under Checkout settings ([Checkout settings](https://dashboard.stripe.com/settings/checkout)). `CHECKOUT_REQUIRE_TOS=1` sends the terms checkbox in both modes, and Stripe rejects the session until that URL is saved. Leave the flag off until the tax codes are set. `consent_collection.terms_of_service` is not on the Managed Payments unsupported-parameter list.
 
 ## Model
 
@@ -167,4 +185,4 @@ npm test
 npm start
 ```
 
-`npm test` runs the API tests with a mocked Stripe client and a mocked model. It does not call Stripe or Anthropic.
+`npm test` runs the API tests with a mocked Stripe client and a mocked model. It does not call Stripe or Anthropic. The stripe-mock Checkout test runs when `STRIPE_MOCK_BIN` points at a binary, or when a binary is already at `/tmp/stripe-mock/stripe-mock` or `/home/box/stripe-mock/stripe-mock`. Otherwise that one test is skipped and the skip line names `STRIPE_MOCK_BIN`. Corpus tests skip when those fixture files are not on disk. A passing run can therefore be fewer than the total, with the rest skipped. Count pass and skip from the TAP summary of that run.

@@ -21,6 +21,10 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.equal(starter.payment_intent_data.metadata.manuals_used, '0');
   assert.equal(starter.payment_intent_data.metadata.plan, 'starter');
   assert.equal(starter.payment_method_types, undefined);
+  assert.equal(starter.custom_text, undefined);
+  assert.equal(starter.automatic_tax, undefined);
+  assert.equal(starter.billing_address_collection, undefined);
+  assert.equal(starter.managed_payments, undefined);
   assert.match(starter.integration_identifier, /manualos_starter_[a-z]{8}$/);
 
   const pro = checkoutParams('pro', env);
@@ -29,8 +33,24 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.deepEqual(pro.metadata, { plan: 'pro' });
   assert.deepEqual(pro.subscription_data.metadata, { plan: 'pro' });
   assert.equal(pro.payment_method_types, undefined);
+  assert.equal(pro.managed_payments, undefined);
+  assert.equal(pro.custom_text, undefined);
   assert.match(pro.integration_identifier, /manualos_pro_[a-z]{8}$/);
   assert.notEqual(starter.integration_identifier, pro.integration_identifier);
+
+  for (const flag of ['1', ' 1 ', '1\n']) {
+    const params = checkoutParams('pro', { ...env, MANUALOS_MANAGED_PAYMENTS: flag });
+    assert.deepEqual(params.managed_payments, { enabled: true }, JSON.stringify(flag));
+    assert.equal(params.payment_intent_data && params.payment_intent_data.statement_descriptor_suffix, undefined);
+  }
+  for (const flag of [undefined, '', 'true', 'TRUE', 'yes', 'false', 'FALSE', '0', 'off', 'no', ' false ']) {
+    const starterOff = checkoutParams('starter', { ...env, MANUALOS_MANAGED_PAYMENTS: flag });
+    const proOff = checkoutParams('pro', { ...env, MANUALOS_MANAGED_PAYMENTS: flag });
+    assert.equal(starterOff.managed_payments, undefined, String(flag));
+    assert.equal(proOff.managed_payments, undefined, String(flag));
+    assert.equal(starterOff.metadata.plan, 'starter');
+    assert.deepEqual(proOff.subscription_data.metadata, { plan: 'pro' });
+  }
 });
 
 test('checkout rejects an unknown plan before talking about prices', () => {
