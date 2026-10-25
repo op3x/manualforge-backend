@@ -122,9 +122,10 @@ async function waitJob(base, id, sessionId = 'cs_test_starter') {
   throw new Error('job did not finish');
 }
 
-async function postJob(base, fileName, bytes) {
+async function postJob(base, fileName, bytes, fields = {}) {
   const form = new FormData();
   form.set('session_id', 'cs_test_starter');
+  for (const [key, value] of Object.entries(fields)) form.set(key, value);
   form.set('file', new Blob([bytes]), fileName);
   return fetch(`${base}/jobs`, { method: 'POST', body: form });
 }
@@ -210,7 +211,7 @@ test('the first downloadable pdf stamps once and a later success keeps that time
     assert.equal(pdf.status, 200);
     const stamped = paid.meta.first_manual_at;
     assert.match(stamped, /^\d{4}-\d{2}-\d{2}T/);
-    const second = await postJob(base, 'line.L5X', L5X);
+    const second = await postJob(base, 'line.L5X', L5X, { confirmDuplicate: 'true' });
     const again = await waitJob(base, (await second.json()).id);
     assert.equal(again.status, 'succeeded');
     assert.equal(paid.meta.first_manual_at, stamped);
@@ -380,7 +381,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
     const again = await fetch(`${base}/generate-manual`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
-      body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
+      body: JSON.stringify({ plcContent: L5X.toString('utf8'), confirmDuplicate: true }),
     });
     assert.equal(again.status, 200);
     assert.equal(updates.filter((row) => row.metadata.first_manual_at).length, 1);
@@ -396,7 +397,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
     const mismatched = await fetch(`${base}/generate-manual`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
-      body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
+      body: JSON.stringify({ plcContent: L5X.toString('utf8'), confirmDuplicate: true }),
     });
     assert.equal(mismatched.status, 200);
     assert.equal(updates.filter((row) => row.metadata.first_manual_at).length, 1);

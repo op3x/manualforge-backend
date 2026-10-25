@@ -292,7 +292,7 @@ test('generate requires payment, spends one starter credit after success, and hi
     const viaHeader = await fetch(base + '/generate-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_starter' },
-      body: JSON.stringify({ plcContent: L5X, brand: 'Acme' }),
+      body: JSON.stringify({ plcContent: L5X, brand: 'Acme', confirmDuplicate: true }),
     });
     assert.equal(viaHeader.status, 200);
     const failedPdf = Buffer.from(await viaHeader.arrayBuffer());
