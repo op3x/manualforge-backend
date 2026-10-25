@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original ManualOS fixture. Not a vendor sample. -->
+<Document>
+  <Engineering version="V17" />
+  <SW.Blocks.FB ID="0">
+    <AttributeList>
+      <Name>BeltRun</Name>
+      <ProgrammingLanguage>LAD</ProgrammingLanguage>
+      <Interface><Sections xmlns="http://www.siemens.com/automation/Openness/SW/Interface/v5">
+        <Section Name="Input">
+          <Member Name="StartButton" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Start button</MultiLanguageText></Comment></Member>
+          <Member Name="StopButton" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Stop button</MultiLanguageText></Comment></Member>
+        </Section>
+        <Section Name="Output">
+          <Member Name="BeltMotor" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Belt motor</MultiLanguageText></Comment></Member>
+        </Section>
+      </Sections></Interface>
+    </AttributeList>
+    <ObjectList>
+      <MultilingualText ID="1" CompositionName="Comment">
+        <ObjectList>
+          <MultilingualTextItem ID="2" CompositionName="Items">
+            <AttributeList><Culture>en-US</Culture><Text>Runs the belt.</Text></AttributeList>
+          </MultilingualTextItem>
+        </ObjectList>
+      </MultilingualText>
+      <SW.Blocks.CompileUnit ID="3" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+            <Parts>
+              <Access Scope="GlobalVariable" UId="21"><Symbol><Component Name="StartButton" /></Symbol></Access>
+              <Access Scope="GlobalVariable" UId="22"><Symbol><Component Name="StopButton" /></Symbol></Access>
+              <Access Scope="GlobalVariable" UId="23"><Symbol><Component Name="BeltMotor" /></Symbol></Access>
+              <Part Name="Contact" UId="31" />
+              <Part Name="Contact" UId="32"><Negated Name="operand" /></Part>
+              <Part Name="Coil" UId="33" />
+            </Parts>
+            <Wires>
+              <Wire UId="41"><Powerrail /><NameCon UId="31" Name="in" /></Wire>
+              <Wire UId="42"><IdentCon UId="21" /><NameCon UId="31" Name="operand" /></Wire>
+              <Wire UId="43"><NameCon UId="31" Name="out" /><NameCon UId="32" Name="in" /></Wire>
+              <Wire UId="44"><IdentCon UId="22" /><NameCon UId="32" Name="operand" /></Wire>
+              <Wire UId="45"><NameCon UId="32" Name="out" /><NameCon UId="33" Name="in" /></Wire>
+              <Wire UId="46"><IdentCon UId="23" /><NameCon UId="33" Name="operand" /></Wire>
+            </Wires>
+          </FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="4" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="5" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Run the belt</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="6" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="7" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Start turns the belt on when stop is off.</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.FB>
+  <SW.Blocks.FC ID="10">
+    <AttributeList>
+      <Name>ScaleLevel</Name>
+      <ProgrammingLanguage>FBD</ProgrammingLanguage>
+      <Interface><Sections xmlns="http://www.siemens.com/automation/Openness/SW/Interface/v5">
+        <Section Name="Input">
+          <Member Name="Level" Datatype="Real"><Comment><MultiLanguageText Lang="en-US">Tank level</MultiLanguageText></Comment></Member>
+          <Member Name="Offset" Datatype="Real"><Comment><MultiLanguageText Lang="en-US">Speed offset</MultiLanguageText></Comment></Member>
+        </Section>
+        <Section Name="Output">
+          <Member Name="Result" Datatype="Real"><Comment><MultiLanguageText Lang="en-US">Scaled result</MultiLanguageText></Comment></Member>
+        </Section>
+      </Sections></Interface>
+    </AttributeList>
+    <ObjectList>
+      <SW.Blocks.CompileUnit ID="11" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+            <Parts>
+              <Access Scope="GlobalVariable" UId="51"><Symbol><Component Name="Level" /></Symbol></Access>
+              <Access Scope="GlobalVariable" UId="52"><Symbol><Component Name="Offset" /></Symbol></Access>
+              <Access Scope="GlobalVariable" UId="53"><Symbol><Component Name="Result" /></Symbol></Access>
+              <Part Name="Add" UId="54" />
+            </Parts>
+            <Wires>
+              <Wire UId="61"><IdentCon UId="51" /><NameCon UId="54" Name="in1" /></Wire>
+              <Wire UId="62"><IdentCon UId="52" /><NameCon UId="54" Name="in2" /></Wire>
+              <Wire UId="63"><IdentCon UId="53" /><NameCon UId="54" Name="out" /></Wire>
+            </Wires>
+          </FlgNet></NetworkSource>
+          <ProgrammingLanguage>FBD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="12" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="13" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Add the offset</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.FC>
+  <SW.Blocks.OB ID="20">
+    <AttributeList>
+      <Name>FillPump</Name>
+      <ProgrammingLanguage>SCL</ProgrammingLanguage>
+      <Interface><Sections xmlns="http://www.siemens.com/automation/Openness/SW/Interface/v5">
+        <Section Name="Static">
+          <Member Name="Level" Datatype="Real"><Comment><MultiLanguageText Lang="en-US">Tank level</MultiLanguageText></Comment></Member>
+          <Member Name="Pump" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Fill pump</MultiLanguageText></Comment></Member>
+        </Section>
+      </Sections></Interface>
+    </AttributeList>
+    <ObjectList>
+      <SW.Blocks.CompileUnit ID="21" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><StructuredText xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/StructuredText/v3">
+            <Token Text="IF" /><Blank />
+            <Access Scope="GlobalVariable"><Symbol><Component Name="Level" /></Symbol></Access>
+            <Blank /><Token Text="&lt;" /><Blank /><Token Text="10" /><Blank />
+            <Token Text="THEN" /><Blank />
+            <Access Scope="GlobalVariable"><Symbol><Component Name="Pump" /></Symbol></Access>
+            <Blank /><Token Text=":=" /><Blank /><Token Text="TRUE" /><Token Text=";" />
+          </StructuredText></NetworkSource>
+          <ProgrammingLanguage>SCL</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="22" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="23" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Fill when the level is low</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.OB>
+  <SW.Blocks.FB ID="30">
+    <AttributeList>
+      <Name>FillSequence</Name>
+      <ProgrammingLanguage>GRAPH</ProgrammingLanguage>
+    </AttributeList>
+    <ObjectList>
+      <SW.Blocks.CompileUnit ID="31" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><Graph xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/Graph/v4">
+            <Sequence>
+              <Steps>
+                <Step Number="1" Init="true" Name="Fill">
+                  <Actions>
+                    <Action Number="1" Qualifier="N"><Token Text="Pump" /></Action>
+                  </Actions>
+                </Step>
+                <Step Number="2" Name="Discharge">
+                  <Actions>
+                    <Action Number="1" Qualifier="R"><Token Text="Pump" /></Action>
+                  </Actions>
+                </Step>
+              </Steps>
+              <Transitions>
+                <Transition Number="1">
+                  <Condition>
+                    <FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+                      <Parts>
+                        <Access Scope="GlobalVariable" UId="71"><Symbol><Component Name="LevelHigh" /></Symbol></Access>
+                        <Part Name="Contact" UId="72" />
+                      </Parts>
+                      <Wires>
+                        <Wire UId="73"><Powerrail /><NameCon UId="72" Name="in" /></Wire>
+                        <Wire UId="74"><IdentCon UId="71" /><NameCon UId="72" Name="operand" /></Wire>
+                      </Wires>
+                    </FlgNet>
+                  </Condition>
+                </Transition>
+              </Transitions>
+            </Sequence>
+          </Graph></NetworkSource>
+          <ProgrammingLanguage>GRAPH</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="32" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="33" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Fill then discharge</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.FB>
+</Document>

@@ -22,6 +22,7 @@ const {
 } = require('./lib/billing');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
+const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
@@ -362,6 +363,7 @@ function installShutdown(server, {
 
 function start() {
   if (!prepareListen(process.env)) return null;
+  logPythonAvailability();
   const port = process.env.PORT || 3001;
   const app = createApp();
   const server = app.listen(port, () => {
