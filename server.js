@@ -25,7 +25,7 @@ const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
 const { applyPeriodAccessEvent } = require('./lib/period-access');
 const { applyOverageCreditEvent } = require('./lib/overage-credit');
-const { clearGenerationStarted, markFirstManualDelivered, markGenerationStarted } = require('./lib/delivery');
+const { clearGenerationStarted, markFirstManualDelivered, markGenerationStarted, rollbackFirstManual } = require('./lib/delivery');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -41,10 +41,10 @@ function createStripe(env) {
 
 function sendError(res, err) {
   if (err && err.expose) {
-    if (err.logMessage) console.error(redactCustomerLog(err.logMessage));
+    if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
     return res.status(err.status || 500).json({ error: err.message });
   }
-  console.error(redactCustomerLog(err && err.stack ? err.stack : err));
+  console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
   return res.status(500).json({ error: 'Internal server error' });
 }
 
@@ -205,7 +205,7 @@ function createApp({
 
   async function publishManual(access, sessionId) {
     try {
-      await markFirstManualDelivered(stripeClient, access, sessionId);
+      return await markFirstManualDelivered(stripeClient, access, sessionId);
     } catch (err) {
       console.error(
         'First manual delivery stamp failed',
@@ -347,7 +347,7 @@ function createApp({
       reserveAtStart: false,
       respond: async (access, files, credit, project) => {
         const sessionId = readSessionId(req);
-        let stamped = false;
+        let stamp = null;
         try {
           await markGenerationStarted(stripeClient, access, sessionId);
           const result = await generateManual({
@@ -366,8 +366,7 @@ function createApp({
             err.expose = true;
             throw err;
           }
-          await publishManual(access, sessionId);
-          stamped = true;
+          stamp = await publishManual(access, sessionId);
           if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
           res.set({
             'Content-Type': 'application/pdf',
@@ -379,7 +378,10 @@ function createApp({
           });
           res.send(result.pdf);
         } catch (err) {
-          if (!stamped) await clearGenerationStarted(stripeClient, access, sessionId);
+          if (stamp && stamp.created && !res.headersSent) {
+            await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
+          }
+          if (!res.headersSent) await clearGenerationStarted(stripeClient, access, sessionId);
           throw err;
         }
       },
@@ -404,7 +406,7 @@ function createApp({
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err && err.expose) return sendError(res, err);
-    console.error(redactCustomerLog(err && err.stack ? err.stack : err));
+    console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
     if (err && err.name === 'MulterError') {
       const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
       return res.status(400).json({ error: message });

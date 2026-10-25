@@ -399,7 +399,7 @@ test('pro disputes suspend, restore on won, and revoke permanently on lost', asy
     assert.equal(subscription.metadata.period_access, 'revoked');
     assert.equal(subscription.metadata.period_access_reason, 'dispute');
     assert.equal(subscription.metadata.revoked_dispute_lost, 'true');
-    assert.equal(customer.metadata.revoked_dispute_lost, 'true');
+    assert.equal(customer.metadata.revoked_dispute_lost, undefined);
     assert.equal(subscription.status, 'canceled');
     assert.deepEqual(cancels, [{ prorate: false, invoice_now: false }]);
     const lost = await postGenerate(base);
@@ -465,7 +465,7 @@ test('a refund of an earlier period does not block the current one', async () =>
   });
 });
 
-test('warning_closed does not suspend and charge_refunded only suspends', async () => {
+test('warning_closed does not suspend and charge_refunded does not suspend by itself', async () => {
   const { stripe, subscription } = createProStripe();
   const app = createApp({ env: env(), stripe, anthropic: null });
   await withServer(app, async (base) => {
@@ -475,12 +475,15 @@ test('warning_closed does not suspend and charge_refunded only suspends', async 
       status: 'warning_closed',
     }))).status, 200);
     assert.equal(subscription.metadata.period_access, undefined);
+    assert.equal(subscription.metadata.closed_disputes, undefined);
     assert.equal((await postWebhook(base, event('evt_charge_refunded', 'charge.dispute.closed', {
       id: 'dp_charge_refunded',
       charge: 'ch_current',
       status: 'charge_refunded',
     }))).status, 200);
-    assert.equal(subscription.metadata.period_access, 'suspended');
+    assert.equal(subscription.metadata.period_access, undefined);
+    assert.equal(subscription.metadata.open_dispute_count, '0');
+    assert.equal(subscription.metadata.closed_disputes, 'dp_charge_refunded');
     assert.equal(subscription.status, 'active');
   });
 });
