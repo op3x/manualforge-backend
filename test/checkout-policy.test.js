@@ -1,18 +1,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { checkoutParams } = require('../lib/billing');
 const {
   DESCRIPTIONS,
-  PAYMENT_REFUND_MESSAGE,
-  SUBSCRIPTION_REFUND_MESSAGE,
   starterDescription,
   withCheckoutPolicy,
 } = require('../lib/checkoutPolicy');
+const {
+  CHECKOUT_TOS_VERSION,
+  INTEGRATOR_ANNUAL_SUBMIT_MESSAGE,
+  INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE,
+  INTEGRATOR_MONTHLY_SUBMIT_MESSAGE,
+  INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE,
+  PRO_SUBMIT_MESSAGE,
+  PRO_TERMS_ACCEPTANCE_MESSAGE,
+  STARTER_SUBMIT_MESSAGE,
+  STARTER_TERMS_ACCEPTANCE_MESSAGE,
+  termsAcceptanceMessage,
+  stripeSubmitMessage,
+  tosLabelSha,
+} = require('../lib/checkoutLabels');
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
-
-const PAYMENT_MESSAGE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro. Once a manual is delivered, that purchase is no longer refundable.';
-const SUBSCRIPTION_MESSAGE = `${PAYMENT_MESSAGE} Cancel anytime.`;
 
 const STARTER_DESCRIPTION = 'ManualOS Starter: 3 operator and maintenance manuals from your files';
 const PRO_MONTHLY = 'ManualOS Pro: unlimited manuals, billed monthly';
@@ -22,26 +34,6 @@ const INTEGRATOR_YEARLY = 'ManualOS Integrator: 25 manuals per month, billed yea
 const OVERAGE_DESCRIPTION = 'ManualOS Integrator: one extra manual';
 
 const AI_WORD = /\bAI\b/i;
-const CONSENT_KEYS = ['terms_version', 'disclosure_version', 'renewal_consent_at', 'terms_consent_at', 'consent_ip'];
-
-function consentBody(plan) {
-  const body = { plan, termsAccepted: true, termsVersion: 'terms-2026-10-25' };
-  if (plan === 'pro') {
-    body.renewalConsent = true;
-    body.disclosureVersion = 'disclosure-2026-10-25';
-  }
-  return body;
-}
-
-function withoutConsent(params) {
-  const copy = structuredClone(params);
-  for (const slot of ['metadata', 'subscription_data', 'payment_intent_data']) {
-    const record = slot === 'metadata' ? copy.metadata : copy[slot] && copy[slot].metadata;
-    if (!record) continue;
-    for (const key of CONSENT_KEYS) delete record[key];
-  }
-  return copy;
-}
 
 const env = {
   FRONTEND_URL: 'https://manualos.com/',
@@ -55,7 +47,14 @@ test.after(() => {
 });
 
 function preserved(result, source) {
-  assert.deepEqual(result.metadata, source.metadata);
+  const plan = source.metadata && source.metadata.plan;
+  const terms = plan === 'pro' ? PRO_TERMS_ACCEPTANCE_MESSAGE : STARTER_TERMS_ACCEPTANCE_MESSAGE;
+  const submit = plan === 'pro' ? PRO_SUBMIT_MESSAGE : STARTER_SUBMIT_MESSAGE;
+  assert.deepEqual(result.metadata, {
+    ...source.metadata,
+    terms_version: CHECKOUT_TOS_VERSION,
+    tos_label_sha: tosLabelSha(terms, submit),
+  });
   assert.deepEqual(result.line_items, source.line_items);
   assert.equal(result.success_url, source.success_url);
   assert.equal(result.cancel_url, source.cancel_url);
@@ -63,13 +62,18 @@ function preserved(result, source) {
   assert.equal(result.integration_identifier, source.integration_identifier);
   assert.equal(result.payment_method_types, undefined);
   assert.equal(result.billing_address_collection, 'required');
-  assert.equal(result.custom_text.submit.message, source.mode === 'subscription' ? SUBSCRIPTION_MESSAGE : PAYMENT_MESSAGE);
-  assert.equal(result.consent_collection, undefined);
+  assert.equal(result.custom_text.submit.message, submit);
+  assert.deepEqual(result.consent_collection, { terms_of_service: 'required' });
+  assert.equal(result.custom_text.terms_of_service_acceptance.message, terms);
+  assert.equal(result.metadata.plan, plan);
+  assert.equal(result.metadata.terms_version, CHECKOUT_TOS_VERSION);
+  assert.equal(result.metadata.tos_label_sha, tosLabelSha(terms, submit));
 }
 
 function customerCopy(result) {
   return [
     result.custom_text && result.custom_text.submit && result.custom_text.submit.message,
+    result.custom_text && result.custom_text.terms_of_service_acceptance && result.custom_text.terms_of_service_acceptance.message,
     result.payment_intent_data && result.payment_intent_data.description,
     result.subscription_data && result.subscription_data.description,
   ].filter(Boolean);
@@ -95,28 +99,83 @@ function withAttribution(params, raw) {
   return next;
 }
 
-test('live checkout text does not name Integrator', () => {
-  assert.equal(PAYMENT_REFUND_MESSAGE.includes('Integrator'), false);
-  assert.equal(SUBSCRIPTION_REFUND_MESSAGE.includes('Integrator'), false);
-  for (const plan of ['starter', 'pro']) {
-    const result = withCheckoutPolicy(checkoutParams(plan, env), { plan, env });
-    for (const text of customerCopy(result)) {
-      assert.equal(text.includes('Integrator'), false, text);
-    }
+test('each plan has its own submit text and terms label, all under 1200 characters', () => {
+  const renewal = 'Pro renews automatically every month at $79 (USD, plus applicable taxes) until you cancel. Cancel anytime online with the one-click cancel email at manualos.com/cancel. Cancelling stops future charges, and you keep Pro until the end of the period you\'ve paid for.';
+  const keepIntegrator = 'Cancel anytime online with the one-click cancel email at manualos.com/cancel. Cancelling stops future charges, and you keep Integrator until the end of the period you\'ve paid for.';
+  const monthlyRefund = 'Each monthly charge is refundable until that billing period ends, as long as no manual has been delivered in that period, except where the law requires otherwise.';
+  const yearlyRefund = 'Each yearly charge is refundable until that billing period ends, as long as no manual has been delivered in that period, except where the law requires otherwise.';
+  assert.equal(STARTER_SUBMIT_MESSAGE, 'Full refund within 30 days of purchase, as long as no manual from that purchase has been delivered, except where the law requires otherwise.');
+  assert.equal(PRO_SUBMIT_MESSAGE, `${renewal} ${monthlyRefund}`);
+  assert.equal(INTEGRATOR_MONTHLY_SUBMIT_MESSAGE, `Integrator renews automatically every month at $249 (USD, plus applicable taxes) until you cancel. ${keepIntegrator} ${monthlyRefund}`);
+  assert.equal(INTEGRATOR_ANNUAL_SUBMIT_MESSAGE, `Integrator renews automatically every year at $2,490 (USD, plus applicable taxes) until you cancel. ${keepIntegrator} ${yearlyRefund}`);
+  assert.equal(INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE, 'I agree to the [ManualOS Terms](https://manualos.com/terms.html) and authorize Op3x LLC to charge my card $249/month (USD, plus applicable taxes), renewing automatically each month until I cancel.');
+  assert.equal(INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE, 'I agree to the [ManualOS Terms](https://manualos.com/terms.html) and authorize Op3x LLC to charge my card $2,490/year (USD, plus applicable taxes), renewing automatically each year until I cancel.');
+  for (const text of [
+    STARTER_SUBMIT_MESSAGE,
+    PRO_SUBMIT_MESSAGE,
+    INTEGRATOR_MONTHLY_SUBMIT_MESSAGE,
+    INTEGRATOR_ANNUAL_SUBMIT_MESSAGE,
+    STARTER_TERMS_ACCEPTANCE_MESSAGE,
+    PRO_TERMS_ACCEPTANCE_MESSAGE,
+    INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE,
+    INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE,
+  ]) {
+    assert.equal(text.length > 0 && text.length <= 1200, true, String(text.length));
   }
-});
+  assert.equal(PRO_SUBMIT_MESSAGE.includes('$249'), false);
+  assert.equal(INTEGRATOR_MONTHLY_SUBMIT_MESSAGE.includes('$79'), false);
+  assert.equal(INTEGRATOR_ANNUAL_SUBMIT_MESSAGE.includes('$79'), false);
+  assert.equal(stripeSubmitMessage('integrator_monthly'), INTEGRATOR_MONTHLY_SUBMIT_MESSAGE);
+  assert.throws(() => stripeSubmitMessage('integrator'), (err) => err.status === 400 && err.message === 'plan_unavailable');
+  assert.throws(() => termsAcceptanceMessage('pro_annual'), (err) => err.status === 400 && err.message === 'plan_unavailable');
+  assert.throws(() => termsAcceptanceMessage(''), (err) => err.message === 'plan_unavailable');
+  const policySource = fs.readFileSync(path.join(__dirname, '../lib/checkoutPolicy.js'), 'utf8');
+  const labelSource = fs.readFileSync(path.join(__dirname, '../lib/checkoutLabels.js'), 'utf8');
+  assert.equal(policySource.includes('Refundable until your first manual'), false);
+  assert.equal(labelSource.includes('Refundable until your first manual'), false);
 
-test('submit message is the refund rule and stays within 1200 characters', () => {
-  assert.equal(PAYMENT_REFUND_MESSAGE, PAYMENT_MESSAGE);
-  assert.equal(SUBSCRIPTION_REFUND_MESSAGE, SUBSCRIPTION_MESSAGE);
-  assert.equal(PAYMENT_MESSAGE.length <= 1200, true);
-  assert.equal(SUBSCRIPTION_MESSAGE.length <= 1200, true);
-  assert.equal(PAYMENT_MESSAGE.includes('Cancel anytime.'), false);
-  assert.equal(SUBSCRIPTION_MESSAGE.endsWith('Cancel anytime.'), true);
-  const starter = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env });
-  const pro = withCheckoutPolicy(checkoutParams('pro', env), { plan: 'pro', env });
-  assert.equal(starter.custom_text.submit.message, PAYMENT_MESSAGE);
-  assert.equal(pro.custom_text.submit.message, SUBSCRIPTION_MESSAGE);
+  const plans = [
+    ['starter', checkoutParams('starter', env), STARTER_TERMS_ACCEPTANCE_MESSAGE, STARTER_SUBMIT_MESSAGE, 'payment_intent_data'],
+    ['pro', checkoutParams('pro', env), PRO_TERMS_ACCEPTANCE_MESSAGE, PRO_SUBMIT_MESSAGE, 'subscription_data'],
+    ['integrator', {
+      mode: 'subscription',
+      metadata: { plan: 'integrator', interval: 'month' },
+      subscription_data: { metadata: { plan: 'integrator', interval: 'month' } },
+    }, INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE, INTEGRATOR_MONTHLY_SUBMIT_MESSAGE, 'subscription_data'],
+    ['integrator_annual', {
+      mode: 'subscription',
+      metadata: { plan: 'integrator', interval: 'year' },
+      subscription_data: { metadata: { plan: 'integrator', interval: 'year' } },
+    }, INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE, INTEGRATOR_ANNUAL_SUBMIT_MESSAGE, 'subscription_data'],
+  ];
+  for (const [plan, params, terms, submit, slot] of plans) {
+    const result = withCheckoutPolicy(params, { plan, env });
+    const legal = plan === 'integrator' ? 'integrator_monthly' : plan;
+    const sha = crypto.createHash('sha256').update(`${terms}${submit}`, 'utf8').digest('hex').slice(0, 12);
+    assert.equal(result.custom_text.terms_of_service_acceptance.message, terms, plan);
+    assert.equal(result.custom_text.submit.message, submit, plan);
+    assert.equal(result.consent_collection.terms_of_service, 'required', plan);
+    assert.equal(result.metadata.plan, legal, plan);
+    assert.equal(result.metadata.terms_version, 'checkout-tos-v2', plan);
+    assert.equal(result.metadata.tos_label_sha, sha, plan);
+    assert.equal(result.metadata.tos_label_sha, tosLabelSha(terms, submit), plan);
+    assert.equal(result[slot].metadata.plan, legal, plan);
+    assert.equal(result[slot].metadata.terms_version, 'checkout-tos-v2', plan);
+    assert.equal(result[slot].metadata.tos_label_sha, sha, plan);
+    assert.equal(submit.includes('[manualos.com/cancel]'), false, plan);
+  }
+  assert.throws(
+    () => withCheckoutPolicy(checkoutParams('pro', env), { plan: 'pro_annual', env }),
+    (err) => err.status === 400 && err.message === 'plan_unavailable',
+  );
+  assert.throws(
+    () => withCheckoutPolicy({ mode: 'payment', metadata: { plan: 'integrator_overage' } }, { plan: 'integrator_overage', env }),
+    (err) => err.status === 400 && err.message === 'plan_unavailable',
+  );
+  assert.throws(
+    () => withCheckoutPolicy({ mode: 'payment', metadata: { plan: 'enterprise' } }, { plan: 'enterprise', env }),
+    (err) => err.status === 400 && err.message === 'plan_unavailable',
+  );
 });
 
 test('starter description uses STARTER_CREDITS and pluralizes', () => {
@@ -145,7 +204,11 @@ test('payment and subscription plans on main keep existing checkout fields', () 
   assert.equal(starter.mode, 'payment');
   preserved(starter, starterIn);
   assert.equal(starter.payment_intent_data.description, STARTER_DESCRIPTION);
-  assert.deepEqual(starter.payment_intent_data.metadata, starterIn.payment_intent_data.metadata);
+  assert.deepEqual(starter.payment_intent_data.metadata, {
+    ...starterIn.payment_intent_data.metadata,
+    terms_version: CHECKOUT_TOS_VERSION,
+    tos_label_sha: tosLabelSha(STARTER_TERMS_ACCEPTANCE_MESSAGE, STARTER_SUBMIT_MESSAGE),
+  });
   assert.equal(starter.subscription_data, undefined);
   assert.notEqual(starter.payment_intent_data, starterIn.payment_intent_data);
   assert.notEqual(starter.payment_intent_data.metadata, starterIn.payment_intent_data.metadata);
@@ -155,7 +218,11 @@ test('payment and subscription plans on main keep existing checkout fields', () 
   assert.equal(pro.mode, 'subscription');
   preserved(pro, proIn);
   assert.equal(pro.subscription_data.description, PRO_MONTHLY);
-  assert.deepEqual(pro.subscription_data.metadata, proIn.subscription_data.metadata);
+  assert.deepEqual(pro.subscription_data.metadata, {
+    ...proIn.subscription_data.metadata,
+    terms_version: CHECKOUT_TOS_VERSION,
+    tos_label_sha: tosLabelSha(PRO_TERMS_ACCEPTANCE_MESSAGE, PRO_SUBMIT_MESSAGE),
+  });
   assert.equal(pro.payment_intent_data, undefined);
 });
 
@@ -174,17 +241,10 @@ test('descriptions name the plan without calling the product AI', () => {
       slot: 'subscription_data',
     },
     {
-      plan: 'pro',
-      params: {
-        ...checkoutParams('pro', env),
-        metadata: { plan: 'pro', interval: 'year' },
-        subscription_data: { metadata: { plan: 'pro', interval: 'year' } },
-      },
-      description: PRO_YEARLY,
-      slot: 'subscription_data',
-    },
-    {
       plan: 'integrator',
+      legal: 'integrator_monthly',
+      terms: INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE,
+      submit: INTEGRATOR_MONTHLY_SUBMIT_MESSAGE,
       params: {
         mode: 'subscription',
         line_items: [{ price: 'price_int_month', quantity: 1 }],
@@ -197,6 +257,9 @@ test('descriptions name the plan without calling the product AI', () => {
     },
     {
       plan: 'integrator',
+      legal: 'integrator_annual',
+      terms: INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE,
+      submit: INTEGRATOR_ANNUAL_SUBMIT_MESSAGE,
       params: {
         mode: 'subscription',
         line_items: [{ price: 'price_int_year', quantity: 1 }],
@@ -209,6 +272,9 @@ test('descriptions name the plan without calling the product AI', () => {
     },
     {
       plan: 'integrator_annual',
+      legal: 'integrator_annual',
+      terms: INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE,
+      submit: INTEGRATOR_ANNUAL_SUBMIT_MESSAGE,
       params: {
         mode: 'subscription',
         line_items: [{ price: 'price_int_year', quantity: 1 }],
@@ -219,34 +285,50 @@ test('descriptions name the plan without calling the product AI', () => {
       description: INTEGRATOR_YEARLY,
       slot: 'subscription_data',
     },
-    {
-      plan: 'integrator_overage',
-      params: {
-        mode: 'payment',
-        line_items: [{ price: 'price_int_overage', quantity: 1 }],
-        success_url: 'https://manualos.com/upload.html?session_id=cs_test_sub',
-        metadata: { plan: 'integrator_overage', subscription_id: 'sub_int' },
-        payment_intent_data: { metadata: { plan: 'integrator_overage', subscription_id: 'sub_int' } },
-      },
-      description: OVERAGE_DESCRIPTION,
-      slot: 'payment_intent_data',
-    },
   ];
 
   const seen = [];
   for (const entry of cases) {
+    const legal = entry.legal || entry.plan;
+    const terms = entry.terms || (entry.plan === 'pro' ? PRO_TERMS_ACCEPTANCE_MESSAGE : STARTER_TERMS_ACCEPTANCE_MESSAGE);
+    const submit = entry.submit || (entry.plan === 'pro' ? PRO_SUBMIT_MESSAGE : STARTER_SUBMIT_MESSAGE);
     const result = withCheckoutPolicy(entry.params, { plan: entry.plan, env: {} });
+    const sha = tosLabelSha(terms, submit);
     assert.equal(result[entry.slot].description, entry.description);
-    assert.deepEqual(result[entry.slot].metadata, entry.params[entry.slot].metadata);
-    assert.deepEqual(result.metadata, entry.params.metadata);
+    assert.deepEqual(result[entry.slot].metadata, {
+      ...entry.params[entry.slot].metadata,
+      plan: legal,
+      terms_version: CHECKOUT_TOS_VERSION,
+      tos_label_sha: sha,
+    });
+    assert.deepEqual(result.metadata, {
+      ...entry.params.metadata,
+      plan: legal,
+      terms_version: CHECKOUT_TOS_VERSION,
+      tos_label_sha: sha,
+    });
     assert.deepEqual(result.line_items, entry.params.line_items);
     assert.equal(result.success_url, entry.params.success_url);
     seen.push(...customerCopy(result));
   }
+  assert.throws(
+    () => withCheckoutPolicy({
+      ...checkoutParams('pro', env),
+      metadata: { plan: 'pro', interval: 'year' },
+      subscription_data: { metadata: { plan: 'pro', interval: 'year' } },
+    }, { plan: 'pro', env: {} }),
+    (err) => err.status === 400 && err.message === 'plan_unavailable',
+  );
+  assert.throws(
+    () => withCheckoutPolicy({
+      mode: 'payment',
+      metadata: { plan: 'integrator_overage' },
+      payment_intent_data: { metadata: { plan: 'integrator_overage' } },
+    }, { plan: 'integrator_overage', env: {} }),
+    (err) => err.status === 400 && err.message === 'plan_unavailable',
+  );
 
   seen.push(
-    PAYMENT_MESSAGE,
-    SUBSCRIPTION_MESSAGE,
     ...Object.values(DESCRIPTIONS.pro),
     ...Object.values(DESCRIPTIONS.integrator),
     DESCRIPTIONS.overage,
@@ -269,7 +351,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
     submit: { message: 'old', extra: 'keep' },
     shipping_address: { message: 'Ship to the plant.' },
   };
-  const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: '0' } });
+  const result = withCheckoutPolicy(starter, { plan: 'starter', env: {} });
   assert.equal(result.customer_creation, 'always');
   assert.equal(result.payment_intent_data.transfer_group, 'grp_starter');
   assert.equal(result.payment_intent_data.description, STARTER_DESCRIPTION);
@@ -278,10 +360,14 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
     brand: 'manualos',
     manuals_used: '0',
     credit_hold: 'hold_1',
+    terms_version: CHECKOUT_TOS_VERSION,
+    tos_label_sha: tosLabelSha(STARTER_TERMS_ACCEPTANCE_MESSAGE, STARTER_SUBMIT_MESSAGE),
   });
   assert.equal(result.custom_text.submit.extra, 'keep');
+  assert.equal(result.custom_text.submit.message, STARTER_SUBMIT_MESSAGE);
+  assert.equal(result.custom_text.terms_of_service_acceptance.message, STARTER_TERMS_ACCEPTANCE_MESSAGE);
   assert.deepEqual(result.custom_text.shipping_address, { message: 'Ship to the plant.' });
-  assert.equal(result.consent_collection, undefined);
+  assert.equal(result.consent_collection.terms_of_service, 'required');
 
   const pro = checkoutParams('pro', env);
   pro.subscription_data.description = 'replace me';
@@ -290,24 +376,55 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   const off = withCheckoutPolicy(pro, { plan: 'pro', env: {} });
   assert.equal(off.subscription_data.description, PRO_MONTHLY);
   assert.equal(off.subscription_data.trial_period_days, 0);
-  assert.deepEqual(off.subscription_data.metadata, { plan: 'pro', brand: 'manualos' });
-  assert.deepEqual(off.consent_collection, { promotions: 'auto' });
+  assert.deepEqual(off.subscription_data.metadata, {
+    plan: 'pro',
+    brand: 'manualos',
+    terms_version: CHECKOUT_TOS_VERSION,
+    tos_label_sha: tosLabelSha(PRO_TERMS_ACCEPTANCE_MESSAGE, PRO_SUBMIT_MESSAGE),
+  });
+  assert.equal(off.custom_text.submit.message, PRO_SUBMIT_MESSAGE);
+  assert.deepEqual(off.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
 
   const on = withCheckoutPolicy(pro, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
   assert.deepEqual(on.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
   assert.deepEqual(pro.consent_collection, { promotions: 'auto' });
 });
 
-test('terms of service consent is sent only when CHECKOUT_REQUIRE_TOS is 1', () => {
-  const starter = checkoutParams('starter', env);
-  for (const flag of [undefined, '', '0', 'true', 'yes', '01']) {
-    const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: flag } });
-    assert.equal(result.consent_collection, undefined, String(flag));
+test('every approved plan requires terms consent, and the kill switch fails closed', () => {
+  for (const plan of ['starter', 'pro']) {
+    for (const flag of [undefined, '', 'true', 'yes', '01', '1', ' 1 ', '1\n']) {
+      const result = withCheckoutPolicy(checkoutParams(plan, env), { plan, env: { CHECKOUT_REQUIRE_TOS: flag } });
+      assert.equal(result.consent_collection.terms_of_service, 'required', `${plan} ${String(flag)}`);
+    }
+    assert.throws(
+      () => withCheckoutPolicy(checkoutParams(plan, env), { plan, env: { CHECKOUT_REQUIRE_TOS: '0' } }),
+      (err) => err.status === 503 && err.message === 'Checkout is temporarily unavailable.',
+    );
   }
-  for (const flag of ['1', ' 1 ', '1\n']) {
-    const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: flag } });
-    assert.deepEqual(result.consent_collection, { terms_of_service: 'required' });
+  const integrator = {
+    mode: 'subscription',
+    line_items: [{ price: 'price_int', quantity: 1 }],
+    metadata: { plan: 'integrator' },
+    subscription_data: { metadata: { plan: 'integrator' } },
+  };
+  const month = withCheckoutPolicy(integrator, { plan: 'integrator', env: {} });
+  assert.equal(month.consent_collection.terms_of_service, 'required');
+  assert.equal(month.custom_text.submit.message, INTEGRATOR_MONTHLY_SUBMIT_MESSAGE);
+  assert.equal(month.custom_text.terms_of_service_acceptance.message, INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE);
+  for (const mode of ['off', 'OFF', ' Off ']) {
+    assert.throws(
+      () => withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env: { CHECKOUT_TOS_MODE: mode } }),
+      (err) => err.status === 503 && err.message === 'Checkout is temporarily unavailable.',
+      mode,
+    );
   }
+  assert.throws(
+    () => withCheckoutPolicy(checkoutParams('pro', env), {
+      plan: 'pro',
+      env: { CHECKOUT_TOS_MODE: 'stripe', CHECKOUT_REQUIRE_TOS: '0' },
+    }),
+    (err) => err.status === 503 && err.message === 'Checkout is temporarily unavailable.',
+  );
 });
 
 test('checkout policy and attribution compose in either order', () => {
@@ -328,12 +445,23 @@ test('checkout policy and attribution compose in either order', () => {
     assert.equal(policyThenAttribution.billing_address_collection, 'required');
     assert.equal(
       policyThenAttribution.custom_text.submit.message,
-      plan === 'pro' ? SUBSCRIPTION_MESSAGE : PAYMENT_MESSAGE,
+      plan === 'pro' ? PRO_SUBMIT_MESSAGE : STARTER_SUBMIT_MESSAGE,
     );
+    assert.equal(
+      policyThenAttribution.custom_text.terms_of_service_acceptance.message,
+      plan === 'pro' ? PRO_TERMS_ACCEPTANCE_MESSAGE : STARTER_TERMS_ACCEPTANCE_MESSAGE,
+    );
+    assert.equal(policyThenAttribution.consent_collection.terms_of_service, 'required');
     assert.deepEqual(policyThenAttribution.line_items, base.line_items);
     assert.equal(policyThenAttribution.success_url, base.success_url);
     if (plan === 'starter') {
-      assert.deepEqual(policyThenAttribution.payment_intent_data.metadata, base.payment_intent_data.metadata);
+      assert.equal(policyThenAttribution.payment_intent_data.metadata.manuals_used, '0');
+      assert.equal(policyThenAttribution.payment_intent_data.metadata.plan, 'starter');
+      assert.equal(policyThenAttribution.payment_intent_data.metadata.terms_version, CHECKOUT_TOS_VERSION);
+      assert.equal(
+        policyThenAttribution.payment_intent_data.metadata.tos_label_sha,
+        tosLabelSha(STARTER_TERMS_ACCEPTANCE_MESSAGE, STARTER_SUBMIT_MESSAGE),
+      );
       assert.equal(policyThenAttribution.payment_intent_data.description, STARTER_DESCRIPTION);
     } else {
       assert.equal(policyThenAttribution.subscription_data.metadata.plan, 'pro');
@@ -387,14 +515,14 @@ function overageCheckout() {
   return {
     mode: 'payment',
     line_items: [{ price: 'price_int_overage', quantity: 1 }],
-    success_url: 'https://manualos.com/upload.html?session_id=cs_test_parent',
+    success_url: 'https://manualos.com/upload.html?session_id=cs_parent',
     cancel_url: 'https://manualos.com/#pricing',
     client_reference_id: 'sub_int',
     customer: 'cus_test',
     metadata: withUtm({
       plan: 'integrator_overage',
       subscription_id: 'sub_int',
-      subscription_session_id: 'cs_test_parent',
+      subscription_session_id: 'cs_parent',
     }),
     payment_intent_data: {
       metadata: withUtm({
@@ -410,24 +538,21 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
   const cases = [
     {
       plan: 'integrator',
+      legal: 'integrator_monthly',
       source: integratorCheckout('month'),
       slot: 'subscription_data',
       description: INTEGRATOR_MONTHLY,
-      message: SUBSCRIPTION_MESSAGE,
+      terms: INTEGRATOR_MONTHLY_TERMS_ACCEPTANCE_MESSAGE,
+      message: INTEGRATOR_MONTHLY_SUBMIT_MESSAGE,
     },
     {
       plan: 'integrator_annual',
+      legal: 'integrator_annual',
       source: integratorCheckout('year'),
       slot: 'subscription_data',
       description: INTEGRATOR_YEARLY,
-      message: SUBSCRIPTION_MESSAGE,
-    },
-    {
-      plan: 'integrator_overage',
-      source: overageCheckout(),
-      slot: 'payment_intent_data',
-      description: OVERAGE_DESCRIPTION,
-      message: PAYMENT_MESSAGE,
+      terms: INTEGRATOR_ANNUAL_TERMS_ACCEPTANCE_MESSAGE,
+      message: INTEGRATOR_ANNUAL_SUBMIT_MESSAGE,
     },
   ];
   const attribution = {
@@ -438,14 +563,32 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
     attr_utm_content: 'hero',
   };
   for (const entry of cases) {
+    const sha = tosLabelSha(entry.terms, entry.message);
     const result = withCheckoutPolicy(entry.source, { plan: entry.plan, env });
     const expected = structuredClone(entry.source);
     expected.billing_address_collection = 'required';
-    expected.custom_text = { submit: { message: entry.message } };
-    expected[entry.slot] = { ...expected[entry.slot], description: entry.description };
+    expected.custom_text = {
+      submit: { message: entry.message },
+      terms_of_service_acceptance: { message: entry.terms },
+    };
+    expected.consent_collection = { terms_of_service: 'required' };
+    expected.metadata = {
+      ...expected.metadata,
+      plan: entry.legal,
+      terms_version: CHECKOUT_TOS_VERSION,
+      tos_label_sha: sha,
+    };
+    expected[entry.slot] = {
+      ...expected[entry.slot],
+      description: entry.description,
+      metadata: {
+        ...expected[entry.slot].metadata,
+        plan: entry.legal,
+        terms_version: CHECKOUT_TOS_VERSION,
+        tos_label_sha: sha,
+      },
+    };
     assert.deepEqual(result, expected);
-    assert.equal(result.consent_collection, undefined);
-    assert.equal(result.custom_text.submit.message.includes('Cancel anytime.'), entry.source.mode === 'subscription');
     for (const key of Object.keys(entry.source.metadata)) {
       if (!key.includes('utm_')) continue;
       assert.equal(result.metadata[key], entry.source.metadata[key], key);
@@ -459,7 +602,9 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
     for (const [key, value] of Object.entries(attribution)) {
       assert.equal(composed.metadata[key], value, key);
     }
-    assert.equal(composed.metadata.plan, entry.source.metadata.plan);
+    assert.equal(composed.metadata.plan, entry.legal);
+    assert.equal(composed.metadata.terms_version, CHECKOUT_TOS_VERSION);
+    assert.equal(composed.metadata.tos_label_sha, sha);
     assert.deepEqual(composed.line_items, entry.source.line_items);
     assert.equal(composed.success_url, entry.source.success_url);
     assert.equal(composed.cancel_url, entry.source.cancel_url);
@@ -467,16 +612,23 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
     assert.equal(composed.client_reference_id, entry.source.client_reference_id);
     assert.equal(composed.customer, entry.source.customer);
     assert.equal(composed[entry.slot].description, entry.description);
-    const nestedMetadata = entry.source.mode === 'subscription'
-      ? { ...entry.source[entry.slot].metadata, ...attribution }
-      : entry.source[entry.slot].metadata;
-    assert.deepEqual(composed[entry.slot].metadata, nestedMetadata);
+    assert.deepEqual(composed[entry.slot].metadata, {
+      ...entry.source[entry.slot].metadata,
+      ...attribution,
+      plan: entry.legal,
+      terms_version: CHECKOUT_TOS_VERSION,
+      tos_label_sha: sha,
+    });
   }
+  assert.throws(
+    () => withCheckoutPolicy(overageCheckout(), { plan: 'integrator_overage', env }),
+    (err) => err.status === 400 && err.message === 'plan_unavailable',
+  );
 });
 
-function checkoutStripe(calls, customerCalls, priceLists) {
-  let customers = 0;
-  return {
+test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
+  const calls = [];
+  const stripe = {
     checkout: {
       sessions: {
         create: async (params) => {
@@ -485,27 +637,7 @@ function checkoutStripe(calls, customerCalls, priceLists) {
         },
       },
     },
-    customers: {
-      create: async (params) => {
-        customerCalls.push(params);
-        customers += 1;
-        return { id: `cus_${customers}` };
-      },
-    },
-    prices: {
-      list: async (params) => {
-        priceLists.push(params);
-        return { data: [] };
-      },
-    },
   };
-}
-
-test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
-  const calls = [];
-  const customerCalls = [];
-  const priceLists = [];
-  const stripe = checkoutStripe(calls, customerCalls, priceLists);
   const appEnv = {
     NODE_ENV: 'test',
     FRONTEND_URL: 'https://manualos.com',
@@ -526,38 +658,46 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
   });
   try {
     const base = `http://127.0.0.1:${server.address().port}`;
-    const bad = await fetch(base + '/create-checkout-session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: 'enterprise' }),
-    });
-    assert.equal(bad.status, 400);
+    for (const plan of ['enterprise', 'pro_annual', 'pro_yearly', 'integrator', 'integrator_annual', 'integrator_overage']) {
+      const bad = await fetch(base + '/create-checkout-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan }),
+      });
+      assert.equal(bad.status, 400, plan);
+      assert.deepEqual(await bad.json(), { error: 'plan_unavailable' });
+    }
     assert.equal(calls.length, 0);
-    assert.equal(customerCalls.length, 0);
-    assert.equal(priceLists.length, 0);
 
     for (const plan of ['starter', 'pro']) {
       const response = await fetch(base + '/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(consentBody(plan)),
+        body: JSON.stringify({ plan }),
       });
       assert.equal(response.status, 200);
       const body = await response.json();
       assert.deepEqual(Object.keys(body), ['url']);
     }
-    assert.deepEqual(withoutConsent(calls[0]), withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
-    assert.deepEqual(withoutConsent(calls[1]), withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
-    assert.equal(calls[0].customer, undefined);
-    assert.equal(calls[0].customer_update, undefined);
-    assert.equal(calls[0].customer_creation, 'always');
-    assert.equal(calls[1].customer, undefined);
-    assert.equal(calls[1].customer_update, undefined);
-    assert.deepEqual(customerCalls, []);
-    assert.deepEqual(priceLists[0], { lookup_keys: ['manualos_starter'], active: true, limit: 1 });
-    assert.deepEqual(priceLists[1], { lookup_keys: ['manualos_pro'], active: true, limit: 1 });
-    assert.equal(calls[0].consent_collection, undefined);
-    assert.equal(calls[1].consent_collection, undefined);
+    assert.deepEqual(calls[0], withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
+    assert.deepEqual(calls[1], withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
+    assert.equal(calls[0].consent_collection.terms_of_service, 'required');
+    assert.equal(calls[1].consent_collection.terms_of_service, 'required');
+    assert.equal(calls[0].custom_text.terms_of_service_acceptance.message, STARTER_TERMS_ACCEPTANCE_MESSAGE);
+    assert.equal(calls[1].custom_text.terms_of_service_acceptance.message, PRO_TERMS_ACCEPTANCE_MESSAGE);
+    assert.equal(calls[0].custom_text.submit.message, STARTER_SUBMIT_MESSAGE);
+    assert.equal(calls[1].custom_text.submit.message, PRO_SUBMIT_MESSAGE);
+    assert.equal(calls[0].metadata.plan, 'starter');
+    assert.equal(calls[0].metadata.terms_version, 'checkout-tos-v2');
+    assert.equal(calls[0].metadata.tos_label_sha, tosLabelSha(STARTER_TERMS_ACCEPTANCE_MESSAGE, STARTER_SUBMIT_MESSAGE));
+    assert.equal(calls[0].payment_intent_data.metadata.plan, 'starter');
+    assert.equal(calls[0].payment_intent_data.metadata.terms_version, 'checkout-tos-v2');
+    assert.equal(calls[0].payment_intent_data.metadata.tos_label_sha, calls[0].metadata.tos_label_sha);
+    assert.equal(calls[1].metadata.plan, 'pro');
+    assert.equal(calls[1].metadata.tos_label_sha, tosLabelSha(PRO_TERMS_ACCEPTANCE_MESSAGE, PRO_SUBMIT_MESSAGE));
+    assert.equal(calls[1].subscription_data.metadata.plan, 'pro');
+    assert.equal(calls[1].subscription_data.metadata.terms_version, 'checkout-tos-v2');
+    assert.equal(calls[1].subscription_data.metadata.tos_label_sha, calls[1].metadata.tos_label_sha);
     for (const params of calls) {
       for (const text of customerCopy(params)) assert.equal(AI_WORD.test(text), false);
     }
@@ -566,7 +706,16 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
     const tosEnv = { ...appEnv, CHECKOUT_REQUIRE_TOS: '1' };
     const tosApp = createApp({
       env: tosEnv,
-      stripe: checkoutStripe(tosCalls, [], []),
+      stripe: {
+        checkout: {
+          sessions: {
+            create: async (params) => {
+              tosCalls.push(params);
+              return { id: 'cs_tos', url: 'https://checkout.stripe.com/c/pay/cs_tos' };
+            },
+          },
+        },
+      },
       anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
     });
     const tosServer = tosApp.listen(0, '127.0.0.1');
@@ -579,12 +728,46 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
       const paid = await fetch(tosBase + '/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(consentBody('starter')),
+        body: JSON.stringify({ plan: 'starter' }),
       });
       assert.equal(paid.status, 200);
       assert.equal(tosCalls[0].consent_collection.terms_of_service, 'required');
       assert.equal(tosCalls[0].payment_intent_data.metadata.manuals_used, '0');
       assert.equal(String(process.env.CHECKOUT_REQUIRE_TOS || '').trim() === '1', false);
+
+      const blockedCalls = [];
+      const blockedApp = createApp({
+        env: { ...appEnv, CHECKOUT_TOS_MODE: 'off', CHECKOUT_REQUIRE_TOS: '0' },
+        stripe: {
+          checkout: {
+            sessions: {
+              create: async (params) => {
+                blockedCalls.push(params);
+                return { id: 'cs_blocked', url: 'https://checkout.stripe.com/c/pay/cs_blocked' };
+              },
+            },
+          },
+        },
+        anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
+      });
+      const blockedServer = blockedApp.listen(0, '127.0.0.1');
+      await new Promise((resolve, reject) => {
+        blockedServer.once('listening', resolve);
+        blockedServer.once('error', reject);
+      });
+      try {
+        const blockedBase = `http://127.0.0.1:${blockedServer.address().port}`;
+        const blocked = await fetch(blockedBase + '/create-checkout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: 'pro' }),
+        });
+        assert.equal(blocked.status, 503);
+        assert.deepEqual(await blocked.json(), { error: 'Checkout is temporarily unavailable.' });
+        assert.equal(blockedCalls.length, 0);
+      } finally {
+        await new Promise((resolve) => blockedServer.close(resolve));
+      }
     } finally {
       await new Promise((resolve) => tosServer.close(resolve));
     }

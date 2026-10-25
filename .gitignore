@@ -1,6 +1,7 @@
 node_modules/
 .env
 *.log
+checkout-tos.jsonl
 .DS_Store
 dist/
 __pycache__/

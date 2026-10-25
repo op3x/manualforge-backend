@@ -41,7 +41,13 @@ const {
 const { contentDisposition, downloadFileName, shortJobId, sourceName } = require('./lib/download-name');
 const { assertSessionId, duplicateTopLevelKey, invalidSessionId, maskSessionId, sessionFrom } = require('./lib/session-id');
 const { FILE_LIMIT, readTextFields } = require('./lib/field-limits');
-const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
+const { checkoutTosBlocked, withCheckoutPolicy } = require('./lib/checkoutPolicy');
+const {
+  createCheckoutTosStore,
+  isTermsUrlConfigError,
+  maskCheckoutSessionId,
+  recordCheckoutTos,
+} = require('./lib/checkout-tos');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
 const { withStripeReadCache } = require('./lib/stripe-read-cache');
 const { countUnknownEvents, recordUnknownEvent } = require('./lib/unknown-events');
@@ -317,6 +323,7 @@ function createApp({
   now,
   onStripeEvent,
   creditLedger,
+  checkoutConsents,
   scheduleTimeout = setTimeout,
   cancelTimeout = clearTimeout,
 } = {}) {
@@ -342,6 +349,7 @@ function createApp({
     verifyCache.set(sessionId, { at: clock(), body: { ...body } });
   }
   const ledger = creditLedger || createCreditLedger({ env });
+  const consentStore = checkoutConsents || createCheckoutTosStore({ env });
   jobTimeoutMs(env);
   warnSupportDataDir(env);
   ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
@@ -466,6 +474,14 @@ function createApp({
       return res.json({ received: true });
     }
     try {
+      recordCheckoutTos(event, consentStore);
+    } catch (err) {
+      const session = event && event.data && event.data.object;
+      const code = err && err.code ? err.code : 'error';
+      console.error('checkout terms record failed', maskCheckoutSessionId(session && session.id), code);
+      return res.status(500).json({ error: 'Could not record checkout consent' });
+    }
+    try {
       if (typeof onStripeEvent === 'function') {
         await onStripeEvent(event);
       } else {
@@ -518,14 +534,25 @@ function createApp({
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
+      // agreed, termsAccepted, renewalConsent, termsVersion, and disclosureVersion
+      // may still arrive from the current site. They are not required.
+      // CHECKOUT_REQUIRE_CONSENT stays unset. When it is 1, applyCheckoutConsent
+      // returns 400 if those fields are missing.
+      // CHECKOUT_TOS_MODE=off and CHECKOUT_REQUIRE_TOS=0 fail closed. They do
+      // not skip the checkbox.
+      if (checkoutTosBlocked(env)) {
+        console.error('checkout_tos_blocked');
+        return res.status(503).json({ error: 'Checkout is temporarily unavailable.' });
+      }
       const plan = req.body && req.body.plan;
       // #13 order is withCheckoutPolicy around checkout params. #10's withAttribution
       // wraps that result (either order). #16 applyManualosCheckout may replace the
-      // price. Consent metadata is applied after that and only writes metadata, so it
-      // does not set consent_collection or custom_text. CHECKOUT_REQUIRE_CONSENT gates
-      // the 400; present consent is stored either way. withManualosBrand stamps brand.
-      // #17 rebuilds these params from checkoutParams when a product has no tax code.
-      // applyCheckoutConsent and withManualosBrand have to run after that rebuild.
+      // price. applyCheckoutConsent runs after that. It keeps terms_version at
+      // checkout-tos-v2 and stores the website termsVersion as site_terms_version.
+      // CHECKOUT_REQUIRE_CONSENT gates the 400; present consent is stored either way.
+      // withManualosBrand stamps brand. #17 rebuilds these params from checkoutParams
+      // when a product has no tax code. applyCheckoutConsent and withManualosBrand
+      // have to run after that rebuild.
       const params = withManualosBrand(applyCheckoutConsent(
         await applyManualosCheckout(
           stripeClient,
@@ -542,6 +569,10 @@ function createApp({
       }
       return res.json({ url: session.url });
     } catch (err) {
+      if (isTermsUrlConfigError(err)) {
+        console.error('checkout_tos_config_error terms_url_missing');
+        return res.status(503).json({ error: 'Checkout is temporarily unavailable.' });
+      }
       return sendError(res, err, env);
     }
   });
