@@ -22,6 +22,7 @@ const {
   WELCOME,
   createConsentLimiter,
   customerAlertsAllowed,
+  helpReply,
   isOptOutMessage,
 } = require('../lib/support/http');
 const { createSmtpMailer } = require('../lib/support/mail');
@@ -731,9 +732,11 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     const from = '+15551110999';
     const help = await postTwilio(base, h.env, '/api/twilio/sms', { From: from, Body: 'help', MessageSid: 'SM_HELP' });
     const helpXml = await help.text();
-    assert.match(helpXml, /ManualOS Support:/);
-    assert.match(helpXml, /support@manualos\.com/);
-    assert.match(helpXml, /Reply STOP to opt out, HELP for help\. Msg&amp;data rates may apply\./);
+    const helpBody = smsText(helpXml);
+    assert.equal(helpBody, 'ManualOS (Op3x LLC) support: email support@manualos.com or call +1 555-765-4321. Msg&data rates may apply. Reply STOP to cancel.');
+    assert.equal(helpBody, helpReply(h.env));
+    assert.doesNotMatch(helpXml, /ManualOS Support:/);
+    assert.doesNotMatch(helpBody, /Reply STOP to opt out/);
 
     const keywords = ['STOP', 'stop.', 'STOPALL', 'unsubscribe', 'CANCEL', 'END', 'QUIT'];
     for (const [index, body] of keywords.entries()) {
@@ -757,7 +760,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.equal(h.store.isOptedOut('+15552009999'), true);
 
     const info = await postTwilio(base, h.env, '/api/twilio/sms', { From: '+15552000000', Body: 'INFO', MessageSid: 'SM_INFO' });
-    assert.match(await info.text(), /ManualOS Support:/);
+    assert.equal(smsText(await info.text()), helpReply(h.env));
 
     const start = await postTwilio(base, h.env, '/api/twilio/sms', { From: '+15552000000', Body: 'START', MessageSid: 'SM_START' });
     const startXml = await start.text();
@@ -1210,6 +1213,53 @@ test('a stopped number stays stopped until it texts, and web opt-ins are capped'
     assert.equal(customerAlertsAllowed(h.store.listConsents(), stopped, { nowMs: clock }), true);
     assert.equal(h.sent.length, before);
     assert.equal(h.calls.length, 0);
+  });
+});
+
+const GSM7_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\u001bÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+
+function smsText(xml) {
+  const match = String(xml).match(/<Message>([\s\S]*)<\/Message>/);
+  assert.ok(match, 'expected a Message');
+  return match[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
+test('HELP uses the approved reply, with and without the support number', async () => {
+  assert.equal(GSM7_BASIC.length, 128);
+  const gsm7 = new Set(GSM7_BASIC);
+  const withNumber = harness({ SUPPORT_PHONE: '+13125550198' });
+  const withoutNumber = harness({ SUPPORT_PHONE: '' });
+  const expectedWith = 'ManualOS (Op3x LLC) support: email support@manualos.com or call +1 312-555-0198. Msg&data rates may apply. Reply STOP to cancel.';
+  const expectedWithout = 'ManualOS (Op3x LLC) support: email support@manualos.com. Msg&data rates may apply. Reply STOP to cancel.';
+
+  await withServer(withNumber.app, async ({ base }) => {
+    withNumber.env.PUBLIC_BASE_URL = base;
+    const res = await postTwilio(base, withNumber.env, '/api/twilio/sms', {
+      From: '+15551119300',
+      Body: 'HELP',
+      MessageSid: 'SM_HELP_NUM',
+    });
+    const body = smsText(await res.text());
+    assert.equal(body, expectedWith);
+    assert.equal(body, helpReply(withNumber.env));
+    assert.ok(body.length <= 160, `HELP length ${body.length}`);
+    assert.equal([...body].every((char) => gsm7.has(char)), true);
+    assert.equal(withNumber.calls.length, 0);
+  });
+
+  await withServer(withoutNumber.app, async ({ base }) => {
+    withoutNumber.env.PUBLIC_BASE_URL = base;
+    const res = await postTwilio(base, withoutNumber.env, '/api/twilio/sms', {
+      From: '+15551119301',
+      Body: 'HELP',
+      OptOutType: 'HELP',
+      MessageSid: 'SM_HELP_NONUM',
+    });
+    const body = smsText(await res.text());
+    assert.equal(body, expectedWithout);
+    assert.equal(body.includes(' or call '), false);
+    assert.ok(body.length <= 160);
+    assert.equal([...body].every((char) => gsm7.has(char)), true);
   });
 });
 
