@@ -1034,6 +1034,148 @@ test('R1 a refund and a lost dispute on the same overage purchase decrement once
   });
 });
 
+test('R1j the removal marker is written before the decrement and a rolled list does not decrement again', async () => {
+  const checkoutEnv = {
+    ...env(),
+    MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE: 'price_integrator_overage',
+  };
+  const params = overageCheckoutParams(checkoutEnv, {
+    subscriptionId: 'sub_r1j',
+    customerId: 'cus_r1j',
+    sessionId: 'cs_r1j',
+  });
+  const subscription = {
+    id: 'sub_r1j',
+    status: 'active',
+    metadata: { plan: 'integrator', overage_remaining: '40' },
+  };
+  const intents = {};
+  const original = `pi_${'A'.repeat(40)}`;
+  intents[original] = { metadata: { ...params.payment_intent_data.metadata } };
+  const stripe = {
+    webhooks: sdk.webhooks,
+    checkout: {
+      sessions: {
+        list: async ({ payment_intent: paymentIntentId }) => {
+          if (!intents[paymentIntentId]) return { data: [] };
+          return { data: [{ id: `cs_${paymentIntentId}`, metadata: params.metadata }] };
+        },
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => ({ id, created: 1700000000, metadata: { ...intents[id].metadata } }),
+      update: async (id, update) => {
+        intents[id].metadata = mergeMeta(intents[id].metadata, update);
+        return { id, metadata: { ...intents[id].metadata } };
+      },
+    },
+    subscriptions: {
+      retrieve: async () => ({ id: subscription.id, status: subscription.status, metadata: { ...subscription.metadata } }),
+      update: async (id, update) => {
+        assert.equal(id, subscription.id);
+        const noted = update.metadata && update.metadata.overage_removed_intents;
+        const nextCount = update.metadata && update.metadata.overage_remaining;
+        if (noted && nextCount) {
+          const newest = String(noted).split(',').filter(Boolean).pop();
+          assert.equal(intents[newest].metadata.overage_removed, '1');
+        }
+        subscription.metadata = mergeMeta(subscription.metadata, update);
+        return { id, metadata: { ...subscription.metadata } };
+      },
+    },
+  };
+  const write = stripe.paymentIntents.update;
+  let failed = 0;
+  stripe.paymentIntents.update = async (id, update) => {
+    if (id === original && update.metadata && update.metadata.overage_removed && failed === 0) {
+      failed += 1;
+      throw new Error('api_connection_error');
+    }
+    return write(id, update);
+  };
+  const refund = (n, paymentIntentId) => stripeEvent(`evt_r1j_${n}`, 'charge.refunded', {
+    id: `ch_${paymentIntentId}`,
+    amount: 900,
+    amount_refunded: 900,
+    refunded: true,
+    payment_intent: paymentIntentId,
+  });
+  await withServer(createApp({ env: env(), stripe, anthropic: null }), async (base) => {
+    assert.equal((await signedWebhook(base, refund(0, original))).status, 200);
+    assert.equal(failed, 1);
+    assert.equal(intents[original].metadata.overage_removed, '1');
+    assert.equal(subscription.metadata.overage_remaining, '39');
+    for (let i = 0; i < 25; i += 1) {
+      const id = `pi_${String.fromCharCode(66 + (i % 20))}${'B'.repeat(20)}${i}`;
+      intents[id] = { metadata: { ...params.payment_intent_data.metadata } };
+      assert.equal((await signedWebhook(base, refund(i + 1, id))).status, 200);
+    }
+    assert.equal(String(subscription.metadata.overage_removed_intents || '').includes(original), false);
+    const before = subscription.metadata.overage_remaining;
+    assert.equal(before, '14');
+    assert.equal((await signedWebhook(base, stripeEvent('evt_r1j_lost', 'charge.dispute.closed', {
+      id: 'dp_r1j',
+      charge: { id: `ch_${original}`, payment_intent: original },
+      status: 'lost',
+    }))).status, 200);
+    assert.equal(subscription.metadata.overage_remaining, before);
+    assert.equal(intents[original].metadata.overage_removed, '1');
+  });
+});
+
+test('a removal marker that never writes does not decrement the overage pool', async () => {
+  const checkoutEnv = {
+    ...env(),
+    MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE: 'price_integrator_overage',
+  };
+  const params = overageCheckoutParams(checkoutEnv, {
+    subscriptionId: 'sub_r1j_fail',
+    customerId: 'cus_r1j_fail',
+    sessionId: 'cs_r1j_fail',
+  });
+  const subscription = {
+    id: 'sub_r1j_fail',
+    status: 'active',
+    metadata: { plan: 'integrator', overage_remaining: '40' },
+  };
+  const intent = { metadata: { ...params.payment_intent_data.metadata } };
+  let writes = 0;
+  const stripe = {
+    webhooks: sdk.webhooks,
+    checkout: {
+      sessions: {
+        list: async () => ({ data: [{ id: 'cs_r1j_fail_pi', metadata: params.metadata }] }),
+      },
+    },
+    paymentIntents: {
+      retrieve: async () => ({ id: 'pi_r1j_fail', created: 1700000000, metadata: { ...intent.metadata } }),
+      update: async () => {
+        writes += 1;
+        throw new Error('api_connection_error');
+      },
+    },
+    subscriptions: {
+      retrieve: async () => ({ id: subscription.id, status: subscription.status, metadata: { ...subscription.metadata } }),
+      update: async () => {
+        throw new Error('subscription should not change');
+      },
+    },
+  };
+  await withServer(createApp({ env: env(), stripe, anthropic: null }), async (base) => {
+    const res = await signedWebhook(base, stripeEvent('evt_r1j_fail', 'charge.refunded', {
+      id: 'ch_r1j_fail',
+      amount: 900,
+      amount_refunded: 900,
+      refunded: true,
+      payment_intent: 'pi_r1j_fail',
+    }));
+    assert.equal(res.status, 500);
+    assert.equal(writes, 3);
+    assert.equal(subscription.metadata.overage_remaining, '40');
+    assert.equal(intent.metadata.overage_removed, undefined);
+  });
+});
+
 test('N3 a dispute closed before it opens does not suspend the buyer', async () => {
   const world = createSubscriptionWorld();
   const { stripe, intent, sessionId } = createStarterWorld('pi_n3', 'cs_n3');

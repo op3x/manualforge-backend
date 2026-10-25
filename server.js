@@ -226,6 +226,34 @@ function createApp({
     return err;
   }
 
+  // Live generations in this process. A Stripe count with no entry here was
+  // left by a crash or redeploy, and the next run resets it instead of adding.
+  const generationRuns = new Map();
+
+  function generationRunKey(access, sessionId) {
+    if (access && access.plan === 'starter' && access.paymentIntentId) return `pi:${access.paymentIntentId}`;
+    return `session:${sessionId || ''}`;
+  }
+
+  function releaseGenerationRun(key) {
+    const next = Math.max(0, (generationRuns.get(key) || 1) - 1);
+    if (next === 0) generationRuns.delete(key);
+    else generationRuns.set(key, next);
+  }
+
+  async function beginGeneration(access, sessionId) {
+    const key = generationRunKey(access, sessionId);
+    const active = generationRuns.get(key) || 0;
+    generationRuns.set(key, active + 1);
+    try {
+      await markGenerationStarted(stripeClient, access, sessionId, { resetOrphans: active === 0 });
+      return key;
+    } catch (err) {
+      releaseGenerationRun(key);
+      throw err;
+    }
+  }
+
   async function runPaid(req, res, { reserveAtStart, respond }) {
     const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
     const files = collectFiles(req);
@@ -267,45 +295,49 @@ function createApp({
       reserveAtStart: true,
       respond: async (access, files, credit, project) => {
         const sessionId = readSessionId(req);
-        await markGenerationStarted(stripeClient, access, sessionId);
-        const job = store.create({ sessionId });
-        res.status(202).json(publicJob(job));
-        job.status = 'running';
-        job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
+        const runKey = await beginGeneration(access, sessionId);
         try {
-          const result = await generateManual({
-            files,
-            project,
-            fields: fieldsFrom(req),
-            anthropic: anthropicClient,
-            env,
-            renderPdf,
-            onProgress(stage, percent, message) {
-              job.status = 'running';
-              job.progress = { stage, percent, message };
-            },
-          });
-          const block = await accessBlock(stripeClient, sessionId, env);
-          if (block) throw blockedError(block);
-          if (result.pdf && result.pdf.length) await publishManual(access, sessionId);
-          store.savePdf(job.id, result.pdf);
-          job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
-          job.warnings = result.warnings || [];
-          job.status = 'succeeded';
-          job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
-        } catch (err) {
-          await clearGenerationStarted(stripeClient, access, sessionId);
-          if (credit) {
-            try {
-              await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
-            } catch (refundErr) {
-              console.error('Starter credit refund failed', redactSecrets(refundErr && refundErr.message ? refundErr.message : refundErr));
+          const job = store.create({ sessionId });
+          res.status(202).json(publicJob(job));
+          job.status = 'running';
+          job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
+          try {
+            const result = await generateManual({
+              files,
+              project,
+              fields: fieldsFrom(req),
+              anthropic: anthropicClient,
+              env,
+              renderPdf,
+              onProgress(stage, percent, message) {
+                job.status = 'running';
+                job.progress = { stage, percent, message };
+              },
+            });
+            const block = await accessBlock(stripeClient, sessionId, env);
+            if (block) throw blockedError(block);
+            if (result.pdf && result.pdf.length) await publishManual(access, sessionId);
+            store.savePdf(job.id, result.pdf);
+            job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
+            job.warnings = result.warnings || [];
+            job.status = 'succeeded';
+            job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
+          } catch (err) {
+            await clearGenerationStarted(stripeClient, access, sessionId);
+            if (credit) {
+              try {
+                await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+              } catch (refundErr) {
+                console.error('Starter credit refund failed', redactSecrets(refundErr && refundErr.message ? refundErr.message : refundErr));
+              }
             }
+            console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
+            job.status = 'failed';
+            job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
+            job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
           }
-          console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
-          job.status = 'failed';
-          job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
-          job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
+        } finally {
+          releaseGenerationRun(runKey);
         }
         return null;
       },
@@ -347,9 +379,9 @@ function createApp({
       reserveAtStart: false,
       respond: async (access, files, credit, project) => {
         const sessionId = readSessionId(req);
+        const runKey = await beginGeneration(access, sessionId);
         let stamp = null;
         try {
-          await markGenerationStarted(stripeClient, access, sessionId);
           const result = await generateManual({
             files,
             project,
@@ -383,6 +415,8 @@ function createApp({
           }
           if (!res.headersSent) await clearGenerationStarted(stripeClient, access, sessionId);
           throw err;
+        } finally {
+          releaseGenerationRun(runKey);
         }
       },
     }).catch(next);
