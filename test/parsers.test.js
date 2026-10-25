@@ -110,9 +110,22 @@ test('rejects XXE, mismatched content, and zip paths without reading secrets', a
   );
 });
 
-test('ACD advice is limited to ACD files and does not invent routine names', { skip: !corpusHas('plc/acd_CuteLogix.ACD') }, async () => {
+test('ACD conversion reads ladder rungs and does not invent routine names', { skip: !corpusHas('plc/acd_CuteLogix.ACD') }, async () => {
   const project = await load('plc/acd_CuteLogix.ACD');
-  assert.equal(project.acdLimited, true);
+  assert.equal(project.acdConverted, true);
+  assert.equal(project.acdLimited, false);
+  assert.equal(project.routines.length, 29);
+  const units = project.routines.reduce((sum, routine) => sum + routine.units.length, 0);
+  assert.equal(units, 132);
+  assert.equal(project.tags.length, 80);
   assert.equal(project.routines.some((routine) => /FloatingElement|CommentManager/.test(routine.name)), false);
-  assert.equal(project.routines.every((routine) => routine.units.length === 0), true);
+  assert.equal(project.routines.some((routine) => routine.units.some((unit) => unit.text.includes('XIC(Bits[0].0)OTE(Bits[0].1)'))), true);
+});
+
+test('an unreadable ACD explains the limit and does not invent routine names', async () => {
+  const project = await parseUploads([{ name: 'junk.ACD', buffer: Buffer.from('not a rockwell archive') }]);
+  assert.equal(project.acdLimited, true);
+  assert.equal(project.acdConverted, false);
+  assert.equal(project.routines.some((routine) => /FloatingElement|CommentManager/.test(routine.name)), false);
+  assert.match(project.warnings.join(' '), /L5X/);
 });
