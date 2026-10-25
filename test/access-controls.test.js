@@ -11,7 +11,9 @@ const {
   dropRevokedJti,
   forgetSessionCredential,
   loadRevocations,
+  recordTokenExchange,
   signAccessToken,
+  tokenExchangeGate,
   verifyAccessToken,
   ACCESS_TOKEN_TTL_MS,
   EXCHANGE_LIMIT,
@@ -473,25 +475,26 @@ test('a tampered token and a wrong-secret token are rejected', async () => {
   });
 });
 
-test('GET /jobs resolves a compat caller once and does not call Stripe per job', async () => {
+test('job reads do not send a raw or bogus session id to Stripe', async () => {
   let retrieves = 0;
   const stripe = {
-    checkout: { sessions: { retrieve: async (id) => {
+    checkout: { sessions: { retrieve: async () => {
       retrieves += 1;
-      if (id !== 'cs_real') throw notFound();
-      return {
-        id,
-        metadata: { plan: 'pro' },
-        payment_status: 'paid',
-        customer: 'cus_real',
-        subscription: { id: 'sub_real', status: 'active', customer: 'cus_real' },
-      };
+      throw notFound();
     } } },
-    subscriptions: { retrieve: async () => ({ id: 'sub_real', status: 'active', customer: 'cus_real' }) },
+    subscriptions: { retrieve: async () => {
+      retrieves += 1;
+      throw notFound();
+    } },
+    paymentIntents: { retrieve: async () => {
+      retrieves += 1;
+      throw notFound();
+    } },
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-amplify-'));
   const store = createJobStore({ directory: dir, env });
   try {
+    const jobs = [];
     for (let i = 0; i < 3; i += 1) {
       const job = store.create({
         sessionId: `cs_job_${i}`,
@@ -502,17 +505,28 @@ test('GET /jobs resolves a compat caller once and does not call Stripe per job',
       store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
       job.status = 'succeeded';
       store.persist(job);
+      jobs.push(job);
     }
     const app = createApp({ env, stripe, jobs: store, anthropic: null });
+    const token = signAccessToken({
+      sessionId: 'cs_real',
+      customerId: 'cus_real',
+      subscriptionId: 'sub_real',
+    }, env).token;
     await withServer(app, async (base) => {
-      const junk = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_made_up' } });
-      assert.equal(junk.status, 401);
-      assert.equal((await junk.json()).code, 'authorization_required');
-      assert.equal(retrieves, 1);
-      const owned = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_real' } });
+      const junkList = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      assert.equal(junkList.status, 200);
+      assert.deepEqual((await junkList.json()).jobs, []);
+      const junk = await fetch(`${base}/jobs/${jobs[0].id}`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      assert.equal(junk.status, 403);
+      assert.equal((await junk.json()).code, 'forbidden');
+      const junkPdf = await fetch(`${base}/jobs/${jobs[0].id}/pdf`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      assert.equal(junkPdf.status, 403);
+      assert.equal(retrieves, 0);
+      const owned = await fetch(`${base}/jobs`, { headers: authHeaders(token) });
       assert.equal(owned.status, 200);
       assert.equal((await owned.json()).jobs.length, 3);
-      assert.equal(retrieves, 2);
+      assert.equal(retrieves, 0);
     });
   } finally {
     store.close();
@@ -549,30 +563,28 @@ test('rate limits return 429 and the webhook stays unlimited', async () => {
   });
 });
 
-test('a session can mint only five access tokens an hour', async () => {
+test('a session can mint thirty access tokens an hour and the 429 states the wait', async () => {
+  assert.equal(EXCHANGE_LIMIT, 30);
+  const sessionId = 'cs_exchange_limit';
+  for (let i = 0; i < EXCHANGE_LIMIT; i += 1) {
+    assert.equal(tokenExchangeGate(sessionId, env).ok, true);
+    recordTokenExchange(sessionId, env);
+  }
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_exchange_limit', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession(sessionId, { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
   };
   const app = createApp({ env, stripe, anthropic: null });
   await withServer(app, async (base) => {
-    for (let i = 0; i < EXCHANGE_LIMIT; i += 1) {
-      const ok = await fetch(`${base}/access-token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_exchange_limit' }),
-      });
-      assert.equal(ok.status, 200, String(i));
-      await ok.json();
-    }
     const blocked = await fetch(`${base}/access-token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: 'cs_exchange_limit' }),
+      body: JSON.stringify({ session_id: sessionId }),
     });
     assert.equal(blocked.status, 429);
-    assert.deepEqual(await blocked.json(), { error: 'Too many requests.' });
-    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+    const wait = Number(blocked.headers.get('retry-after'));
+    assert.ok(wait > 0 && wait <= 3600);
+    assert.deepEqual(await blocked.json(), { error: `Too many token exchanges. Try again in ${wait} seconds.` });
   });
 });
 
@@ -783,16 +795,14 @@ test('a revoked session cannot bypass the access-token rate limit', async () => 
   const app = createApp({ env, stripe, jobs: store, anthropic: null });
   try {
     await withServer(app, async (base) => {
-      let token = '';
-      for (let i = 0; i < EXCHANGE_LIMIT; i += 1) {
-        const ok = await fetch(`${base}/access-token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
-        });
-        assert.equal(ok.status, 200);
-        token = (await ok.json()).access_token;
-      }
+      const minted = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
+      });
+      assert.equal(minted.status, 200);
+      const token = (await minted.json()).access_token;
+      for (let i = 1; i < EXCHANGE_LIMIT; i += 1) recordTokenExchange('cs_bug27_limit', env);
       const revoked = await fetch(`${base}/access-token/revoke`, {
         method: 'POST',
         headers: authHeaders(token),
@@ -804,7 +814,9 @@ test('a revoked session cannot bypass the access-token rate limit', async () => 
         body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
       });
       assert.equal(blocked.status, 429);
-      assert.deepEqual(await blocked.json(), { error: 'Too many requests.' });
+      const wait = Number(blocked.headers.get('retry-after'));
+      assert.ok(wait > 0 && wait <= 3600);
+      assert.deepEqual(await blocked.json(), { error: `Too many token exchanges. Try again in ${wait} seconds.` });
       const raw = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27_limit' } });
       assert.equal(raw.status, 401);
       assert.equal((await raw.json()).code, 'credential_revoked');
