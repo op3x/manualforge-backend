@@ -188,7 +188,7 @@ test('assertCanGenerate returns 402 when starter credits are gone', async () => 
       },
     },
   };
-  await assert.rejects(() => assertCanGenerate(stripe, 'cs_test', env), (err) => err.status === 402);
+  await assert.rejects(() => assertCanGenerate(stripe, 'cs_test_id', env), (err) => err.status === 402);
 });
 
 test('origins and defaults', () => {

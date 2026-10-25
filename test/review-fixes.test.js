@@ -298,7 +298,7 @@ test('D1 an open dispute stays suspended through a paid renewal', async () => {
     assert.equal(world.subscription.metadata.revoked_dispute_lost, undefined);
     assert.equal(world.subscription.status, 'active');
     assert.equal(world.cancels.length, 0);
-    const job = await postJob(base, 'cs_review');
+    const job = await postJob(base, 'cs_test_review');
     assert.equal(job.status, 402);
     assert.equal((await job.json()).error, PRO_SUSPENDED_MESSAGE);
   });
@@ -337,7 +337,7 @@ test('D2 a lost dispute is permanent, cancels without proration, and a retry sti
       assert.equal(world.subscription.metadata.period_access, 'revoked');
       assert.equal(world.subscription.metadata.revoked_dispute_lost, 'true');
       assert.equal(world.customer.metadata.revoked_dispute_lost, undefined);
-      const job = await postJob(base, 'cs_review');
+      const job = await postJob(base, 'cs_test_review');
       assert.equal(job.status, 402);
       assert.equal((await job.json()).error, PRO_DISPUTE_LOST_MESSAGE);
     });
@@ -361,7 +361,7 @@ test('D3 a dispute on an earlier period blocks access and a refund of that perio
       payment_intent: 'pi_old',
     }))).status, 200);
     assert.equal(world.subscription.metadata.period_access, undefined);
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_review`).then((res) => res.json())).valid, true);
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_test_review`).then((res) => res.json())).valid, true);
 
     assert.equal((await signedWebhook(base, stripeEvent('evt_d3_open', 'charge.dispute.created', {
       id: 'dp_old',
@@ -370,7 +370,7 @@ test('D3 a dispute on an earlier period blocks access and a refund of that perio
     }))).status, 200);
     assert.equal(world.subscription.metadata.period_access, 'suspended');
     assert.equal(world.subscription.metadata.period_invoice, 'in_old');
-    const job = await postJob(base, 'cs_review');
+    const job = await postJob(base, 'cs_test_review');
     assert.equal(job.status, 402);
     assert.equal((await job.json()).error, PRO_SUSPENDED_MESSAGE);
     assert.equal(world.cancels.length, 0);
@@ -407,7 +407,7 @@ test('D4 only a paid renewal for a new period reopens a refund', async () => {
       assert.equal(world.subscription.metadata.period_access, 'revoked');
       assert.equal(world.subscription.metadata.revoked_dispute_lost, undefined);
     }
-    assert.equal((await postJob(base, 'cs_review')).status, 402);
+    assert.equal((await postJob(base, 'cs_test_review')).status, 402);
 
     assert.equal((await signedWebhook(base, stripeEvent('evt_d4_open', 'invoice.paid', renewalInvoice('in_renew')))).status, 200);
     assert.equal(world.subscription.metadata.period_access, 'active');
@@ -417,7 +417,7 @@ test('D4 only a paid renewal for a new period reopens a refund', async () => {
     assert.equal(world.subscription.status, 'active');
     const generated = await fetch(`${base}/generate-manual`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_review' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_review' },
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     assert.equal(generated.status, 200);
@@ -430,7 +430,7 @@ test('D5 a generation in progress is not refund eligible', async () => {
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  const { stripe, intent, sessionId } = createStarterWorld('pi_d5', 'cs_d5');
+  const { stripe, intent, sessionId } = createStarterWorld('pi_d5', 'cs_test_d5');
   const app = createApp({
     env: env(),
     stripe,
@@ -463,7 +463,7 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
   const gate = new Promise((resolve) => {
     release = resolve;
   });
-  const live = createStarterWorld('pi_live', 'cs_live');
+  const live = createStarterWorld('pi_live', 'cs_live_id');
   const app = createApp({
     env: env(),
     stripe: live.stripe,
@@ -491,7 +491,7 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
     assert.equal(live.intent.metadata.credit_status, 'revoked');
   });
 
-  const kept = createStarterWorld('pi_kept', 'cs_kept');
+  const kept = createStarterWorld('pi_kept', 'cs_test_kept');
   const keptApp = createApp({
     env: env(),
     stripe: kept.stripe,
@@ -525,7 +525,7 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
 });
 
 test('D7 a failed delivery stamp does not serve the manual', async () => {
-  const { stripe, intent, sessionId } = createStarterWorld('pi_d7', 'cs_d7');
+  const { stripe, intent, sessionId } = createStarterWorld('pi_d7', 'cs_test_d7');
   const errors = [];
   const original = console.error;
   console.error = (...args) => errors.push(args.map((arg) => String(arg)).join(' '));
@@ -577,7 +577,7 @@ test('D8 starter checkout creates a customer and email lookup searches sessions'
           assert.deepEqual(query.customer_details, { email: 'buyer@example.com' });
           return {
             data: [{
-              id: 'cs_mail',
+              id: 'cs_test_mail',
               created: 1700000000,
               metadata: { plan: 'starter' },
               payment_intent: 'pi_mail',
@@ -607,7 +607,7 @@ test('D9 integrator subscriptions use the same refund and dispute block', async 
   const world = createSubscriptionWorld({ plan: 'integrator' });
   const app = createApp({ env: env(), stripe: world.stripe, anthropic: null });
   await withServer(app, async (base) => {
-    const before = await fetch(`${base}/verify-session?session_id=cs_integrator`);
+    const before = await fetch(`${base}/verify-session?session_id=cs_test_integrator`);
     assert.deepEqual(await before.json(), { valid: true, plan: 'integrator', remaining: null, billingIssue: false });
     assert.equal((await signedWebhook(base, stripeEvent('evt_d9_open', 'charge.dispute.created', {
       id: 'dp_integrator',
@@ -616,7 +616,7 @@ test('D9 integrator subscriptions use the same refund and dispute block', async 
     }))).status, 200);
     assert.equal(world.subscription.metadata.plan, 'integrator');
     assert.equal(world.subscription.metadata.period_access, 'suspended');
-    const job = await postJob(base, 'cs_integrator');
+    const job = await postJob(base, 'cs_test_integrator');
     assert.equal(job.status, 402);
     assert.equal((await job.json()).error, PRO_SUSPENDED_MESSAGE);
     assert.equal(world.cancels.length, 0);
@@ -630,9 +630,9 @@ test('D10 an overage credit is removed only when it is still unused', async () =
     pi_cycle: { metadata: { credits_remaining: '1', manuals_used: '0' } },
   };
   const sessions = {
-    pi_unused: [{ id: 'cs_unused', metadata: { kind: 'overage' } }],
-    pi_used: [{ id: 'cs_used', metadata: { purchase: 'overage' } }],
-    pi_cycle: [{ id: 'cs_cycle', metadata: { overage: 'true' } }],
+    pi_unused: [{ id: 'cs_test_unused', metadata: { kind: 'overage' } }],
+    pi_used: [{ id: 'cs_test_used', metadata: { purchase: 'overage' } }],
+    pi_cycle: [{ id: 'cs_test_cycle', metadata: { overage: 'true' } }],
   };
   const lines = [];
   const stripe = {
@@ -735,7 +735,7 @@ test('N1a one won dispute does not clear another open dispute', async () => {
     }))).status, 200);
     assert.equal(world.subscription.metadata.open_dispute_count, '1');
     assert.equal(readPeriodAccess(world.subscription), 'suspended');
-    const still = await postJob(base, 'cs_review');
+    const still = await postJob(base, 'cs_test_review');
     assert.equal(still.status, 402);
     assert.equal((await still.json()).error, PRO_SUSPENDED_MESSAGE);
     assert.equal((await signedWebhook(base, stripeEvent('evt_n1a_won_2', 'charge.dispute.closed', {
@@ -745,7 +745,7 @@ test('N1a one won dispute does not clear another open dispute', async () => {
     }))).status, 200);
     assert.equal(world.subscription.metadata.open_dispute_count, '0');
     assert.equal(world.subscription.metadata.period_access, 'active');
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_review`).then((res) => res.json())).valid, true);
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_test_review`).then((res) => res.json())).valid, true);
   });
 });
 
@@ -776,7 +776,7 @@ test('N1b a renewal after a refund does not clear an open dispute', async () => 
     assert.equal(world.subscription.metadata.period_access_reason, undefined);
     assert.equal(world.subscription.metadata.open_dispute_count, '1');
     assert.equal(readPeriodAccess(world.subscription), 'suspended');
-    const job = await postJob(base, 'cs_review');
+    const job = await postJob(base, 'cs_test_review');
     assert.equal(job.status, 402);
     assert.equal((await job.json()).error, PRO_SUSPENDED_MESSAGE);
   });
@@ -807,7 +807,7 @@ test('N1c a renewal after a dispute and a refund does not clear the dispute', as
     assert.equal(world.subscription.metadata.period_access, 'active');
     assert.equal(world.subscription.metadata.open_dispute_count, '1');
     assert.equal(readPeriodAccess(world.subscription), 'suspended');
-    const job = await postJob(base, 'cs_review');
+    const job = await postJob(base, 'cs_test_review');
     assert.equal(job.status, 402);
     assert.equal((await job.json()).error, PRO_SUSPENDED_MESSAGE);
   });
@@ -846,7 +846,7 @@ test('N2 integrator overage uses plan integrator_overage and overage_remaining',
   const params = overageCheckoutParams(checkoutEnv, {
     subscriptionId: 'sub_over',
     customerId: 'cus_over',
-    sessionId: 'cs_integrator',
+    sessionId: 'cs_test_integrator',
   });
   const subscription = {
     id: 'sub_over',
@@ -863,7 +863,7 @@ test('N2 integrator overage uses plan integrator_overage and overage_remaining',
     checkout: {
       sessions: {
         list: async ({ payment_intent: paymentIntentId }) => ({
-          data: intents[paymentIntentId] ? [{ id: 'cs_over', metadata: params.metadata }] : [],
+          data: intents[paymentIntentId] ? [{ id: 'cs_test_over', metadata: params.metadata }] : [],
         }),
       },
     },
@@ -965,7 +965,7 @@ test('R1 a refund and a lost dispute on the same overage purchase decrement once
   const params = overageCheckoutParams(checkoutEnv, {
     subscriptionId: 'sub_r1',
     customerId: 'cus_r1',
-    sessionId: 'cs_r1',
+    sessionId: 'cs_test_r1',
   });
   const subscription = {
     id: 'sub_r1',
@@ -982,7 +982,7 @@ test('R1 a refund and a lost dispute on the same overage purchase decrement once
     checkout: {
       sessions: {
         list: async ({ payment_intent: paymentIntentId }) => {
-          if (paymentIntentId === 'pi_pool') return { data: [{ id: 'cs_pool', metadata: { kind: 'overage' } }] };
+          if (paymentIntentId === 'pi_pool') return { data: [{ id: 'cs_test_pool', metadata: { kind: 'overage' } }] };
           if (!intents[paymentIntentId] || paymentIntentId === 'pi_pool') return { data: [] };
           return { data: [{ id: `cs_${paymentIntentId}`, metadata: params.metadata }] };
         },
@@ -1044,7 +1044,7 @@ test('R1j the pending removal marker is written before the decrement and a rolle
   const params = overageCheckoutParams(checkoutEnv, {
     subscriptionId: 'sub_r1j',
     customerId: 'cus_r1j',
-    sessionId: 'cs_r1j',
+    sessionId: 'cs_test_r1j',
   });
   const subscription = {
     id: 'sub_r1j',
@@ -1133,7 +1133,7 @@ test('a removal marker that never writes does not decrement the overage pool', a
   const params = overageCheckoutParams(checkoutEnv, {
     subscriptionId: 'sub_r1j_fail',
     customerId: 'cus_r1j_fail',
-    sessionId: 'cs_r1j_fail',
+    sessionId: 'cs_test_r1jfail',
   });
   const subscription = {
     id: 'sub_r1j_fail',
@@ -1146,7 +1146,7 @@ test('a removal marker that never writes does not decrement the overage pool', a
     webhooks: sdk.webhooks,
     checkout: {
       sessions: {
-        list: async () => ({ data: [{ id: 'cs_r1j_fail_pi', metadata: params.metadata }] }),
+        list: async () => ({ data: [{ id: 'cs_test_r1jfailpi', metadata: params.metadata }] }),
       },
     },
     paymentIntents: {
@@ -1330,7 +1330,7 @@ test('a crash between the overage decrement and overage_removed=1 does not decre
 
 test('N3 a dispute closed before it opens does not suspend the buyer', async () => {
   const world = createSubscriptionWorld();
-  const { stripe, intent, sessionId } = createStarterWorld('pi_n3', 'cs_n3');
+  const { stripe, intent, sessionId } = createStarterWorld('pi_n3', 'cs_test_n3');
   const app = createApp({ env: env(), stripe: world.stripe, anthropic: null });
   const starterApp = createApp({ env: env(), stripe, anthropic: null });
   await withServer(app, async (base) => {
@@ -1349,7 +1349,7 @@ test('N3 a dispute closed before it opens does not suspend the buyer', async () 
     }))).status, 200);
     assert.equal(world.subscription.metadata.open_dispute_count, '0');
     assert.equal(readPeriodAccess(world.subscription), 'active');
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_review`).then((res) => res.json())).valid, true);
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_test_review`).then((res) => res.json())).valid, true);
   });
   await withServer(starterApp, async (base) => {
     assert.equal((await signedWebhook(base, stripeEvent('evt_n3s_won', 'charge.dispute.closed', {
@@ -1399,10 +1399,10 @@ test('N5 a lost dispute revokes only that purchase and a new checkout stays acti
       sessions: {
         retrieve: async (id) => {
           const rows = {
-            cs_a: { metadata: { plan: 'pro' }, payment_intent: null, subscription: 'sub_a' },
-            cs_b: { metadata: { plan: 'integrator' }, payment_intent: null, subscription: 'sub_b' },
-            cs_starter_a: { metadata: { plan: 'starter' }, payment_intent: 'pi_a', subscription: null },
-            cs_starter_b: { metadata: { plan: 'starter' }, payment_intent: 'pi_b', subscription: null },
+            cs_test_a: { metadata: { plan: 'pro' }, payment_intent: null, subscription: 'sub_a' },
+            cs_test_b: { metadata: { plan: 'integrator' }, payment_intent: null, subscription: 'sub_b' },
+            cs_test_startera: { metadata: { plan: 'starter' }, payment_intent: 'pi_a', subscription: null },
+            cs_test_starterb: { metadata: { plan: 'starter' }, payment_intent: 'pi_b', subscription: null },
           };
           if (!rows[id]) throw notFound();
           return { id, payment_status: 'paid', ...rows[id] };
@@ -1461,8 +1461,8 @@ test('N5 a lost dispute revokes only that purchase and a new checkout stays acti
     assert.equal(subscriptions.sub_a.status, 'canceled');
     assert.equal(subscriptions.sub_b.metadata.revoked_dispute_lost, undefined);
     assert.equal(subscriptions.sub_b.status, 'active');
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_a`).then((res) => res.json())).valid, false);
-    const fresh = await fetch(`${base}/verify-session?session_id=cs_b`).then((res) => res.json());
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_test_a`).then((res) => res.json())).valid, false);
+    const fresh = await fetch(`${base}/verify-session?session_id=cs_test_b`).then((res) => res.json());
     assert.deepEqual(fresh, { valid: true, plan: 'integrator', remaining: null, billingIssue: false });
 
     assert.equal((await signedWebhook(base, stripeEvent('evt_n5_starter', 'charge.dispute.closed', {
@@ -1473,8 +1473,8 @@ test('N5 a lost dispute revokes only that purchase and a new checkout stays acti
     assert.equal(intents.pi_a.metadata.credit_status, 'revoked');
     assert.equal(intents.pi_a.metadata.credit_revoke_reason, 'dispute');
     assert.equal(intents.pi_b.metadata.credit_status, undefined);
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_starter_a`).then((res) => res.json())).valid, false);
-    const starterFresh = await fetch(`${base}/verify-session?session_id=cs_starter_b`).then((res) => res.json());
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_test_startera`).then((res) => res.json())).valid, false);
+    const starterFresh = await fetch(`${base}/verify-session?session_id=cs_test_starterb`).then((res) => res.json());
     assert.deepEqual(starterFresh, { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
     assert.deepEqual(customer.metadata, {});
     assert.equal(customerUpdates.length, 0);
@@ -1516,7 +1516,7 @@ test('N6 a generate-manual failure after the stamp does not leave the purchase d
   await withServer(app, async (base) => {
     const failed = await fetch(`${base}/generate-manual`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_n6' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_n6' },
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     const body = await failed.text();
@@ -1530,7 +1530,7 @@ test('N6 a generate-manual failure after the stamp does not leave the purchase d
     intent.metadata.first_manual_at = '2026-01-01T00:00:00.000Z';
     const again = await fetch(`${base}/generate-manual`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_n6' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_n6' },
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     assert.equal(again.status, 500);

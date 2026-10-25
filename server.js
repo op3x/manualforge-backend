@@ -38,7 +38,8 @@ const {
   verifyAccessToken,
   safeEqual,
 } = require('./lib/access-token');
-const { contentDisposition, downloadFileName, sourceName } = require('./lib/download-name');
+const { contentDisposition, downloadFileName, shortJobId, sourceName } = require('./lib/download-name');
+const { assertSessionId } = require('./lib/session-id');
 const { FILE_LIMIT, overLengthField } = require('./lib/field-limits');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
@@ -79,15 +80,84 @@ function createStripe(env) {
   return new Stripe(String(key).trim());
 }
 
-function sendError(res, err) {
+const VERIFY_CACHE_MS = 10 * 1000;
+const VERIFY_CACHE_MAX = 5000;
+
+function debugStacks(env) {
+  return String(env && env.DEBUG || '') === '1';
+}
+
+function logUnexpected(err, env) {
+  console.error('Request failed (internal_error)');
+  if (debugStacks(env) && err && err.stack) {
+    console.error(redactSecrets(redactCustomerLog(err.stack)));
+  }
+}
+
+function sendError(res, err, env) {
   if (err && err.expose) {
     if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
     const body = { error: err.message };
     if (err.publicCode) body.code = err.publicCode;
     return res.status(err.status || 500).json(body);
   }
-  console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
-  return res.status(500).json({ error: 'Internal server error' });
+  logUnexpected(err, env);
+  return res.status(500).json({ error: 'Internal server error', code: 'internal_error' });
+}
+
+function projectFormat(project) {
+  const formats = [];
+  for (const source of (project && project.sources) || []) {
+    const format = source && typeof source.format === 'string' ? source.format : '';
+    if (format && !formats.includes(format)) formats.push(format);
+  }
+  if (formats.length !== 1) return formats.length ? 'mixed' : 'unknown';
+  return /^[a-z0-9]{1,24}$/i.test(formats[0]) ? formats[0].toLowerCase() : 'unknown';
+}
+
+function pdfPageCount(pdf) {
+  if (!pdf) return 0;
+  const text = Buffer.isBuffer(pdf) ? pdf.toString('latin1') : String(pdf);
+  const matches = text.match(/\/Type\s*\/Page(?![A-Za-z0-9])/g);
+  return matches ? matches.length : 0;
+}
+
+function countingAnthropic(client, counter) {
+  if (!client || !client.messages || typeof client.messages.create !== 'function') return client;
+  return {
+    ...client,
+    messages: {
+      ...client.messages,
+      create(...args) {
+        counter.count += 1;
+        return client.messages.create(...args);
+      },
+    },
+  };
+}
+
+function safePlan(plan) {
+  return typeof plan === 'string' && /^[a-z0-9_-]{1,32}$/i.test(plan) ? plan : 'unknown';
+}
+
+function jobErrorCode(err, timeout) {
+  if (timeout) return 'job_timeout';
+  const code = err && err.publicCode;
+  if (typeof code === 'string' && /^[a-z0-9_]+$/.test(code)) return code;
+  return 'generation_failed';
+}
+
+function logJobEvent(fields) {
+  console.log(JSON.stringify({
+    event: fields.event,
+    jobId: fields.jobId,
+    plan: fields.plan,
+    format: fields.format,
+    ms: fields.ms,
+    pages: fields.pages,
+    modelCalls: fields.modelCalls,
+    errorCode: fields.errorCode,
+  }));
 }
 
 function readSessionId(req) {
@@ -246,6 +316,24 @@ function createApp({
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const clock = typeof now === 'function' ? now : () => Date.now();
+  const verifyCache = new Map();
+  function cachedVerify(sessionId) {
+    const hit = verifyCache.get(sessionId);
+    if (!hit) return null;
+    if (clock() - hit.at >= VERIFY_CACHE_MS) {
+      verifyCache.delete(sessionId);
+      return null;
+    }
+    return { ...hit.body };
+  }
+  function rememberVerify(sessionId, body) {
+    if (verifyCache.has(sessionId)) verifyCache.delete(sessionId);
+    while (verifyCache.size >= VERIFY_CACHE_MAX) {
+      const oldest = verifyCache.keys().next().value;
+      verifyCache.delete(oldest);
+    }
+    verifyCache.set(sessionId, { at: clock(), body: { ...body } });
+  }
   const ledger = creditLedger || createCreditLedger({ env });
   jobTimeoutMs(env);
   warnSupportDataDir(env);
@@ -335,6 +423,7 @@ function createApp({
     let event;
     try {
       event = stripeClient.webhooks.constructEvent(req.body, req.headers['stripe-signature'], secret);
+      verifyCache.clear();
     } catch (err) {
       console.error('Webhook signature verification failed:', err && err.message ? err.message : err);
       return res.status(400).send('Webhook signature verification failed');
@@ -427,7 +516,7 @@ function createApp({
       }
       return res.json({ url: session.url });
     } catch (err) {
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -460,8 +549,14 @@ function createApp({
       return null;
     }
     if (!sessionId) return null;
-    if (rawSessionBlocked(sessionId, env)) {
-      throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+    const header = typeof req.get('x-session-id') === 'string' ? req.get('x-session-id').trim() : '';
+    const bodyId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+    for (const value of [bodyId, header]) {
+      if (!value) continue;
+      if (rawSessionBlocked(value, env)) {
+        throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+      }
+      assertSessionId(value);
     }
     return { sessionId, customerId: '', subscriptionId: '', via: 'compat' };
   }
@@ -569,33 +664,54 @@ function createApp({
     };
   }
 
+  function presentedSessionIds(req) {
+    const query = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    const bodyId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+    const header = typeof req.get('x-session-id') === 'string' ? req.get('x-session-id').trim() : '';
+    return [query, bodyId, header].filter(Boolean);
+  }
+
   async function sessionForVerify(req) {
     const token = bearerToken(req);
     if (token) return verifiedBearer(token).sessionId;
-    const query = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    const presented = presentedSessionIds(req);
     if (!legacySessionAllowed(env)) {
-      if (query) throw exposed(401, 'session_id is no longer accepted.', null, 'session_id_retired');
+      if (presented.length) throw exposed(401, 'session_id is no longer accepted.', null, 'session_id_retired');
       return '';
     }
-    if (query && rawSessionBlocked(query, env)) {
-      throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+    for (const value of presented) {
+      if (rawSessionBlocked(value, env)) {
+        throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+      }
+      assertSessionId(value);
     }
-    return query;
+    return presented[0] || '';
   }
 
   app.get('/verify-session', verifyLimiter, async (req, res) => {
     try {
       const sessionId = await sessionForVerify(req);
       if (!sessionId) return res.status(400).json({ error: 'session_id is required' });
+      assertSessionId(sessionId);
+      const cached = cachedVerify(sessionId);
+      if (cached) return res.json(cached);
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
-      const access = await verifyCheckoutSession(stripeClient, sessionId, env);
-      return res.json(publicAccess(access));
+      let body;
+      try {
+        const access = await verifyCheckoutSession(stripeClient, sessionId, env);
+        body = publicAccess(access);
+      } catch (err) {
+        if (!isStripeNotFound(err)) throw err;
+        body = { valid: false, plan: null, remaining: null, billingIssue: false };
+      }
+      rememberVerify(sessionId, body);
+      return res.json(body);
     } catch (err) {
       if (isStripeNotFound(err)) return res.json({ valid: false, plan: null, remaining: null, billingIssue: false });
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -603,6 +719,7 @@ function createApp({
     try {
       const sessionId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
       if (!sessionId) return res.status(400).json({ error: 'session_id is required.' });
+      assertSessionId(sessionId);
       const gate = tokenExchangeGate(sessionId, env);
       if (!gate.ok) {
         return tooMany(res, gate.retryAfter, `Too many token exchanges. Try again in ${gate.retryAfter} seconds.`);
@@ -649,7 +766,7 @@ function createApp({
         ...publicAccess(access),
       });
     } catch (err) {
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -664,7 +781,7 @@ function createApp({
       }
       return res.json({ ok: true });
     } catch (err) {
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -732,6 +849,7 @@ function createApp({
 
   async function runPaid(req, res, { reserveAtStart, respond }) {
     const caller = await generationCaller(req);
+    verifyCache.delete(caller.sessionId);
     const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
     const tooLong = overLengthField(req.body);
     if (tooLong) {
@@ -790,6 +908,11 @@ function createApp({
       reserveAtStart: true,
       respond: async (access, files, credit, project, caller) => {
         const sessionId = caller.sessionId;
+        const runStarted = Date.now();
+        const modelCounter = { count: 0 };
+        const format = projectFormat(project);
+        let pageCount = 0;
+        let outcomeLogged = false;
         const runKey = await beginGeneration(access, sessionId);
         const refresh = watchGeneration(access, sessionId);
         let job = null;
@@ -797,6 +920,22 @@ function createApp({
         let stopped = false;
         let timer = null;
         let returned = false;
+        function logOutcome(errorCode) {
+          if (outcomeLogged || !job) return;
+          outcomeLogged = true;
+          verifyCache.delete(sessionId);
+          const failed = job.status !== 'succeeded';
+          logJobEvent({
+            event: failed ? 'job_failed' : 'job_done',
+            jobId: shortJobId(job.id) || 'unknown',
+            plan: safePlan(access && access.plan),
+            format,
+            ms: Math.max(0, Date.now() - runStarted),
+            pages: pageCount,
+            modelCalls: modelCounter.count,
+            errorCode: failed ? errorCode : null,
+          });
+        }
         function stopRefresh() {
           clearInterval(refresh);
         }
@@ -832,6 +971,7 @@ function createApp({
               }
             }
             rememberJob(job);
+            logOutcome(jobErrorCode(err, timeout));
           }
           if (stamp && stamp.created) {
             await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
@@ -869,7 +1009,7 @@ function createApp({
               files,
               project,
               fields: fieldsFrom(req),
-              anthropic: anthropicClient,
+              anthropic: countingAnthropic(anthropicClient, modelCounter),
               env,
               renderPdf,
               signal: abort.signal,
@@ -895,6 +1035,7 @@ function createApp({
             await failJob(new Error(emptyReason), false);
             return null;
           }
+          pageCount = pdfPageCount(result && result.pdf);
           try {
             const block = await accessBlock(stripeClient, sessionId, env);
             if (block) throw blockedError(block);
@@ -918,6 +1059,7 @@ function createApp({
             delete job.creditHold;
             job.status = 'succeeded';
             job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
+            logOutcome(null);
           } catch (err) {
             await failJob(err, false);
           }
@@ -931,7 +1073,7 @@ function createApp({
         return null;
       },
     }).catch((err) => {
-      if (!res.headersSent) sendError(res, err);
+      if (!res.headersSent) sendError(res, err, env);
     });
   });
 
@@ -966,7 +1108,7 @@ function createApp({
       }
       return res.json({ jobs: ready.filter((job) => identityMatches(caller, job)).map(listedJob) });
     } catch (err) {
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -976,7 +1118,7 @@ function createApp({
       if (found.status) return res.status(found.status).json(found.body);
       return res.json(publicJob(found.job));
     } catch (err) {
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -1002,7 +1144,7 @@ function createApp({
       });
       return res.send(pdf);
     } catch (err) {
-      return sendError(res, err);
+      return sendError(res, err, env);
     }
   });
 
@@ -1088,9 +1230,13 @@ function createApp({
     if (err && (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400))) {
       const length = typeof err.body === 'string' || Buffer.isBuffer(err.body) ? err.body.length : 0;
       console.error('Invalid request body', err.type || 'SyntaxError', `length=${length}`);
-      return res.status(400).json({ error: 'invalid_json' });
+      return res.status(400).json({ error: 'invalid_json', code: 'invalid_json' });
     }
-    if (err && err.expose) return sendError(res, err);
+    if (err && err.type === 'entity.too.large') {
+      console.error('Request body too large (payload_too_large)');
+      return res.status(413).json({ error: 'Request body is too large.', code: 'payload_too_large' });
+    }
+    if (err && err.expose) return sendError(res, err, env);
     if (err && err.name === 'MulterError') {
       if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'File is too large.' });
       if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
@@ -1098,9 +1244,8 @@ function createApp({
       }
       return res.status(400).json({ error: 'Upload failed.' });
     }
-    if (err && err.type === 'entity.too.large') return res.status(400).json({ error: 'File is too large.' });
-    console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
-    return res.status(500).json({ error: 'Internal server error' });
+    logUnexpected(err, env);
+    return res.status(500).json({ error: 'Internal server error', code: 'internal_error' });
   });
   return app;
 }

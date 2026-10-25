@@ -85,8 +85,8 @@ test('download names are the short job id and contain no customer text', () => {
 test('job routes require the owner and a revoked purchase keeps the access block', async () => {
   const meta = { manuals_used: '1', plan: 'starter', credit_status: 'active' };
   const sessions = {
-    cs_owner: () => starterSession('cs_owner', meta),
-    cs_other: () => starterSession('cs_other', { manuals_used: '0', plan: 'starter' }),
+    cs_test_owner: () => starterSession('cs_test_owner', meta),
+    cs_test_other: () => starterSession('cs_test_other', { manuals_used: '0', plan: 'starter' }),
   };
   const updates = [];
   const stripe = {
@@ -104,11 +104,11 @@ test('job routes require the owner and a revoked purchase keeps the access block
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-access-'));
   const store = createJobStore({ directory: dir, env: { NODE_ENV: 'test' } });
-  const job = store.create({ sessionId: 'cs_owner', nameSource: 'Förderband Linie' });
+  const job = store.create({ sessionId: 'cs_test_owner', nameSource: 'Förderband Linie' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n%owned\n'));
   job.status = 'succeeded';
   store.persist(job);
-  const stranger = store.create({ sessionId: 'cs_other', nameSource: 'Other' });
+  const stranger = store.create({ sessionId: 'cs_test_other', nameSource: 'Other' });
   store.savePdf(stranger.id, Buffer.from('%PDF-1.4\n%other\n'));
   stranger.status = 'succeeded';
   store.persist(stranger);
@@ -123,24 +123,24 @@ test('job routes require the owner and a revoked purchase keeps the access block
       assert.equal(unknown.status, 404);
       assert.deepEqual(await unknown.json(), { error: 'Job not found or expired.' });
 
-      const query = await fetch(`${base}/jobs/${job.id}/pdf?session_id=cs_owner`);
+      const query = await fetch(`${base}/jobs/${job.id}/pdf?session_id=cs_test_owner`);
       assert.equal(query.status, 401);
       assert.equal((await query.json()).code, 'authorization_required');
 
-      const other = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_other' } });
+      const other = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_other' } });
       assert.equal(other.status, 403);
       assert.equal((await other.json()).code, 'forbidden');
       const otherMissing = await fetch(`${base}/jobs/job_${'ab'.repeat(12)}`, {
-        headers: { 'X-Session-Id': 'cs_other' },
+        headers: { 'X-Session-Id': 'cs_test_other' },
       });
       assert.equal(otherMissing.status, 404);
 
-      const owned = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const owned = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(owned.status, 200);
       assert.equal((await owned.json()).status, 'succeeded');
-      assert.equal(JSON.stringify(await (await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_owner' } })).json()).includes('cs_owner'), false);
+      assert.equal(JSON.stringify(await (await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_owner' } })).json()).includes('cs_test_owner'), false);
 
-      const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(pdf.status, 200);
       assert.equal(pdf.headers.get('cache-control'), 'no-store');
       assert.equal(pdf.headers.get('x-content-type-options'), 'nosniff');
@@ -151,26 +151,26 @@ test('job routes require the owner and a revoked purchase keeps the access block
       assert.equal(pdf.headers.get('content-disposition').toLowerCase().includes('forder'), false);
       assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
 
-      const again = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const again = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(again.status, 200);
       await again.arrayBuffer();
       assert.equal(updates.length, 0);
 
-      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(listed.status, 200);
       const body = await listed.json();
       assert.deepEqual(body.jobs.map((item) => item.id), [job.id]);
       assert.equal(body.jobs[0].filename, `manual-${job.id.slice(4, 12)}.pdf`);
       assert.equal(body.jobs[0].download_path, `/jobs/${job.id}/pdf`);
 
-      const hidden = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_other' } });
+      const hidden = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_test_other' } });
       assert.deepEqual((await hidden.json()).jobs.map((item) => item.id), [stranger.id]);
 
       meta.credit_status = 'revoked';
-      const revokedPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const revokedPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(revokedPdf.status, 402);
       assert.equal((await revokedPdf.json()).error, STARTER_REFUNDED_MESSAGE);
-      const revokedStatus = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const revokedStatus = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(revokedStatus.status, 200);
       assert.equal(updates.length, 0);
     });
@@ -184,9 +184,9 @@ test('a bearer token replaces session_id and can be revoked', async () => {
   const meta = { manuals_used: '0', plan: 'starter' };
   const stripe = {
     checkout: { sessions: { retrieve: async (id) => {
-      if (id === 'cs_token_owner') return starterSession('cs_token_owner', meta);
-      if (id === 'cs_gone') throw notFound();
-      if (id === 'cs_canceled') {
+      if (id === 'cs_test_tokenowner') return starterSession('cs_test_tokenowner', meta);
+      if (id === 'cs_test_gone') throw notFound();
+      if (id === 'cs_test_canceled') {
         return {
           id,
           metadata: { plan: 'pro' },
@@ -201,7 +201,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-token-'));
   const store = createJobStore({ directory: dir, env: { NODE_ENV: 'test' } });
-  const job = store.create({ sessionId: 'cs_token_owner', customerId: 'cus_pro', subscriptionId: 'sub_pro', nameSource: 'Widget' });
+  const job = store.create({ sessionId: 'cs_test_tokenowner', customerId: 'cus_pro', subscriptionId: 'sub_pro', nameSource: 'Widget' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
   job.status = 'succeeded';
   store.persist(job);
@@ -211,7 +211,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       const missing = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_gone' }),
+        body: JSON.stringify({ session_id: 'cs_test_gone' }),
       });
       assert.equal(missing.status, 404);
       assert.equal((await missing.json()).code, 'purchase_not_found');
@@ -219,7 +219,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       const inactive = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_canceled' }),
+        body: JSON.stringify({ session_id: 'cs_test_canceled' }),
       });
       assert.equal(inactive.status, 403);
       assert.equal((await inactive.json()).code, 'purchase_inactive');
@@ -227,7 +227,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       const exchanged = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_token_owner' }),
+        body: JSON.stringify({ session_id: 'cs_test_tokenowner' }),
       });
       assert.equal(exchanged.status, 200);
       const tokenBody = await exchanged.json();
@@ -245,7 +245,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       await pdf.arrayBuffer();
 
       const sameSub = signAccessToken({
-        sessionId: 'cs_second',
+        sessionId: 'cs_test_second',
         customerId: 'cus_pro',
         subscriptionId: 'sub_pro',
       }, env);
@@ -253,7 +253,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       assert.equal(shared.status, 200);
       await shared.arrayBuffer();
 
-      const otherSub = signAccessToken({ sessionId: 'cs_third', subscriptionId: 'sub_other' }, env);
+      const otherSub = signAccessToken({ sessionId: 'cs_test_third', subscriptionId: 'sub_other' }, env);
       const denied = await fetch(`${base}/jobs/${job.id}`, { headers: authHeaders(otherSub.token) });
       assert.equal(denied.status, 403);
       assert.equal((await denied.json()).code, 'forbidden');
@@ -267,7 +267,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       assert.equal(after.status, 401);
       assert.equal((await after.json()).code, 'access_token_invalid');
 
-      const expired = signAccessToken({ sessionId: 'cs_token_owner' }, env, Date.now() - ACCESS_TOKEN_TTL_MS - 1000);
+      const expired = signAccessToken({ sessionId: 'cs_test_tokenowner' }, env, Date.now() - ACCESS_TOKEN_TTL_MS - 1000);
       assert.equal(verifyAccessToken(expired.token, env), null);
       const stale = await fetch(`${base}/jobs/${job.id}`, { headers: authHeaders(expired.token) });
       assert.equal(stale.status, 401);
@@ -282,7 +282,7 @@ test('past_due keeps access and reports billingIssue, and ended statuses do not'
   const sub = { id: 'sub_1', status: 'past_due', customer: 'cus_1', metadata: {} };
   const stripe = {
     checkout: { sessions: { retrieve: async () => ({
-      id: 'cs_pro',
+      id: 'cs_test_pro',
       metadata: { plan: 'pro' },
       payment_status: 'paid',
       subscription: sub,
@@ -290,9 +290,10 @@ test('past_due keeps access and reports billingIssue, and ended statuses do not'
     }) } },
     subscriptions: { retrieve: async () => sub },
   };
-  const app = createApp({ env, stripe, anthropic: null });
+  let nowMs = 1700000000000;
+  const app = createApp({ env, stripe, anthropic: null, now: () => nowMs });
   await withServer(app, async (base) => {
-    const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
+    const verified = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
     assert.deepEqual(await verified.json(), {
       valid: true,
       plan: 'pro',
@@ -302,26 +303,27 @@ test('past_due keeps access and reports billingIssue, and ended statuses do not'
     const exchanged = await fetch(`${base}/access-token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: 'cs_pro' }),
+      body: JSON.stringify({ session_id: 'cs_test_pro' }),
     });
     assert.equal(exchanged.status, 200);
     assert.equal((await exchanged.json()).billingIssue, true);
-    await assert.doesNotReject(() => assertCanGenerate(stripe, 'cs_pro', env));
+    await assert.doesNotReject(() => assertCanGenerate(stripe, 'cs_test_pro', env));
 
     for (const status of ['unpaid', 'canceled', 'incomplete_expired']) {
       sub.status = status;
-      const ended = await fetch(`${base}/verify-session?session_id=cs_pro`);
+      nowMs += 11000;
+      const ended = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
       const body = await ended.json();
       assert.equal(body.valid, false, status);
       assert.equal(body.billingIssue, false, status);
       const token = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_pro' }),
+        body: JSON.stringify({ session_id: 'cs_test_pro' }),
       });
       assert.equal(token.status, 403, status);
       assert.equal((await token.json()).code, 'purchase_inactive');
-      await assert.rejects(() => assertCanGenerate(stripe, 'cs_pro', env), (err) => {
+      await assert.rejects(() => assertCanGenerate(stripe, 'cs_test_pro', env), (err) => {
         assert.equal(err.status, 403);
         assert.equal(err.publicCode, 'purchase_inactive');
         return true;
@@ -332,7 +334,7 @@ test('past_due keeps access and reports billingIssue, and ended statuses do not'
   const unknown = {
     checkout: { sessions: { retrieve: async () => { throw notFound(); } } },
   };
-  await assert.rejects(() => assertCanGenerate(unknown, 'cs_missing', env), (err) => {
+  await assert.rejects(() => assertCanGenerate(unknown, 'cs_test_missing', env), (err) => {
     assert.equal(err.status, 404);
     assert.equal(err.publicCode, 'purchase_not_found');
     return true;
@@ -348,7 +350,7 @@ test('past_due keeps access and reports billingIssue, and ended statuses do not'
 test('over-long fields and too many files are rejected before a credit is used', async () => {
   const updates = [];
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_owner', { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: {
       retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }),
       update: async (id, params) => {
@@ -360,7 +362,7 @@ test('over-long fields and too many files are rejected before a credit is used',
   const app = createApp({ env, stripe, anthropic: { messages: { create: async () => { throw new Error('should not run'); } } } });
   await withServer(app, async (base) => {
     const tooLong = new FormData();
-    tooLong.set('session_id', 'cs_owner');
+    tooLong.set('session_id', 'cs_test_owner');
     tooLong.set('manufacturer_name', 'M'.repeat(201));
     tooLong.set('file', new Blob(['<xml/>']), 'line.L5X');
     const rejected = await fetch(`${base}/jobs`, { method: 'POST', body: tooLong });
@@ -371,12 +373,12 @@ test('over-long fields and too many files are rejected before a credit is used',
     assert.equal(updates.length, 0);
 
     const doc = new FormData();
-    doc.set('session_id', 'cs_owner');
+    doc.set('session_id', 'cs_test_owner');
     doc.set('doc_number', 'D'.repeat(81));
     doc.set('file', new Blob(['<xml/>']), 'line.L5X');
     assert.equal((await fetch(`${base}/jobs`, { method: 'POST', body: doc })).status, 400);
     const revision = new FormData();
-    revision.set('session_id', 'cs_owner');
+    revision.set('session_id', 'cs_test_owner');
     revision.set('revision', 'R'.repeat(41));
     revision.set('file', new Blob(['<xml/>']), 'line.L5X');
     const revisionRes = await fetch(`${base}/jobs`, { method: 'POST', body: revision });
@@ -384,7 +386,7 @@ test('over-long fields and too many files are rejected before a credit is used',
     assert.equal((await revisionRes.json()).code, 'field_too_long');
 
     const many = new FormData();
-    many.set('session_id', 'cs_owner');
+    many.set('session_id', 'cs_test_owner');
     for (let i = 0; i < 26; i += 1) many.append('file', new Blob(['x']), `f${i}.txt`);
     const limited = await fetch(`${base}/jobs`, { method: 'POST', body: many });
     assert.equal(limited.status, 400);
@@ -406,7 +408,7 @@ test('a malformed JSON body is a generic 400 and the parser detail stays in the 
         body: '{"plan":',
       });
       assert.equal(res.status, 400);
-      assert.deepEqual(await res.json(), { error: 'invalid_json' });
+      assert.deepEqual(await res.json(), { error: 'invalid_json', code: 'invalid_json' });
     });
   } finally {
     console.error = original;
@@ -424,7 +426,7 @@ test('a malformed JSON body is a generic 400 and the parser detail stays in the 
 test('a ready manual reloads from disk for 24 hours', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-reload-'));
   const first = createJobStore({ directory: dir, env: { NODE_ENV: 'test' } });
-  const job = first.create({ sessionId: 'cs_owner', customerId: 'cus_owner', nameSource: 'Pump' });
+  const job = first.create({ sessionId: 'cs_test_owner', customerId: 'cus_owner', nameSource: 'Pump' });
   first.savePdf(job.id, Buffer.from('%PDF-1.4\n%kept\n'));
   job.status = 'succeeded';
   first.persist(job);
@@ -435,10 +437,10 @@ test('a ready manual reloads from disk for 24 hours', async () => {
     assert.equal(loaded.status, 'succeeded');
     assert.equal(loaded.sessionId, undefined);
     assert.equal(loaded.customerId, undefined);
-    assert.equal(loaded.sessionIdHash, first.hashCredential('cs_owner'));
+    assert.equal(loaded.sessionIdHash, first.hashCredential('cs_test_owner'));
     assert.equal(loaded.customerIdHash, first.hashCredential('cus_owner'));
     const onDisk = fs.readFileSync(path.join(dir, `${job.id}.json`), 'utf8');
-    assert.equal(onDisk.includes('cs_owner'), false);
+    assert.equal(onDisk.includes('cs_test_owner'), false);
     assert.equal(onDisk.includes('cus_owner'), false);
     assert.equal((fs.statSync(path.join(dir, `${job.id}.json`)).mode & 0o077), 0);
     assert.equal(second.readPdf(job.id).includes(Buffer.from('%PDF-')), true);
@@ -451,17 +453,17 @@ test('a ready manual reloads from disk for 24 hours', async () => {
 
 test('a tampered token and a wrong-secret token are rejected', async () => {
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_owner', { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
   };
   const app = createApp({ env, stripe, anthropic: null });
-  const minted = signAccessToken({ sessionId: 'cs_owner' }, env);
+  const minted = signAccessToken({ sessionId: 'cs_test_owner' }, env);
   const [body, sig] = minted.token.split('.');
   const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-  payload.sid = 'cs_other';
+  payload.sid = 'cs_test_other';
   const tampered = `${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${sig}`;
   const otherEnv = { ...env, PORTAL_TOKEN_SECRET: 'another-portal-secret-0123456789abcdef' };
-  const wrong = signAccessToken({ sessionId: 'cs_owner' }, otherEnv);
+  const wrong = signAccessToken({ sessionId: 'cs_test_owner' }, otherEnv);
   assert.equal(verifyAccessToken(tampered, env), null);
   assert.equal(verifyAccessToken(wrong.token, env), null);
   assert.equal(verifyAccessToken(`${body}.${sig}.extra`, env), null);
@@ -497,7 +499,7 @@ test('job reads do not send a raw or bogus session id to Stripe', async () => {
     const jobs = [];
     for (let i = 0; i < 3; i += 1) {
       const job = store.create({
-        sessionId: `cs_job_${i}`,
+        sessionId: `cs_test_job${i}`,
         customerId: 'cus_real',
         subscriptionId: 'sub_real',
         nameSource: `Line ${i}`,
@@ -509,18 +511,18 @@ test('job reads do not send a raw or bogus session id to Stripe', async () => {
     }
     const app = createApp({ env, stripe, jobs: store, anthropic: null });
     const token = signAccessToken({
-      sessionId: 'cs_real',
+      sessionId: 'cs_test_real',
       customerId: 'cus_real',
       subscriptionId: 'sub_real',
     }, env).token;
     await withServer(app, async (base) => {
-      const junkList = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      const junkList = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_test_madeup' } });
       assert.equal(junkList.status, 200);
       assert.deepEqual((await junkList.json()).jobs, []);
-      const junk = await fetch(`${base}/jobs/${jobs[0].id}`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      const junk = await fetch(`${base}/jobs/${jobs[0].id}`, { headers: { 'X-Session-Id': 'cs_test_madeup' } });
       assert.equal(junk.status, 403);
       assert.equal((await junk.json()).code, 'forbidden');
-      const junkPdf = await fetch(`${base}/jobs/${jobs[0].id}/pdf`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      const junkPdf = await fetch(`${base}/jobs/${jobs[0].id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_madeup' } });
       assert.equal(junkPdf.status, 403);
       assert.equal(retrieves, 0);
       const owned = await fetch(`${base}/jobs`, { headers: authHeaders(token) });
@@ -542,7 +544,7 @@ test('rate limits return 429 and the webhook stays unlimited', async () => {
   await withServer(app, async (base) => {
     let last;
     for (let i = 0; i < 11; i += 1) {
-      last = await fetch(`${base}/verify-session?session_id=cs_rate_${i}`);
+      last = await fetch(`${base}/verify-session?session_id=cs_test_rate${i}`);
     }
     assert.equal(last.status, 429);
     const body = await last.json();
@@ -565,7 +567,7 @@ test('rate limits return 429 and the webhook stays unlimited', async () => {
 
 test('a session can mint thirty access tokens an hour and the 429 states the wait', async () => {
   assert.equal(EXCHANGE_LIMIT, 30);
-  const sessionId = 'cs_exchange_limit';
+  const sessionId = 'cs_test_exchangelimit';
   for (let i = 0; i < EXCHANGE_LIMIT; i += 1) {
     assert.equal(tokenExchangeGate(sessionId, env).ok, true);
     recordTokenExchange(sessionId, env);
@@ -590,12 +592,12 @@ test('a session can mint thirty access tokens an hour and the 429 states the wai
 
 test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () => {
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '1', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_owner', { manuals_used: '1', plan: 'starter' }) } },
     paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '1', plan: 'starter' } }) },
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-sunset-'));
   const store = createJobStore({ directory: dir, env });
-  const job = store.create({ sessionId: 'cs_owner', nameSource: 'Pump' });
+  const job = store.create({ sessionId: 'cs_test_owner', nameSource: 'Pump' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
   job.status = 'succeeded';
   store.persist(job);
@@ -605,17 +607,17 @@ test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () =
     await withServer(app, async (base) => {
       const health = await fetch(`${base}/health`);
       assert.equal((await health.json()).portalTokens, true);
-      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(listed.status, 401);
       assert.equal((await listed.json()).code, 'session_id_retired');
-      const verified = await fetch(`${base}/verify-session?session_id=cs_owner`);
+      const verified = await fetch(`${base}/verify-session?session_id=cs_test_owner`);
       assert.equal(verified.status, 401);
       assert.equal((await verified.json()).code, 'session_id_retired');
-      const pdfBlocked = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const pdfBlocked = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
       assert.equal(pdfBlocked.status, 401);
       assert.equal((await pdfBlocked.json()).code, 'session_id_retired');
       const started = new FormData();
-      started.set('session_id', 'cs_owner');
+      started.set('session_id', 'cs_test_owner');
       started.set('file', new Blob(['<xml/>']), 'line.L5X');
       const jobStart = await fetch(`${base}/jobs`, { method: 'POST', body: started });
       assert.equal(jobStart.status, 401);
@@ -623,7 +625,7 @@ test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () =
       const exchanged = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_owner' }),
+        body: JSON.stringify({ session_id: 'cs_test_owner' }),
       });
       assert.equal(exchanged.status, 200);
       const token = (await exchanged.json()).access_token;
@@ -644,7 +646,7 @@ test('a short or missing portal secret disables tokens and reports that on healt
   const shortEnv = { ...env, PORTAL_TOKEN_SECRET: 'too-short' };
   const { PORTAL_TOKEN_SECRET: _omitted, ...missingEnv } = env;
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_short', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_short', { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
   };
   try {
@@ -657,13 +659,13 @@ test('a short or missing portal secret disables tokens and reports that on healt
       const minted = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_short' }),
+        body: JSON.stringify({ session_id: 'cs_test_short' }),
       });
       assert.equal(minted.status, 503);
       const body = await minted.json();
       assert.equal(body.code, 'portal_tokens_disabled');
       assert.equal(JSON.stringify(body).includes('too-short'), false);
-      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_short' } });
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_test_short' } });
       assert.equal(listed.status, 200);
     });
     const missingApp = createApp({ env: missingEnv, stripe, anthropic: null });
@@ -673,7 +675,7 @@ test('a short or missing portal secret disables tokens and reports that on healt
       const minted = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_short' }),
+        body: JSON.stringify({ session_id: 'cs_test_short' }),
       });
       assert.equal(minted.status, 503);
       assert.equal((await minted.json()).code, 'portal_tokens_disabled');
@@ -690,7 +692,7 @@ test('a short or missing portal secret disables tokens and reports that on healt
 test('revoking a token blocks the checkout session until a new token is exchanged', async () => {
   const updates = [];
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_bug27', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_bug27', { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: {
       retrieve: async () => ({ id: 'pi_bug27', metadata: { manuals_used: '0', plan: 'starter' } }),
       update: async (id, params) => {
@@ -703,7 +705,7 @@ test('revoking a token blocks the checkout session until a new token is exchange
   const supportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-bug27-support-'));
   const bugEnv = { ...env, SUPPORT_DATA_DIR: supportDir };
   const store = createJobStore({ directory: dir, env: bugEnv });
-  const job = store.create({ sessionId: 'cs_bug27', nameSource: 'Pump' });
+  const job = store.create({ sessionId: 'cs_test_bug27', nameSource: 'Pump' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
   job.status = 'succeeded';
   store.persist(job);
@@ -713,12 +715,12 @@ test('revoking a token blocks the checkout session until a new token is exchange
       const first = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_bug27' }),
+        body: JSON.stringify({ session_id: 'cs_test_bug27' }),
       });
       assert.equal(first.status, 200);
       const firstToken = (await first.json()).access_token;
-      const second = signAccessToken({ sessionId: 'cs_bug27' }, bugEnv);
-      const rawPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      const second = signAccessToken({ sessionId: 'cs_test_bug27' }, bugEnv);
+      const rawPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
       assert.equal(rawPdf.status, 200);
       await rawPdf.arrayBuffer();
 
@@ -731,11 +733,11 @@ test('revoking a token blocks the checkout session until a new token is exchange
       assert.equal(old.status, 401);
       const sibling = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(second.token) });
       assert.equal(sibling.status, 401);
-      const rawAfter = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      const rawAfter = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
       assert.equal(rawAfter.status, 401);
       assert.equal((await rawAfter.json()).code, 'credential_revoked');
       const started = new FormData();
-      started.set('session_id', 'cs_bug27');
+      started.set('session_id', 'cs_test_bug27');
       started.set('file', new Blob(['<xml/>']), 'line.L5X');
       const jobStart = await fetch(`${base}/jobs`, { method: 'POST', body: started });
       assert.equal(jobStart.status, 401);
@@ -744,15 +746,15 @@ test('revoking a token blocks the checkout session until a new token is exchange
 
       const jti = JSON.parse(Buffer.from(firstToken.split('.')[0], 'base64url').toString('utf8')).jti;
       dropRevokedJti(jti);
-      forgetSessionCredential('cs_bug27', bugEnv);
+      forgetSessionCredential('cs_test_bug27', bugEnv);
       assert.ok(verifyAccessToken(firstToken, bugEnv));
       loadRevocations(bugEnv);
       assert.equal(verifyAccessToken(firstToken, bugEnv), null);
-      const persisted = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      const persisted = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
       assert.equal(persisted.status, 401);
       assert.equal((await persisted.json()).code, 'credential_revoked');
       const saved = fs.readFileSync(path.join(supportDir, 'revoked-tokens.json'), 'utf8');
-      assert.equal(saved.includes('cs_bug27'), false);
+      assert.equal(saved.includes('cs_test_bug27'), false);
       const parsed = JSON.parse(saved);
       assert.equal(typeof parsed.tokens[jti], 'number');
       assert.equal(Object.values(parsed.sessions).some((state) => state.rawBlocked === true), true);
@@ -760,14 +762,14 @@ test('revoking a token blocks the checkout session until a new token is exchange
       const fresh = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_bug27' }),
+        body: JSON.stringify({ session_id: 'cs_test_bug27' }),
       });
       assert.equal(fresh.status, 200);
       const freshToken = (await fresh.json()).access_token;
       const again = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(freshToken) });
       assert.equal(again.status, 200);
       await again.arrayBuffer();
-      const rawAgain = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      const rawAgain = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
       assert.equal(rawAgain.status, 200);
       await rawAgain.arrayBuffer();
       const stale = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(firstToken) });
@@ -783,12 +785,12 @@ test('revoking a token blocks the checkout session until a new token is exchange
 
 test('a revoked session cannot bypass the access-token rate limit', async () => {
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_bug27_limit', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_bug27limit', { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: { retrieve: async () => ({ id: 'pi_bug27_limit', metadata: { manuals_used: '0', plan: 'starter' } }) },
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-bug27-limit-'));
   const store = createJobStore({ directory: dir, env });
-  const job = store.create({ sessionId: 'cs_bug27_limit', nameSource: 'Pump' });
+  const job = store.create({ sessionId: 'cs_test_bug27limit', nameSource: 'Pump' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
   job.status = 'succeeded';
   store.persist(job);
@@ -798,11 +800,11 @@ test('a revoked session cannot bypass the access-token rate limit', async () => 
       const minted = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
+        body: JSON.stringify({ session_id: 'cs_test_bug27limit' }),
       });
       assert.equal(minted.status, 200);
       const token = (await minted.json()).access_token;
-      for (let i = 1; i < EXCHANGE_LIMIT; i += 1) recordTokenExchange('cs_bug27_limit', env);
+      for (let i = 1; i < EXCHANGE_LIMIT; i += 1) recordTokenExchange('cs_test_bug27limit', env);
       const revoked = await fetch(`${base}/access-token/revoke`, {
         method: 'POST',
         headers: authHeaders(token),
@@ -811,13 +813,13 @@ test('a revoked session cannot bypass the access-token rate limit', async () => 
       const blocked = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
+        body: JSON.stringify({ session_id: 'cs_test_bug27limit' }),
       });
       assert.equal(blocked.status, 429);
       const wait = Number(blocked.headers.get('retry-after'));
       assert.ok(wait > 0 && wait <= 3600);
       assert.deepEqual(await blocked.json(), { error: `Too many token exchanges. Try again in ${wait} seconds.` });
-      const raw = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27_limit' } });
+      const raw = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27limit' } });
       assert.equal(raw.status, 401);
       assert.equal((await raw.json()).code, 'credential_revoked');
     });

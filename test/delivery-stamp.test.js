@@ -332,7 +332,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
     checkout: {
       sessions: {
         retrieve: async () => ({
-          id: 'cs_pro',
+          id: 'cs_test_pro',
           metadata: { plan: 'pro' },
           payment_status: 'paid',
           payment_intent: null,
@@ -365,11 +365,11 @@ test('pro stamps the current period charge and skips a mismatched period', async
   });
   await withServer(app, async (base) => {
     const form = new FormData();
-    form.set('session_id', 'cs_pro');
+    form.set('session_id', 'cs_test_pro');
     form.set('file', new Blob([L5X]), 'line.L5X');
     const created = await fetch(`${base}/jobs`, { method: 'POST', body: form });
     assert.equal(created.status, 202);
-    const done = await waitJob(base, (await created.json()).id, 'cs_pro');
+    const done = await waitJob(base, (await created.json()).id, 'cs_test_pro');
     assert.equal(done.status, 'succeeded');
     assert.equal(updates.length, 2);
     assert.equal(updates[0].id, 'ch_current');
@@ -379,7 +379,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
     const stamped = charges.ch_current.metadata.first_manual_at;
     const again = await fetch(`${base}/generate-manual`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_pro' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     assert.equal(again.status, 200);
@@ -395,7 +395,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
     };
     const mismatched = await fetch(`${base}/generate-manual`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_pro' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     assert.equal(mismatched.status, 200);

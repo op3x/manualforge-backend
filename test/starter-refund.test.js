@@ -203,7 +203,7 @@ async function postJob(base, sessionId) {
 test('full refund revokes starter credits and a duplicate event does not write again', async () => {
   const { stripe, intents, updates } = createStripe({
     intents: { pi_full: starterMeta(1) },
-    sessions: { cs_full: 'pi_full' },
+    sessions: { cs_test_full: 'pi_full' },
   });
   const app = createApp({ env: baseEnv(), stripe, anthropic: anthropic(), renderPdf: async () => Buffer.from('%PDF-1.4\n') });
   const payload = event('evt_full', 'charge.refunded', charge({
@@ -231,10 +231,10 @@ test('full refund revokes starter credits and a duplicate event does not write a
     assert.equal(lines.filter((line) => line.includes('Starter credits revoked')).length, 1);
     assert.equal(lines.some((line) => /sk_|whsec_|@/.test(line)), false);
 
-    const verified = await fetch(base + '/verify-session?session_id=cs_full');
+    const verified = await fetch(base + '/verify-session?session_id=cs_test_full');
     assert.deepEqual(await verified.json(), { valid: false, plan: 'starter', remaining: 0, billingIssue: false });
 
-    const job = await postJob(base, 'cs_full');
+    const job = await postJob(base, 'cs_test_full');
     assert.equal(job.status, 402);
     const jobBody = await job.json();
     assert.equal(jobBody.error, STARTER_REFUNDED_MESSAGE);
@@ -242,7 +242,7 @@ test('full refund revokes starter credits and a duplicate event does not write a
 
     const legacy = await fetch(base + '/generate-manual', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_full' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_full' },
       body: JSON.stringify({ plcContent: '<xml/>' }),
     });
     assert.equal(legacy.status, 402);
@@ -260,7 +260,7 @@ test('full refund revokes starter credits and a duplicate event does not write a
 test('partial refund is logged and starter credits still generate', async () => {
   const { stripe, intents, updates } = createStripe({
     intents: { pi_partial: starterMeta(1) },
-    sessions: { cs_partial: 'pi_partial' },
+    sessions: { cs_test_partial: 'pi_partial' },
   });
   const app = createApp({
     env: baseEnv(),
@@ -289,12 +289,12 @@ test('partial refund is logged and starter credits still generate', async () => 
     assert.equal(intents.pi_partial.metadata.credit_status, undefined);
     assert.equal(intents.pi_partial.metadata.manuals_used, '1');
 
-    const verified = await fetch(base + '/verify-session?session_id=cs_partial');
+    const verified = await fetch(base + '/verify-session?session_id=cs_test_partial');
     assert.deepEqual(await verified.json(), { valid: true, plan: 'starter', remaining: 2, billingIssue: false });
 
-    const created = await postJob(base, 'cs_partial');
+    const created = await postJob(base, 'cs_test_partial');
     assert.equal(created.status, 202);
-    const done = await waitJob(base, (await created.json()).id, 'cs_partial');
+    const done = await waitJob(base, (await created.json()).id, 'cs_test_partial');
     assert.equal(done.status, 'succeeded');
     assert.equal(intents.pi_partial.metadata.manuals_used, '2');
     assert.equal(intents.pi_partial.metadata.credit_status, undefined);
@@ -307,7 +307,7 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
       pi_lost: starterMeta(0),
       pi_won: starterMeta(1),
     },
-    sessions: { cs_lost: 'pi_lost', cs_won: 'pi_won' },
+    sessions: { cs_test_lost: 'pi_lost', cs_test_won: 'pi_won' },
     charges: {
       ch_lost: { id: 'ch_lost', payment_intent: 'pi_lost', amount: 3900, amount_refunded: 0, refunded: false },
     },
@@ -329,7 +329,7 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
     assert.equal(intents.pi_lost.metadata.credit_status, 'suspended');
     const openWrites = updates.filter((update) => update.id === 'pi_lost' && update.metadata.credit_status === 'suspended');
     assert.equal(openWrites.length, 1);
-    const whileOpen = await postJob(base, 'cs_lost');
+    const whileOpen = await postJob(base, 'cs_test_lost');
     assert.equal(whileOpen.status, 402);
     assert.equal((await whileOpen.json()).error, STARTER_SUSPENDED_MESSAGE);
 
@@ -346,12 +346,12 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
     const lostWrites = updates.filter((update) => update.id === 'pi_lost' && update.metadata.credit_status === 'revoked');
     assert.equal(lostWrites.length, 1);
 
-    const blocked = await postJob(base, 'cs_lost');
+    const blocked = await postJob(base, 'cs_test_lost');
     assert.equal(blocked.status, 402);
     assert.equal((await blocked.json()).error, STARTER_DISPUTE_LOST_MESSAGE);
     const legacy = await fetch(base + '/generate-manual', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_lost' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_lost' },
       body: JSON.stringify({}),
     });
     assert.equal(legacy.status, 402);
@@ -364,7 +364,7 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
     });
     assert.equal((await postWebhook(base, lostThenWon)).status, 200);
     assert.equal(intents.pi_lost.metadata.credit_status, 'revoked');
-    const stillBlocked = await postJob(base, 'cs_lost');
+    const stillBlocked = await postJob(base, 'cs_test_lost');
     assert.equal(stillBlocked.status, 402);
     assert.equal((await stillBlocked.json()).error, STARTER_DISPUTE_LOST_MESSAGE);
 
@@ -380,7 +380,7 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
     });
     assert.equal((await postWebhook(base, wonOpen)).status, 200);
     assert.equal(intents.pi_won.metadata.credit_status, 'suspended');
-    assert.deepEqual(await (await fetch(base + '/verify-session?session_id=cs_won')).json(), {
+    assert.deepEqual(await (await fetch(base + '/verify-session?session_id=cs_test_won')).json(), {
       valid: false,
       plan: 'starter',
       remaining: 0,
@@ -392,15 +392,15 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
     assert.equal(intents.pi_won.metadata.manuals_used, '1');
     const restoreWrites = updates.filter((update) => update.id === 'pi_won' && update.metadata.credit_status === 'active');
     assert.equal(restoreWrites.length, 1);
-    assert.deepEqual(await (await fetch(base + '/verify-session?session_id=cs_won')).json(), {
+    assert.deepEqual(await (await fetch(base + '/verify-session?session_id=cs_test_won')).json(), {
       valid: true,
       plan: 'starter',
       remaining: 2,
       billingIssue: false,
     });
-    const created = await postJob(base, 'cs_won');
+    const created = await postJob(base, 'cs_test_won');
     assert.equal(created.status, 202);
-    const done = await waitJob(base, (await created.json()).id, 'cs_won');
+    const done = await waitJob(base, (await created.json()).id, 'cs_test_won');
     assert.equal(done.status, 'succeeded');
     assert.equal(intents.pi_won.metadata.manuals_used, '2');
   });
@@ -412,9 +412,9 @@ test('unknown charge is acknowledged and does not change credits', async () => {
       pi_pro: { plan: 'pro', brand: 'manualos', manuals_used: '0' },
       pi_starter: starterMeta(0),
     },
-    sessions: { cs_starter: 'pi_starter' },
+    sessions: { cs_test_starter: 'pi_starter' },
     listed: {
-      pi_other: [{ id: 'cs_other', metadata: { plan: 'pro', brand: 'manualos' } }],
+      pi_other: [{ id: 'cs_test_other', metadata: { plan: 'pro', brand: 'manualos' } }],
     },
   });
   intents.pi_other = { id: 'pi_other', metadata: {} };
@@ -449,7 +449,7 @@ test('unknown charge is acknowledged and does not change credits', async () => {
     assert.equal(intents.pi_pro.metadata.credit_status, undefined);
     // A charge with no PaymentIntent is unknown, so the brand gate does not hand it to the Starter handler.
     assert.equal(lines.filter((line) => line.includes('ignored no Starter entitlement')).length, 2);
-    const verified = await fetch(base + '/verify-session?session_id=cs_starter');
+    const verified = await fetch(base + '/verify-session?session_id=cs_test_starter');
     assert.deepEqual(await verified.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
   });
 });
@@ -457,9 +457,9 @@ test('unknown charge is acknowledged and does not change credits', async () => {
 test('full refund maps a charge through the checkout session when the payment intent has no plan', async () => {
   const { stripe, intents, updates } = createStripe({
     intents: { pi_session: { manuals_used: '0' } },
-    sessions: { cs_session: 'pi_session' },
+    sessions: { cs_test_session: 'pi_session' },
     listed: {
-      pi_session: [{ id: 'cs_session', metadata: { plan: 'starter' } }],
+      pi_session: [{ id: 'cs_test_session', metadata: { plan: 'starter' } }],
     },
   });
   const app = createApp({ env: baseEnv(), stripe, anthropic: null });
@@ -476,7 +476,7 @@ test('full refund maps a charge through the checkout session when the payment in
     assert.equal(intents.pi_session.metadata.credit_status, 'revoked');
     const blocked = await fetch(base + '/generate-manual', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_session' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_session' },
       body: JSON.stringify({ plcContent: '<xml/>' }),
     });
     assert.equal(blocked.status, 402);
@@ -487,7 +487,7 @@ test('full refund maps a charge through the checkout session when the payment in
 test('a won dispute does not restore credits a full refund already revoked', async () => {
   const { stripe, intents } = createStripe({
     intents: { pi_sticky: starterMeta(0) },
-    sessions: { cs_sticky: 'pi_sticky' },
+    sessions: { cs_test_sticky: 'pi_sticky' },
   });
   const app = createApp({ env: baseEnv(), stripe, anthropic: null });
   await withServer(app, async (base) => {
@@ -510,7 +510,7 @@ test('a won dispute does not restore credits a full refund already revoked', asy
       status: 'won',
     }))).status, 200);
     assert.equal(intents.pi_sticky.metadata.credit_status, 'revoked');
-    const blocked = await postJob(base, 'cs_sticky');
+    const blocked = await postJob(base, 'cs_test_sticky');
     assert.equal(blocked.status, 402);
     assert.equal((await blocked.json()).error, STARTER_REFUNDED_MESSAGE);
   });
@@ -523,7 +523,7 @@ test('a job that already started does not publish after a full refund', async ()
   });
   const { stripe, intents } = createStripe({
     intents: { pi_live: starterMeta(0) },
-    sessions: { cs_live: 'pi_live' },
+    sessions: { cs_live_id: 'pi_live' },
   });
   const app = createApp({
     env: baseEnv(),
@@ -532,7 +532,7 @@ test('a job that already started does not publish after a full refund', async ()
     renderPdf: () => gate.then(() => Buffer.from('%PDF-1.4\n%live\n')),
   });
   await withServer(app, async (base) => {
-    const created = await postJob(base, 'cs_live');
+    const created = await postJob(base, 'cs_live_id');
     assert.equal(created.status, 202);
     const job = await created.json();
     assert.equal(intents.pi_live.metadata.manuals_used, '1');
@@ -545,11 +545,11 @@ test('a job that already started does not publish after a full refund', async ()
     assert.equal(hook.status, 200);
     assert.equal(intents.pi_live.metadata.credit_status, 'revoked');
     release();
-    const done = await waitJob(base, job.id, 'cs_live');
+    const done = await waitJob(base, job.id, 'cs_live_id');
     assert.equal(done.status, 'failed');
-    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_live' } });
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_live_id' } });
     assert.equal(pdf.status, 409);
-    const blocked = await postJob(base, 'cs_live');
+    const blocked = await postJob(base, 'cs_live_id');
     assert.equal(blocked.status, 402);
     assert.equal((await blocked.json()).error, STARTER_REFUNDED_MESSAGE);
     assert.equal(intents.pi_live.metadata.credit_status, 'revoked');

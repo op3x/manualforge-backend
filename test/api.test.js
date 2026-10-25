@@ -217,7 +217,8 @@ test('health, checkout, verify, and webhook', async () => {
     assert.deepEqual(await unpaid.json(), { valid: false, plan: 'starter', remaining: null, billingIssue: false });
 
     const missing = await fetch(base + '/verify-session?session_id=missing');
-    assert.deepEqual(await missing.json(), { valid: false, plan: null, remaining: null, billingIssue: false });
+    assert.equal(missing.status, 400);
+    assert.deepEqual(await missing.json(), { error: 'Session id is invalid.', code: 'invalid_session_id' });
 
     const www = await fetch(base + '/health', { headers: { Origin: 'https://www.manualos.com' } });
     assert.equal(www.headers.get('access-control-allow-origin'), 'https://www.manualos.com');

@@ -224,7 +224,7 @@ test('descriptions name the plan without calling the product AI', () => {
       params: {
         mode: 'payment',
         line_items: [{ price: 'price_int_overage', quantity: 1 }],
-        success_url: 'https://manualos.com/upload.html?session_id=cs_sub',
+        success_url: 'https://manualos.com/upload.html?session_id=cs_test_sub',
         metadata: { plan: 'integrator_overage', subscription_id: 'sub_int' },
         payment_intent_data: { metadata: { plan: 'integrator_overage', subscription_id: 'sub_int' } },
       },
@@ -387,14 +387,14 @@ function overageCheckout() {
   return {
     mode: 'payment',
     line_items: [{ price: 'price_int_overage', quantity: 1 }],
-    success_url: 'https://manualos.com/upload.html?session_id=cs_parent',
+    success_url: 'https://manualos.com/upload.html?session_id=cs_test_parent',
     cancel_url: 'https://manualos.com/#pricing',
     client_reference_id: 'sub_int',
     customer: 'cus_test',
     metadata: withUtm({
       plan: 'integrator_overage',
       subscription_id: 'sub_int',
-      subscription_session_id: 'cs_parent',
+      subscription_session_id: 'cs_test_parent',
     }),
     payment_intent_data: {
       metadata: withUtm({

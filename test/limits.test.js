@@ -38,7 +38,7 @@ test('MANUALOS_JOB_TTL_MS above 7 days or invalid clamps to 24 hours', () => {
       setInterval: () => ({ unref() {} }),
       clearInterval: () => {},
     });
-    const job = store.create({ sessionId: 'cs_ttl_cap' });
+    const job = store.create({ sessionId: 'cs_test_ttlcap' });
     assert.equal(Date.parse(job.expiresAt) - Date.parse(job.createdAt), 86400000);
   } finally {
     console.warn = original;
