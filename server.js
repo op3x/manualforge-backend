@@ -46,7 +46,7 @@ const {
 } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
-const { JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
+const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -196,18 +196,21 @@ function createApp({
     }
     let creditHandbacksPending = 0;
     let creditHandbacksDead = 0;
+    let creditHandbacksRejected = 0;
     let creditLedgerOk = true;
     try {
       const ledgerHealth = ledger.health();
       creditLedgerOk = ledgerHealth.ok === true;
       creditHandbacksPending = creditLedgerOk ? ledgerHealth.pending : null;
       creditHandbacksDead = creditLedgerOk ? ledgerHealth.dead : null;
-      if (!creditLedgerOk) console.error('Credit hand-back queue could not be read');
+      creditHandbacksRejected = creditLedgerOk ? ledgerHealth.rejected : null;
+      if (!creditLedgerOk) console.error('Credit ledger could not be read');
     } catch {
       creditLedgerOk = false;
       creditHandbacksPending = null;
       creditHandbacksDead = null;
-      console.error('Credit hand-back queue could not be read');
+      creditHandbacksRejected = null;
+      console.error('Credit ledger could not be read');
     }
     let dataDirOk = false;
     try {
@@ -222,6 +225,7 @@ function createApp({
       unknownEvents,
       creditHandbacksPending,
       creditHandbacksDead,
+      creditHandbacksRejected,
       creditLedgerOk,
       supportDataDirOk: dataDirOk,
     });
@@ -482,19 +486,24 @@ function createApp({
         }
         async function failJob(err, timeout) {
           stopRefresh();
+          if (job && job.status !== 'succeeded') {
+            const message = err && err.expose
+              ? err.message
+              : (credit
+                ? CREDIT_RETURN_MESSAGE
+                : (timeout
+                  ? JOB_TIMEOUT_MESSAGE
+                  : 'Manual generation failed. Please try again.'));
+            job.status = 'failed';
+            job.error = message;
+            job.progress = { stage: 'failed', percent: (job.progress && job.progress.percent) || 0, message };
+          }
           if (stamp && stamp.created) {
             await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
           }
           await clearGenerationStarted(stripeClient, access, sessionId);
           await returnCredit();
-          if (!job) return;
-          const message = timeout
-            ? JOB_TIMEOUT_MESSAGE
-            : (err && err.expose ? err.message : 'Manual generation failed. Please try again.');
-          job.status = 'failed';
-          job.error = message;
-          job.progress = { stage: 'failed', percent: (job.progress && job.progress.percent) || 0, message };
-          if (!timeout) {
+          if (!timeout && err) {
             console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
           }
         }

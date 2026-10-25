@@ -260,13 +260,38 @@ test('apply decrements a Starter credit once per ticket and a later hand-back do
     assert.equal(paid.meta.manuals_used, '0');
     assert.equal(paid.meta.restored_tickets, 'T-100,T-200');
 
+    const known = await runRestore({
+      ...options,
+      args: { apply: false, live: false, paymentIntentId: PI, ticket: 'T-100' },
+    });
+    assert.equal(JSON.parse(known.stdout).result, 'already_restored');
+
+    const dry = await runRestore({
+      ...options,
+      args: { apply: false, live: false, paymentIntentId: PI, ticket: 'T-300' },
+    });
+    assert.equal(JSON.parse(dry.stdout).result, 'nothing_to_restore');
+    assert.equal(JSON.parse(dry.stdout).change, null);
+    assert.equal(paid.calls.updates, 2);
+
     const floor = await runRestore({
       ...options,
       args: { apply: true, live: false, paymentIntentId: PI, ticket: 'T-300' },
     });
-    assert.equal(JSON.parse(floor.stdout).manualsUsed, 0);
-    assert.equal(JSON.parse(floor.stdout).change.manualsDelta, 0);
+    const floorReport = JSON.parse(floor.stdout);
+    assert.equal(floor.exitCode, 0);
+    assert.equal(floorReport.result, 'nothing_to_restore');
+    assert.equal(floorReport.manualsUsed, 0);
+    assert.equal(floorReport.change, null);
     assert.equal(paid.meta.manuals_used, '0');
+    assert.equal(paid.meta.restored_tickets, 'T-100,T-200');
+    assert.equal(paid.calls.updates, 2);
+    const auditPath = path.join(dir, 'credit-restores.jsonl');
+    const audit = fs.readFileSync(auditPath, 'utf8');
+    const lines = audit.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.map((line) => line.result), ['applied', 'already_restored', 'applied', 'nothing_to_restore']);
+    assert.equal(audit.includes('buyer@example.com'), false);
+    assert.equal(audit.includes('sk_test'), false);
     assert.equal(await refundStarterCredit(paid.stripe, PI, TOKEN), 0);
     assert.equal(paid.meta.manuals_used, '0');
   } finally {
@@ -275,20 +300,28 @@ test('apply decrements a Starter credit once per ticket and a later hand-back do
 });
 
 test('apply does not change a purchase that is not Starter', async () => {
+  const dir = tempDir();
   const paid = fakeStripe({ plan: 'pro', manualsUsed: '1' });
-  const result = await runRestore({
-    args: { apply: true, live: false, paymentIntentId: PI, ticket: 'T-100' },
-    stripe: paid.stripe,
-    key: 'sk_test_secretvalue',
-    env: {},
-  });
-  assert.equal(result.exitCode, 1);
-  const report = JSON.parse(result.stdout);
-  assert.equal(report.result, 'not_starter');
-  assert.equal(report.change, null);
-  assert.equal(paid.calls.updates, 0);
-  assert.equal(paid.meta.manuals_used, '1');
-  assert.equal(paid.meta.restored_tickets, undefined);
+  try {
+    const result = await runRestore({
+      args: { apply: true, live: false, paymentIntentId: PI, ticket: 'T-100' },
+      stripe: paid.stripe,
+      key: 'sk_test_secretvalue',
+      env: { SUPPORT_DATA_DIR: dir },
+    });
+    assert.equal(result.exitCode, 1);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.result, 'not_starter');
+    assert.equal(report.change, null);
+    assert.equal(paid.calls.updates, 0);
+    assert.equal(paid.meta.manuals_used, '1');
+    assert.equal(paid.meta.restored_tickets, undefined);
+    const audit = fs.readFileSync(path.join(dir, 'credit-restores.jsonl'), 'utf8');
+    assert.match(audit, /"result":"not_starter"/);
+    assert.equal(audit.includes('buyer@example.com'), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('live mode is refused unless --live is passed, and secrets are not printed', async () => {

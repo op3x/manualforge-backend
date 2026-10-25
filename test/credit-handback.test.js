@@ -8,10 +8,15 @@ const { removeTestJobDirectories } = require('../lib/jobs/store');
 const { commitStarterCredit, refundStarterCredit } = require('../lib/billing');
 const {
   createCreditLedger,
+  DEFAULT_RECONCILE_INTERVAL_MS,
   HANDBACK_BACKOFF_MS,
   HOLD_STALE_MARGIN_MS,
+  MAX_RECONCILE_INTERVAL_MS,
+  MIN_RECONCILE_INTERVAL_MS,
+  reconcileIntervalMs,
 } = require('../lib/credit-ledger');
 const {
+  CREDIT_RETURN_MESSAGE,
   DEFAULT_JOB_TIMEOUT_MS,
   JOB_TIMEOUT_MESSAGE,
   MAX_JOB_TIMEOUT_MS,
@@ -228,7 +233,8 @@ test('job timeout defaults to 15 minutes and clamps into 1 to 30 with one warnin
     assert.equal(jobTimeoutMs({ MANUALOS_JOB_TIMEOUT_MS: '0' }), MIN_JOB_TIMEOUT_MS);
     const warnings = logs.filter((line) => line.includes('MANUALOS_JOB_TIMEOUT_MS'));
     assert.equal(warnings.length, 1);
-    assert.equal(warnings[0].includes('59999'), false);
+    assert.equal(warnings[0].includes('59999'), true);
+    assert.equal(warnings[0].includes(String(MIN_JOB_TIMEOUT_MS)), true);
     assert.equal(warnings[0].includes('1800001'), false);
     assert.equal(warnings[0].includes('nope'), false);
   } finally {
@@ -280,7 +286,11 @@ test('a timed-out job hands a Starter credit back once and ignores a late pdf', 
     fire();
     const done = await waitJob(base, job.id);
     assert.equal(done.status, 'failed');
-    assert.equal(done.error, JOB_TIMEOUT_MESSAGE);
+    assert.equal(done.error, CREDIT_RETURN_MESSAGE);
+    assert.equal(done.error.includes('did not use a credit'), false);
+    for (let i = 0; i < 50 && paid.meta.manuals_used !== '0'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.equal(paid.meta.manuals_used, '0');
     assert.equal(paid.meta.credit_hold, undefined);
     assert.equal(paid.decrements.count, 1);
@@ -579,6 +589,7 @@ test('health reports only the pending hand-back count', async () => {
       assert.equal(body.creditHandbacksPending, 1);
       assert.equal(typeof body.creditHandbacksPending, 'number');
       assert.equal(body.creditHandbacksDead, 0);
+      assert.equal(body.creditHandbacksRejected, 0);
       assert.equal(body.creditLedgerOk, true);
       assert.equal(body.supportDataDirOk, true);
       const text = JSON.stringify(body);
@@ -631,6 +642,7 @@ test('an unreadable hand-back file is not reported as zero', async () => {
       const body = await (await fetch(`${base}/health`)).json();
       assert.equal(body.creditHandbacksPending, null);
       assert.equal(body.creditHandbacksDead, null);
+      assert.equal(body.creditHandbacksRejected, null);
       assert.equal(body.creditLedgerOk, false);
       assert.equal(logs.some((line) => line.includes('Credit hand-back queue could not be read')), true);
       assert.equal(JSON.stringify(body).includes('pi_'), false);
@@ -676,6 +688,7 @@ test('a queued hand-back for a missing payment intent is dead-lettered once', as
       const body = await (await fetch(`${base}/health`)).json();
       assert.equal(body.creditHandbacksPending, 0);
       assert.equal(body.creditHandbacksDead, 1);
+      assert.equal(body.creditHandbacksRejected, 0);
       assert.equal(body.creditLedgerOk, true);
       assert.equal(JSON.stringify(body).includes('pi_'), false);
       assert.equal(JSON.stringify(body).includes(TOKEN), false);
@@ -703,10 +716,312 @@ test('a credit record is fsynced before it is renamed', () => {
     const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
     ledger.note({ paymentIntentId: PI, token: TOKEN, heldAt: '2026-01-01T00:00:00.000Z' });
     ledger.close();
-    assert.deepEqual(events, ['fsync', 'rename']);
+    assert.deepEqual(events, ['fsync', 'rename', 'fsync']);
   } finally {
     fs.fsyncSync = origFsync;
     fs.renameSync = origRename;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hold-clear write that lands and loses its response stays committed', async () => {
+  const meta = {
+    manuals_used: '1',
+    plan: 'starter',
+    credit_generation: '1',
+    credit_hold: TOKEN,
+    credit_hold_at: '2026-01-01T00:00:00.000Z',
+  };
+  const decrements = { count: 0 };
+  let lost = false;
+  const stripe = {
+    paymentIntents: {
+      retrieve: async () => ({ id: PI, metadata: { ...meta } }),
+      update: async (id, params) => {
+        applyMeta(meta, params, decrements);
+        if (!lost && params.metadata && params.metadata.credit_hold === '') {
+          lost = true;
+          throw new Error('response lost');
+        }
+        return { id, metadata: { ...meta } };
+      },
+    },
+  };
+  assert.equal(await commitStarterCredit(stripe, PI, TOKEN), true);
+  assert.equal(meta.manuals_used, '1');
+  assert.equal(meta.credit_hold, undefined);
+  assert.equal(meta.credit_hold_at, undefined);
+  assert.equal(decrements.count, 0);
+  assert.equal(await refundStarterCredit(stripe, PI, TOKEN), 1);
+  assert.equal(meta.manuals_used, '1');
+  assert.equal(decrements.count, 0);
+});
+
+test('a failed job is marked failed before the hand-back while Stripe stays down', async () => {
+  const meta = { manuals_used: '0', plan: 'starter', credit_generation: '0', credit_hold: '' };
+  const decrements = { count: 0 };
+  let phase = 'up';
+  let releaseGate = () => {};
+  const gate = new Promise((resolve) => { releaseGate = resolve; });
+  let held = false;
+  const stripe = {
+    checkout: {
+      sessions: {
+        retrieve: async () => ({
+          id: 'cs_test_starter',
+          metadata: { plan: 'starter' },
+          payment_status: 'paid',
+          payment_intent: { id: 'pi_1', metadata: { ...meta } },
+          subscription: null,
+        }),
+      },
+    },
+    paymentIntents: {
+      retrieve: async () => {
+        if (phase === 'down') {
+          if (!held) {
+            held = true;
+            await gate;
+          }
+          throw new Error('stripe down');
+        }
+        return { id: 'pi_1', metadata: { ...meta } };
+      },
+      update: async (id, params) => {
+        if (phase === 'down') throw new Error('stripe down');
+        applyMeta(meta, params, decrements);
+        return { id, metadata: { ...meta } };
+      },
+    },
+  };
+  const dir = tempDir();
+  const ledger = createCreditLedger({
+    env: { SUPPORT_DATA_DIR: dir },
+    sleep: async () => {},
+    intervalMs: 0,
+  });
+  const app = createApp({
+    env: env({ SUPPORT_DATA_DIR: dir }),
+    stripe,
+    anthropic: anthropic(),
+    creditLedger: ledger,
+    scheduleTimeout() { return { unref() {} }; },
+    cancelTimeout() {},
+    renderPdf: () => {
+      phase = 'down';
+      throw new Error('render exploded');
+    },
+  });
+  try {
+    await withServer(app, async (base) => {
+      const created = await postJob(base, 'cs_test_starter');
+      assert.equal(created.status, 202);
+      const done = await waitJob(base, (await created.json()).id);
+      assert.equal(done.status, 'failed');
+      assert.equal(done.error, CREDIT_RETURN_MESSAGE);
+      assert.equal(done.error.includes('did not use a credit'), false);
+      assert.equal(ledger.pending(), 0);
+      assert.equal(meta.manuals_used, '1');
+      releaseGate();
+      for (let i = 0; i < 50 && ledger.pending() !== 1; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(ledger.pending(), 1);
+      assert.equal(meta.manuals_used, '1');
+      assert.equal(decrements.count, 0);
+      assert.match(meta.credit_hold, /^[a-f0-9]{16}$/);
+    });
+  } finally {
+    releaseGate();
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable open-hold file fails the ledger check', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'open-holds.json'), '{', { mode: 0o600 });
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  try {
+    assert.throws(() => ledger.note({ paymentIntentId: PI, token: TOKEN, heldAt: '2026-01-01T00:00:00.000Z' }));
+    const paid = starterStripe();
+    const app = createApp({
+      env: env({ SUPPORT_DATA_DIR: dir }),
+      stripe: paid.stripe,
+      anthropic: anthropic(),
+      creditLedger: ledger,
+    });
+    await withServer(app, async (base) => {
+      const posted = await postJob(base, 'cs_test_starter');
+      assert.equal(posted.status, 500);
+      assert.equal(paid.meta.manuals_used, '0');
+      const body = await (await fetch(`${base}/health`)).json();
+      assert.equal(body.creditLedgerOk, false);
+      assert.equal(body.creditHandbacksPending, null);
+      assert.equal(body.creditHandbacksDead, null);
+      assert.equal(body.creditHandbacksRejected, null);
+      assert.equal(logs.some((line) => line.includes('Open credit hold record could not be read')), true);
+      assert.equal(logs.some((line) => line.includes('Credit ledger could not be read')), true);
+    });
+  } finally {
+    console.error = original;
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hand-back id that is not a PaymentIntent is counted and only its last 4 characters are logged', async () => {
+  const dir = tempDir();
+  const bad = 'ch_not_a_payment_intentABCD';
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([
+    { paymentIntentId: bad, token: TOKEN },
+    { paymentIntentId: PI, token: TOKEN },
+  ])}\n`);
+  const logs = [];
+  const original = console.warn;
+  console.warn = (...args) => logs.push(args.map(String).join(' '));
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    const first = ledger.health();
+    const second = ledger.health();
+    assert.equal(first.ok, true);
+    assert.equal(first.pending, 1);
+    assert.equal(first.rejected, 1);
+    assert.equal(second.rejected, 1);
+    const warnings = logs.filter((line) => line.includes('not a PaymentIntent'));
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].includes('ABCD'), true);
+    assert.equal(warnings[0].includes(bad), false);
+    assert.equal(warnings[0].includes('ch_not'), false);
+    const app = createApp({
+      env: env({ SUPPORT_DATA_DIR: dir }),
+      stripe: {
+        paymentIntents: {
+          retrieve: async () => { throw new Error('stripe down'); },
+          update: async () => { throw new Error('stripe down'); },
+        },
+      },
+      anthropic: null,
+      creditLedger: ledger,
+    });
+    await withServer(app, async (base) => {
+      const body = await (await fetch(`${base}/health`)).json();
+      assert.equal(body.creditHandbacksPending, 1);
+      assert.equal(body.creditHandbacksRejected, 1);
+      assert.equal(body.creditLedgerOk, true);
+      assert.equal(JSON.stringify(body).includes(bad), false);
+      assert.equal(JSON.stringify(body).includes('ABCD'), false);
+    });
+  } finally {
+    console.warn = original;
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('reconcile interval clamps into 1 minute to 1 hour and intervalMs 0 stays off', () => {
+  const logs = [];
+  const original = console.warn;
+  console.warn = (...args) => logs.push(args.map(String).join(' '));
+  const origInterval = global.setInterval;
+  const seen = [];
+  global.setInterval = (fn, ms, ...rest) => {
+    seen.push(ms);
+    return origInterval(fn, ms, ...rest);
+  };
+  try {
+    assert.equal(reconcileIntervalMs({}), DEFAULT_RECONCILE_INTERVAL_MS);
+    assert.equal(reconcileIntervalMs({ MANUALOS_RECONCILE_INTERVAL_MS: '' }), DEFAULT_RECONCILE_INTERVAL_MS);
+    assert.equal(reconcileIntervalMs({ MANUALOS_RECONCILE_INTERVAL_MS: String(MIN_RECONCILE_INTERVAL_MS) }), MIN_RECONCILE_INTERVAL_MS);
+    assert.equal(reconcileIntervalMs({ MANUALOS_RECONCILE_INTERVAL_MS: String(MAX_RECONCILE_INTERVAL_MS) }), MAX_RECONCILE_INTERVAL_MS);
+    assert.equal(logs.length, 0);
+    assert.equal(reconcileIntervalMs({ MANUALOS_RECONCILE_INTERVAL_MS: '1000' }), MIN_RECONCILE_INTERVAL_MS);
+    assert.equal(reconcileIntervalMs({ MANUALOS_RECONCILE_INTERVAL_MS: '99999999' }), MAX_RECONCILE_INTERVAL_MS);
+    assert.equal(reconcileIntervalMs({ MANUALOS_RECONCILE_INTERVAL_MS: 'nope' }), DEFAULT_RECONCILE_INTERVAL_MS);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].includes('1000'), true);
+    assert.equal(logs[0].includes(String(MIN_RECONCILE_INTERVAL_MS)), true);
+    assert.equal(logs[0].includes('99999999'), false);
+    const quiet = { paymentIntents: { retrieve: async () => ({ metadata: {} }) } };
+    const off = createCreditLedger({ env: { MANUALOS_RECONCILE_INTERVAL_MS: '1000' }, intervalMs: 0 });
+    off.attach(quiet);
+    assert.deepEqual(seen, []);
+    off.close();
+    const on = createCreditLedger({ env: { MANUALOS_RECONCILE_INTERVAL_MS: '120000' } });
+    on.attach(quiet);
+    assert.deepEqual(seen, [120000]);
+    on.close();
+  } finally {
+    console.warn = original;
+    global.setInterval = origInterval;
+  }
+});
+
+test('reconcile clears a generation marker older than this process and leaves a fresh one', async () => {
+  const dir = tempDir();
+  const stalePi = 'pi_stalehold';
+  const freshPi = 'pi_freshhold';
+  const freshToken = 'abcdef0123456789';
+  const heldAt = new Date().toISOString();
+  const staleStart = new Date(Date.now() - 120000).toISOString();
+  const freshStart = new Date().toISOString();
+  const metas = {
+    [stalePi]: {
+      manuals_used: '1',
+      plan: 'starter',
+      credit_generation: '1',
+      credit_hold: TOKEN,
+      credit_hold_at: heldAt,
+      generation_started_at: staleStart,
+      generation_in_progress: '1',
+    },
+    [freshPi]: {
+      manuals_used: '1',
+      plan: 'starter',
+      credit_generation: '1',
+      credit_hold: freshToken,
+      credit_hold_at: heldAt,
+      generation_started_at: freshStart,
+      generation_in_progress: '2',
+    },
+  };
+  const updates = [];
+  const stripe = {
+    paymentIntents: {
+      retrieve: async (id) => ({ id, metadata: { ...metas[id] } }),
+      update: async (id, params) => {
+        updates.push({ id, metadata: { ...params.metadata } });
+        for (const [key, value] of Object.entries(params.metadata || {})) {
+          if (value === '') delete metas[id][key];
+          else metas[id][key] = value;
+        }
+        return { id, metadata: { ...metas[id] } };
+      },
+    },
+  };
+  fs.writeFileSync(path.join(dir, 'open-holds.json'), `${JSON.stringify([
+    { paymentIntentId: stalePi, token: TOKEN, heldAt },
+    { paymentIntentId: freshPi, token: freshToken, heldAt },
+  ])}\n`);
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    await ledger.reconcile(stripe, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS });
+    assert.equal(metas[stalePi].generation_started_at, undefined);
+    assert.equal(metas[stalePi].generation_in_progress, undefined);
+    assert.equal(metas[stalePi].manuals_used, '1');
+    assert.equal(metas[stalePi].credit_hold, TOKEN);
+    assert.equal(metas[freshPi].generation_started_at, freshStart);
+    assert.equal(metas[freshPi].generation_in_progress, '2');
+    assert.equal(metas[freshPi].manuals_used, '1');
+    assert.equal(metas[freshPi].credit_hold, freshToken);
+    const staleUpdate = updates.find((row) => row.id === stalePi);
+    assert.deepEqual(Object.keys(staleUpdate.metadata).sort(), ['generation_in_progress', 'generation_started_at']);
+    assert.equal(updates.some((row) => row.id === freshPi), false);
+  } finally {
+    ledger.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
