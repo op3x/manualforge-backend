@@ -41,7 +41,7 @@ const {
 } = require('./lib/access-token');
 const { contentDisposition, downloadFileName, shortJobId, sourceName } = require('./lib/download-name');
 const { assertSessionId, maskSessionId } = require('./lib/session-id');
-const { FILE_LIMIT, overLengthField } = require('./lib/field-limits');
+const { FILE_LIMIT, readTextFields } = require('./lib/field-limits');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
 const { withStripeReadCache } = require('./lib/stripe-read-cache');
@@ -247,12 +247,8 @@ function collectFiles(req) {
 }
 
 function fieldsFrom(req) {
-  const body = req.body || {};
-  const fields = {};
-  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language', 'date']) {
-    if (typeof body[key] === 'string') fields[key] = body[key];
-  }
-  return fields;
+  const read = readTextFields(req && req.body);
+  return read.fields || {};
 }
 
 function logWebhookEvent(event) {
@@ -875,9 +871,12 @@ function createApp({
     const caller = await generationCaller(req);
     verifyCache.delete(caller.sessionId);
     const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
-    const tooLong = overLengthField(req.body);
-    if (tooLong) {
-      throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
+    const text = readTextFields(req.body);
+    if (text.error && text.error.code === 'field_too_long') {
+      throw exposed(400, `${text.error.field} must be at most ${text.error.max} characters.`, null, 'field_too_long');
+    }
+    if (text.error) {
+      throw exposed(400, `${text.error.field} must be a single text value.`, null, 'invalid_field');
     }
     const files = collectFiles(req);
     if (files.length > FILE_LIMIT) {

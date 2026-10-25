@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createApp } = require('../server');
+const { createApp, fieldsFrom } = require('../server');
 const { createJobStore, removeTestJobDirectories } = require('../lib/jobs/store');
 const { assertCanGenerate, accessFromSession, STARTER_REFUNDED_MESSAGE } = require('../lib/billing');
 const { contentDisposition, downloadFileName } = require('../lib/download-name');
@@ -20,6 +20,8 @@ const {
 } = require('../lib/access-token');
 const { redactSecrets } = require('../server');
 const { signPortalToken } = require('../lib/billing-portal');
+const { readTextFields } = require('../lib/field-limits');
+const { applyFields, emptyProject } = require('../lib/project');
 
 test.after(() => {
   removeTestJobDirectories();
@@ -394,6 +396,106 @@ test('over-long fields and too many files are rejected before a credit is used',
     assert.equal((await limited.json()).code, 'too_many_files');
     assert.equal(updates.length, 0);
   });
+});
+
+test('a repeated text field keeps the first string and a too-long repeat does not spend a credit', async () => {
+  const fields = fieldsFrom({
+    body: {
+      manufacturer_name: ['Acme Pumps', 'Other Co'],
+      revision: ['A', 'B'.repeat(41)],
+      date: ['2026-01-02', '2026-02-02'],
+    },
+  });
+  assert.equal(fields.manufacturer_name, 'Acme Pumps');
+  assert.equal(fields.revision, 'A');
+  assert.equal(fields.date, '2026-01-02');
+  const project = emptyProject();
+  applyFields(project, fields);
+  assert.equal(project.identity.manufacturerName, 'Acme Pumps');
+  assert.equal(project.identity.revision, 'A');
+  assert.equal(project.identity.manualDate, '2026-01-02');
+  assert.equal(JSON.stringify(project).includes('Other Co'), false);
+
+  const empty = readTextFields({ brand: [] });
+  assert.equal(empty.error.code, 'invalid_field');
+  assert.equal(empty.error.field, 'brand');
+  const nested = readTextFields({ model: [['not-a-string']] });
+  assert.equal(nested.error.code, 'invalid_field');
+
+  const updates = [];
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_owner', { manuals_used: '0', plan: 'starter' }) } },
+    paymentIntents: {
+      retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }),
+      update: async (id, params) => {
+        updates.push(params);
+        return { id };
+      },
+    },
+  };
+  const app = createApp({ env, stripe, anthropic: { messages: { create: async () => { throw new Error('should not run'); } } } });
+  await withServer(app, async (base) => {
+    const tooLong = new FormData();
+    tooLong.set('session_id', 'cs_test_owner');
+    tooLong.append('manufacturer_name', 'M'.repeat(201));
+    tooLong.append('manufacturer_name', 'Acme Pumps');
+    tooLong.set('file', new Blob(['<xml/>']), 'line.L5X');
+    const rejected = await fetch(`${base}/jobs`, { method: 'POST', body: tooLong });
+    assert.equal(rejected.status, 400);
+    const rejectedBody = await rejected.json();
+    assert.equal(rejectedBody.code, 'field_too_long');
+    assert.match(rejectedBody.error, /manufacturer_name/);
+    assert.equal(updates.length, 0);
+
+    const dropped = await fetch(`${base}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: 'cs_test_owner',
+        brand: [],
+        plcContent: '<xml/>',
+      }),
+    });
+    assert.equal(dropped.status, 400);
+    assert.equal((await dropped.json()).code, 'invalid_field');
+    assert.equal(updates.length, 0);
+  });
+});
+
+test('PORTAL_TOKEN_SECRET is required and revoke fails closed without it', async () => {
+  const example = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+  assert.match(example, /PORTAL_TOKEN_SECRET=replace_me/);
+  assert.match(example, /At least 32 bytes/);
+  assert.match(example, /Production fails closed without it/);
+  assert.match(example, /POST \/access-token\/revoke/);
+  assert.equal(example.includes('Leave unset until the upload page'), false);
+
+  const { PORTAL_TOKEN_SECRET: _omitted, ...missingEnv } = env;
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_test_owner', { manuals_used: '0', plan: 'starter' }) } },
+  };
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    const app = createApp({ env: missingEnv, stripe, anthropic: null });
+    await withServer(app, async (base) => {
+      const health = await fetch(`${base}/health`);
+      assert.equal((await health.json()).portalTokens, false);
+      const revoked = await fetch(`${base}/access-token/revoke`, {
+        method: 'POST',
+        headers: authHeaders('not-a-real-token'),
+      });
+      assert.equal(revoked.status, 503);
+      const body = await revoked.json();
+      assert.equal(body.code, 'portal_tokens_disabled');
+      assert.equal(JSON.stringify(body).includes('replace_me'), false);
+    });
+  } finally {
+    console.error = original;
+  }
+  const logged = errors.join('\n');
+  assert.match(logged, /PORTAL_TOKEN_SECRET is missing or shorter than 32 bytes/);
 });
 
 test('a malformed JSON body is a generic 400 and the parser detail stays in the log', async () => {
