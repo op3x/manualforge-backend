@@ -20,6 +20,7 @@ const {
   reserveStarterCredit,
   verifyCheckoutSession,
 } = require('./lib/billing');
+const { withAttribution } = require('./lib/attribution');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -155,7 +156,8 @@ function createApp({
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       const plan = req.body && req.body.plan;
-      const params = checkoutParams(plan, env);
+      const attribution = req.body && req.body.attribution;
+      const params = withAttribution(checkoutParams(plan, env), attribution);
       const session = await stripeClient.checkout.sessions.create(params);
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');

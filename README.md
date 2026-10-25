@@ -13,11 +13,11 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 
 ### `POST /create-checkout-session`
 
-Request JSON: `{ "plan": "starter" }` or `{ "plan": "pro" }`.
+Request JSON: `{ "plan": "starter" }` or `{ "plan": "pro" }`, with an optional `attribution` object ([Attribution](#attribution)).
 
 Response JSON: `{ "url": "<hosted Checkout URL>" }`.
 
-Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mode: "subscription"` and `STRIPE_PRICE_PRO` (a recurring monthly price). Session metadata is `{ plan }`. Redirects:
+Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mode: "subscription"` and `STRIPE_PRICE_PRO` (a recurring monthly price). Session metadata is `{ plan }` plus any kept `attr_*` fields. Redirects:
 
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
@@ -147,6 +147,14 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 
 Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md) only after the account has an active registration. Turning on automatic tax without a registration collects no tax and returns no error.
+
+## Attribution
+
+`POST /create-checkout-session` accepts an optional `attribution` object. Checkout still opens when that object is missing or invalid.
+
+Kept keys are `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `landing_path`, `first_seen_at`, `referrer_host`, `gclid`, and `msclkid`. An optional `latest` object may repeat those keys. Any other key is dropped. Each value must be a string. The server trims it and strips control characters. `utm_source`, `utm_medium`, and `utm_campaign` are lowercased again before they are written to metadata. `utm_term`, `utm_content`, `gclid`, and `msclkid` keep the case that was sent. Campaign names are not limited to a fixed list. UTM fields, paths, and hosts are stored at most 100 characters. `gclid` must match `[A-Za-z0-9_-]` and `msclkid` must be hexadecimal or alphanumeric; both may be up to 500 characters and are not shortened. Stripe metadata allows 50 keys, 500 characters per value, and 40 per key. A value that contains an email address is dropped. Every other value is normalized with NFKC, separator characters are removed, and the value is dropped when a run of 9 or more digits remains. That rejects a card number, phone number, or SSN written with spaces, punctuation, or full-width digits, including when words sit beside the number. `gclid` and `msclkid` skip that digit check. `landing_path` is stored as a path only: the host and the query string are removed. `first_seen_at` must be an ISO-8601 timestamp with a timezone. `referrer_host` is stored as a hostname.
+
+Kept fields are written on the Checkout Session as `attr_utm_source` and so on. Fields from `latest` use `attr_latest_utm_source` and the same pattern. The names do not collide with `plan`, `manuals_used`, `credit_generation`, or `credit_hold`. Pro is a subscription, so the same fields, including `attr_latest_*`, are copied to `subscription_data.metadata` and stay on the Subscription across renewals. Starter is a one-time payment, so they stay on the Checkout Session only. The only log line is `attribution fields kept: <count>`.
 
 ## Model
 
