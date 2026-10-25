@@ -9,7 +9,7 @@ const { applyCheckoutConsent, withManualosBrand } = require('../lib/checkout-con
 const { applyManualosCheckout } = require('../lib/stripeBrand');
 const { createCreditLedger } = require('../lib/credit-ledger');
 const { createApp } = require('../server');
-const { removeTestJobDirectories } = require('../lib/jobs/store');
+const { createJobStore, removeTestJobDirectories } = require('../lib/jobs/store');
 const {
   ATTESTATION_FILE,
   CA_BUSINESS_CODE,
@@ -578,7 +578,7 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
         assert.equal(unitedStates.status, 200);
         assert.equal(mock.calls.refunds.length, 1);
         const usAccess = await fetch(`${base}/verify-session?session_id=cs_us`);
-        assert.deepEqual(await usAccess.json(), { valid: true, plan: 'starter', remaining: 3 });
+        assert.deepEqual(await usAccess.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
 
         const proHook = await postWebhook(base, completedEvent(pro, 'CA'));
         assert.equal(proHook.status, 200);
@@ -646,7 +646,7 @@ test('a Canadian billing country with a valid attestation is granted', async () 
       assert.equal(mock.calls.piUpdates.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
       const access = await fetch(`${base}/verify-session?session_id=cs_created_1`);
-      assert.deepEqual(await access.json(), { valid: true, plan: 'starter', remaining: 3 });
+      assert.deepEqual(await access.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
       const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_created_1' } });
       assert.equal(job.status, 400);
       assert.equal((await job.json()).error, 'No file or plcContent provided');
@@ -666,7 +666,7 @@ test('a Canadian billing country with a valid attestation is granted', async () 
       assert.equal(mock.calls.refunds.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
       const proAccess = await fetch(`${base}/verify-session?session_id=cs_created_2`);
-      assert.deepEqual(await proAccess.json(), { valid: true, plan: 'pro', remaining: null });
+      assert.deepEqual(await proAccess.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -727,7 +727,7 @@ test('turning the gate off restores checkout and webhook behavior', async () => 
       assert.equal(mock.calls.piUpdates.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
       const access = await fetch(`${base}/verify-session?session_id=cs_open`);
-      assert.deepEqual(await access.json(), { valid: true, plan: 'starter', remaining: 3 });
+      assert.deepEqual(await access.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
       const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_open' } });
       assert.equal(job.status, 400);
       assert.equal((await job.json()).error, 'No file or plcContent provided');
@@ -802,7 +802,7 @@ test('an unattested Canadian session is refused before any credit or Pro access'
 
       const unitedStates = await fetch(`${base}/verify-session?session_id=cs_window_us`);
       assert.equal(unitedStates.status, 200);
-      assert.deepEqual(await unitedStates.json(), { valid: true, plan: 'starter', remaining: 3 });
+      assert.deepEqual(await unitedStates.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
     });
     assert.equal(mock.intents[starter.payment_intent].metadata.manuals_used, '0');
     assert.equal(mock.calls.piUpdates.length, 0);
@@ -1018,6 +1018,94 @@ test('only the exact string 0 turns the Canadian gate off', async () => {
       assert.equal(mock.calls.create.length, 0);
     });
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('job and PDF reads require the buyer credential and still refuse an unattested Canadian PDF', async () => {
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const mock = createStripe();
+  const starter = setCountry(seedStarter(mock, 'cs_pdf'), 'CA');
+  setCountry(seedStarter(mock, 'cs_pdf_other'), 'US');
+  const store = createJobStore({
+    env,
+    directory: path.join(dir, 'jobs'),
+    now: () => FIXED,
+  });
+  const job = store.create({ sessionId: 'cs_pdf' });
+  store.savePdf(job.id, Buffer.from('%PDF-1.4\n%ca\n'));
+  job.status = 'succeeded';
+  store.persist(job);
+  const app = appFor(env, mock.stripe, { jobs: store });
+  try {
+    await withServer(app, async (base) => {
+      const missing = await fetch(`${base}/jobs/${job.id}`);
+      assert.equal(missing.status, 401);
+      assert.equal((await missing.json()).code, 'authorization_required');
+      const missingPdf = await fetch(`${base}/jobs/${job.id}/pdf`);
+      assert.equal(missingPdf.status, 401);
+      assert.equal((await missingPdf.json()).code, 'authorization_required');
+      const missingList = await fetch(`${base}/jobs`);
+      assert.equal(missingList.status, 401);
+      assert.equal((await missingList.json()).code, 'authorization_required');
+
+      const otherPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf_other' } });
+      assert.equal(otherPdf.status, 403);
+      assert.equal((await otherPdf.json()).code, 'forbidden');
+      const otherStatus = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_pdf_other' } });
+      assert.equal(otherStatus.status, 403);
+      assert.equal((await otherStatus.json()).code, 'forbidden');
+
+      const denied = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      assert.equal(denied.status, 400);
+      assert.deepEqual(await denied.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+      assert.equal(String(denied.headers.get('content-type') || '').includes('application/pdf'), false);
+      assert.equal(mock.intents[starter.payment_intent].metadata.manuals_used, '0');
+      assert.equal(mock.calls.refunds.length, 0);
+      assert.equal(mock.calls.piUpdates.length, 0);
+
+      const status = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      assert.equal(status.status, 200);
+      const statusBody = await status.json();
+      assert.equal(statusBody.status, 'succeeded');
+      assert.equal(JSON.stringify(statusBody).includes('cs_pdf'), false);
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      assert.equal(listed.status, 200);
+      assert.deepEqual((await listed.json()).jobs.map((item) => item.id), [job.id]);
+
+      const verify = await fetch(`${base}/verify-session?session_id=cs_pdf`);
+      assert.equal(verify.status, 400);
+      assert.deepEqual(await verify.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+
+      const attestations = createCaAttestationStore({ env });
+      await attestations.record({
+        sessionId: 'cs_pdf',
+        billingCountry: 'CA',
+        at: AT,
+      });
+
+      const granted = await fetch(`${base}/verify-session?session_id=cs_pdf`);
+      assert.equal(granted.status, 200);
+      assert.deepEqual(await granted.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
+
+      const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      assert.equal(pdf.status, 200);
+      assert.equal(pdf.headers.get('content-type'), 'application/pdf');
+      assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
+      assert.equal(mock.intents[starter.payment_intent].metadata.manuals_used, '0');
+      assert.equal(mock.calls.refunds.length, 0);
+      assert.equal(mock.calls.piUpdates.length, 0);
+
+      const stillMissing = await fetch(`${base}/jobs/${job.id}/pdf`);
+      assert.equal(stillMissing.status, 401);
+      assert.equal((await stillMissing.json()).code, 'authorization_required');
+      const stillOther = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf_other' } });
+      assert.equal(stillOther.status, 403);
+      assert.equal((await stillOther.json()).code, 'forbidden');
+    });
+  } finally {
+    store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
