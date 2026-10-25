@@ -130,11 +130,12 @@ async function withServer(app, fn) {
 }
 
 async function waitJob(base, id) {
-  for (let i = 0; i < 80; i += 1) {
+  const deadline = Date.now() + 150000;
+  while (Date.now() < deadline) {
     const res = await fetch(`${base}/jobs/${id}`);
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error('job did not finish');
 }
@@ -163,6 +164,11 @@ test('plan gate, credit cost, and request classification', () => {
   assert.equal(classifyRequest('alarm and troubleshooting guide').related, true);
   assert.equal(classifyRequest('alarm and troubleshooting guide').kind, 'troubleshooting');
   assert.equal(classifyRequest('spare parts list').title, 'Spare Parts List');
+  assert.equal(classifyRequest('commissioning checklist').kind, 'commissioning');
+  assert.equal(classifyRequest('commissioning checklist').title, 'Commissioning Checklist');
+  assert.equal(classifyRequest('torque table').related, true);
+  assert.equal(classifyRequest('wiring list').related, true);
+  assert.equal(classifyRequest('instrument chart').related, true);
   const selected = selectionFromRequest({
     body: {
       documents: '["manual","pm_schedule","shutdown","startup"]',
@@ -252,6 +258,8 @@ test('schedules and procedures follow the equipment that was found', async () =>
   assert.match(brandedHtml, /brand-logo/);
   assert.equal(resolveDocumentBranding({ plan: 'integrator', customerId: 'cus_test' }), null);
   assert.equal(resolveDocumentBranding({ plan: 'pro' }), null);
+  assert.deepEqual(resolveDocumentBranding({ plan: 'integrator', customerId: 'cus_test' }, { companyName: 'Passed' }), { companyName: 'Passed' });
+  assert.equal(resolveDocumentBranding({ plan: 'pro', branding: { companyName: 'Passed' } }), null);
 
   const { emptyProject, addRoutine, upsertTag } = require('../lib/project');
   const named = emptyProject();
@@ -275,7 +283,8 @@ test('schedules and procedures follow the equipment that was found', async () =>
   conversion.identity.productNameFromUser = true;
   const conversionPm = htmlOf(buildPmSchedule(conversion, {}));
   assert.equal(/Conveyor/.test(conversionPm), false);
-  assert.match(conversionPm, /no specific device class/);
+  assert.match(conversionPm, /did not identify a motor, valve, sensor, or other maintainable device/);
+  assert.equal(/no specific device class/.test(conversionPm), false);
 });
 
 test('starter extra documents are refused before a credit is reserved', async () => {

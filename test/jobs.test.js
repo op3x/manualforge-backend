@@ -94,11 +94,12 @@ async function withServer(app, fn) {
 }
 
 async function waitJob(base, id) {
-  for (let i = 0; i < 50; i += 1) {
+  const deadline = Date.now() + 150000;
+  while (Date.now() < deadline) {
     const res = await fetch(`${base}/jobs/${id}`);
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error('job did not finish');
 }

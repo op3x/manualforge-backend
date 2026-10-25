@@ -9,7 +9,8 @@ const { analyzeRoutine } = require('../lib/logic');
 const { buildDocument } = require('../lib/manual/assemble');
 const { renderHtml } = require('../lib/manual/html');
 const { energyTable, controlPoints } = require('../lib/documents/equipment');
-const { buildPmSchedule, buildShutdown, buildStartup, buildCustomDocument, TROUBLE_SKIP } = require('../lib/documents/content');
+const { buildPmSchedule, buildShutdown, buildStartup, buildCustomDocument, TROUBLE_SKIP, PARTS_SKIP } = require('../lib/documents/content');
+const { emptyProject, upsertTag } = require('../lib/project');
 const { mergePdfs } = require('../lib/documents/files');
 const { requestsExtras, selectionFromRequest } = require('../lib/documents/selection');
 
@@ -80,7 +81,10 @@ test('cooker maintenance, alarms, and parts stay specific', async () => {
   assert.equal((pm.match(/<section class="chapter">/g) || []).length, 1);
   assert.equal(/Daily tasks|Weekly tasks|Run-hour tasks/.test(pm), false);
   assert.equal((pm.match(/Inspect the steam supply valve/g) || []).length, 1);
-  assert.match(pm, /1000-PM/);
+  assert.equal(/1000-PM/.test(pm), false);
+  assert.match(pm, /<td>Document<\/td><td><\/td>/);
+  assert.equal(/no specific device class/.test(pm), false);
+  assert.equal(/that this equipment actually has/.test(pm), false);
   assert.equal(/class="maker"/.test(pm), false);
   assert.equal(/<td>Model<\/td>/.test(pm), false);
   assert.equal((pm.match(/does not repeat that description/g) || []).length, 1);
@@ -100,6 +104,8 @@ test('cooker maintenance, alarms, and parts stay specific', async () => {
     customKind: 'troubleshooting',
   }, {}));
   assert.equal(/High high/i.test(guide), false);
+  assert.equal(/<h2[^>]*>[^<]*Alarm and Troubleshooting Guide/.test(guide), false);
+  assert.match(guide, /What you see and what to do/);
   assert.equal(/Control Logic Rung|Lit-2045/i.test(guide), false);
   assert.match(guide, /temperature is high/i);
   assert.match(guide, /steam/i);
@@ -120,6 +126,8 @@ test('a valve actuator is pneumatic, and empty logic is skipped', async () => {
   const valve = await load(VALVE, 'tia_LAD_Valve.xml');
   const names = energies(valve);
   assert.ok(names.includes('Pneumatic'));
+  assert.ok(names.includes('Controlled line'));
+  assert.match(energyTable(valve).flat().join(' '), /contents to be confirmed/i);
   assert.ok(names.length > 1);
   const shutdown = htmlOf(buildShutdown(valve, {}));
   assert.match(shutdown, /Pneumatic/);
@@ -232,6 +240,137 @@ function outlineTitles(pdf) {
   }
   return titles;
 }
+
+test('alarms keep equipment rows and collapse generic limit text', async () => {
+  const project = await load(COOKER, 'brewery_Cooker_1_AutoLogic_Program.L5X');
+  project.alarms = [
+    { text: 'Process value has exceeded the high high limit' },
+    { text: 'Process variable has exceeded the high-high limit' },
+    { text: 'High High Alarm' },
+    { text: 'Process reading has exceeded the high high alarm limit' },
+    { text: 'Process value has exceeded the low low limit' },
+    { text: 'Low Low Alarm' },
+  ];
+  const routine = project.routines[0];
+  routine.analysis = routine.analysis || { groups: [], alarms: [] };
+  if (!routine.analysis.groups) routine.analysis.groups = [];
+  routine.analysis.alarms = [
+    { text: 'Process value has exceeded the low low limit (value 10)' },
+    { text: 'The steam valve did not move (value 10)' },
+  ];
+  const guide = htmlOf(buildCustomDocument(project, {
+    id: 'custom_1',
+    title: 'Alarm and Troubleshooting Guide',
+    kind: 'troubleshooting',
+    customKind: 'troubleshooting',
+  }, {}));
+  assert.match(guide, /steam step does not advance/i);
+  assert.match(guide, /temperature is high/i);
+  assert.match(guide, /did not reach the commanded position/i);
+  assert.match(guide, /steam valve did not move/i);
+  assert.equal(/high high/i.test(guide), false);
+  assert.equal(/low low/i.test(guide), false);
+  assert.equal(/has exceeded/i.test(guide), false);
+  assert.equal(/\(value 10\)/.test(guide), false);
+  const steamAt = guide.search(/steam step does not advance/i);
+  const tempAt = guide.search(/temperature is high/i);
+  assert.ok(steamAt > 0 && tempAt > steamAt);
+
+  const generic = emptyProject();
+  generic.alarms = [
+    { text: 'Process value has exceeded the high high limit' },
+    { text: 'Process variable has exceeded the high-high limit' },
+    { text: 'High High Alarm' },
+    { text: 'Process reading has exceeded the high high alarm limit' },
+    { text: 'Process value has exceeded the low low limit' },
+    { text: 'Low Low Alarm' },
+  ];
+  const only = htmlOf(buildCustomDocument(generic, {
+    id: 'custom_1',
+    title: 'Alarm and Troubleshooting Guide',
+    kind: 'troubleshooting',
+    customKind: 'troubleshooting',
+  }, {}));
+  assert.equal((only.match(/high high/gi) || []).length, 1);
+  assert.equal((only.match(/low low/gi) || []).length, 1);
+});
+
+test('control names skip status phrases and function titles', async () => {
+  const project = await load(COOKER, 'brewery_Cooker_1_AutoLogic_Program.L5X');
+  const points = controlPoints(project);
+  assert.equal(points.resets.some((label) => /meter|has reset/i.test(label)), false);
+  const startup = htmlOf(buildStartup(project, {}));
+  assert.equal(/water meter has reset/i.test(startup), false);
+  assert.equal(/power or air returns/i.test(startup), false);
+  assert.match(startup, /when power returns/);
+  const shutdown = htmlOf(buildShutdown(project, {}));
+  assert.match(shutdown, /The guard stays closed until motion has stopped/);
+  assert.match(shutdown, /Drain hot fluid/);
+
+  const cell = await load(path.join(__dirname, 'fixtures/cell.scl'), 'cell.scl');
+  upsertTag(cell, { name: 'ClampCtrl', description: 'conveyor guard interlock part clamping control' });
+  upsertTag(cell, { name: 'MeterReset', description: 'cooker water meter has reset' });
+  const cellPoints = controlPoints(cell);
+  assert.deepEqual(cellPoints.resets, ['Fault reset button']);
+  assert.equal(cellPoints.resets.some((label) => /clamping control|meter/i.test(label)), false);
+  const cellPm = htmlOf(buildPmSchedule(cell, {}));
+  const cellStartup = htmlOf(buildStartup(cell, {}));
+  assert.equal(/clamping control/i.test(cellPm + cellStartup), false);
+  assert.equal(/water meter has reset/i.test(cellStartup), false);
+  assert.match(cellPm, /conveyor motor/i);
+});
+
+test('a hydraulic pump is not process fluid', async () => {
+  const cell = await load(path.join(__dirname, 'fixtures/cell.scl'), 'cell.scl');
+  assert.equal(energies(cell).includes('Process fluid'), false);
+  assert.ok(energies(cell).includes('Hydraulic'));
+  const shutdown = htmlOf(buildShutdown(cell, {}));
+  const startup = htmlOf(buildStartup(cell, {}));
+  assert.equal(/Drain hot fluid/i.test(shutdown), false);
+  assert.equal(/Process fluid/i.test(shutdown), false);
+  assert.equal(/open the water valves/i.test(startup), false);
+  assert.match(shutdown, /Hydraulic/);
+  assert.match(startup, /power or air returns/);
+});
+
+test('parts drop utilities and skip an empty list', async () => {
+  const project = await load(COOKER, 'brewery_Cooker_1_AutoLogic_Program.L5X');
+  const parts = htmlOf(buildCustomDocument(project, {
+    id: 'custom_2',
+    title: 'Spare Parts List',
+    kind: 'parts',
+    customKind: 'parts',
+  }, {}));
+  assert.equal(/DISCHARGE DROP TUB/.test(parts), false);
+  assert.match(parts, /Drop Tub Discharge pump/);
+  assert.equal(/<h2[^>]*>[^<]*Spare Parts List/.test(parts), false);
+  assert.match(parts, /Parts in this upload/);
+
+  const named = emptyProject();
+  upsertTag(named, { name: 'P1', description: 'Mash Water pump' });
+  upsertTag(named, { name: 'P2', description: 'pump Mash Water' });
+  const merged = htmlOf(buildCustomDocument(named, {
+    id: 'custom_1',
+    title: 'Spare Parts List',
+    kind: 'parts',
+    customKind: 'parts',
+  }, {}));
+  assert.equal((merged.match(/Mash Water pump/g) || []).length, 1);
+  assert.match(merged, /Mash Water pump<\/td><td>Read the nameplate<\/td><td>2/);
+
+  const bare = emptyProject();
+  upsertTag(bare, { name: 'CloseGate', description: 'Close the gate' });
+  upsertTag(bare, { name: 'Seq', description: 'Sequence Control' });
+  upsertTag(bare, { name: 'Air', description: 'Compressed air supply' });
+  upsertTag(bare, { name: 'Lube', description: 'Gearbox lubrication point' });
+  const skipped = buildCustomDocument(bare, {
+    id: 'custom_1',
+    title: 'Spare Parts List',
+    kind: 'parts',
+    customKind: 'parts',
+  }, {});
+  assert.equal(skipped.skipped, PARTS_SKIP);
+});
 
 test('cell startup warns that homing releases the brake', async () => {
   const project = await load(path.join(__dirname, 'fixtures/cell.scl'), 'cell.scl');
