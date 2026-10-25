@@ -2148,3 +2148,225 @@ test('after-hours billing calls and complaint texts escalate', async () => {
     assert.equal(texts.completions.length, 0);
   });
 });
+
+test('round 4 promise bypasses, card separators, opt-out billing, and vendor leaks', async () => {
+  const env = aiEnv();
+  const blocked = [
+    "I can't promise anything, but I'll refund you today.",
+    "I'll refund you and a person will follow up.",
+    "We're going to refund you",
+    "I'll process the refund now",
+    'Refund approved!',
+    "I'll reimburse you.",
+  ];
+  for (const phrase of blocked) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /I'll refund|going to refund|process the refund|Refund approved|reimburse/i, phrase);
+  }
+  for (const phrase of [
+    'Only the team can issue a refund',
+    'The team decides whether to issue a refund',
+    'To get a refund, email support…',
+  ]) {
+    assert.equal(policy.promisesRefund(phrase), false, phrase);
+    assert.equal(policy.applyGuardrails(phrase, env), phrase, phrase);
+  }
+
+  const groups = ['4111', '1111', '1111', '1111'];
+  for (const sep of ['_', '*', ':', '|', '\u2013', '\u2014']) {
+    const raw = groups.join(sep);
+    assert.equal(policy.containsCardNumber(raw), true, JSON.stringify(raw));
+    assert.equal(policy.redactCardNumbers(`pay ${raw} now`), 'pay [redacted] now', JSON.stringify(raw));
+    assert.doesNotMatch(policy.redactCardNumbers(raw), /4111/);
+  }
+  for (const sep of [' \u2013 ', ' \u2014 ', ' _ ', ' * ', ' : ', ' | ']) {
+    const raw = groups.join(sep);
+    assert.equal(policy.containsCardNumber(raw), true, JSON.stringify(raw));
+    assert.equal(policy.redactCardNumbers(raw), '[redacted]', JSON.stringify(raw));
+  }
+  assert.equal(policy.redactCardNumbers('cvv two three four'), '[redacted]');
+  assert.equal(policy.redactCardNumbers('the cvv two three four is here'), 'the [redacted] is here');
+  assert.equal(policy.containsCardNumber('cvv two three four'), false);
+  assert.equal(policy.containsCardNumber('credit card'), false);
+  for (const phrase of ['order 4111-1111-1111-1111', 'ref: 4111_1111_1111_1111', 'Order #4111111111111111']) {
+    assert.equal(policy.containsCardNumber(phrase), false, phrase);
+    let seen = '';
+    const decision = await policy.triageTurn({
+      channel: 'sms',
+      text: phrase,
+      state: state(),
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        seen = JSON.stringify(request.messages);
+        return answer('Email support@manualos.com and the team can look up that order.');
+      },
+    });
+    assert.doesNotMatch(decision.reply, /cannot take card numbers/, phrase);
+    assert.match(seen, /4111/, phrase);
+  }
+
+  const seeded = state();
+  seeded.history = [
+    { role: 'user', content: '4111\u20131111\u20131111\u20131111' },
+    { role: 'assistant', content: '4111*1111*1111*1111' },
+  ];
+  let seededPayload = '';
+  await policy.triageTurn({
+    channel: 'sms',
+    text: 'How much is Pro? cvv two three four',
+    state: seeded,
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      seededPayload = JSON.stringify(request.messages);
+      return answer('Pro is $79 per month.');
+    },
+  });
+  assert.doesNotMatch(seededPayload, /4111|two three four/);
+  assert.match(seededPayload, /\[redacted\]/);
+  const cardStore = tempStore();
+  cardStore.saveThread('+15551119100', {
+    turns: 1,
+    history: [{ role: 'user', content: '4111|1111|1111|1111 cvv two three four' }],
+  });
+  assert.doesNotMatch(fs.readFileSync(path.join(cardStore.directory, 'threads.json'), 'utf8'), /4111|two three four/);
+
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    h.setComplete(async () => answer('Noted 4111_1111_1111_1111 and cvv two three four already.'));
+    const opener = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119110',
+      Body: 'How much is Starter?',
+      MessageSid: 'SM_CARD_OPEN',
+    });
+    const openerXml = await opener.text();
+    assert.match(openerXml, /\[redacted\]/);
+    assert.doesNotMatch(openerXml, /4111|two three four/);
+    const threadsPath = path.join(h.store.directory, 'threads.json');
+    assert.doesNotMatch(fs.readFileSync(threadsPath, 'utf8'), /4111|two three four/);
+    assert.match(fs.readFileSync(threadsPath, 'utf8'), /\[redacted\]/);
+
+    let payload = '';
+    h.setComplete(async (request) => {
+      payload = JSON.stringify(request.messages);
+      return answer('Pro is $79 per month.');
+    });
+    const follow = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119110',
+      Body: 'And Pro? cvv two three four',
+      MessageSid: 'SM_CARD_FOLLOW',
+    });
+    assert.match(await follow.text(), /\$79/);
+    assert.doesNotMatch(payload, /4111|two three four/);
+    assert.match(payload, /\[redacted\]/);
+    assert.doesNotMatch(fs.readFileSync(threadsPath, 'utf8'), /4111|two three four/);
+
+    const before = h.completions.length;
+    for (const [sid, body] of [
+      ['SM_CARD_US', '4111_1111_1111_1111'],
+      ['SM_CARD_STAR', '4111*1111*1111*1111'],
+      ['SM_CARD_COLON', '4111:1111:1111:1111'],
+      ['SM_CARD_PIPE', '4111|1111|1111|1111'],
+      ['SM_CARD_EN', '4111\u20131111\u20131111\u20131111'],
+      ['SM_CARD_EM', '4111\u20141111\u20141111\u20141111'],
+    ]) {
+      const refused = await postTwilio(base, h.env, '/api/twilio/sms', {
+        From: '+15551119111',
+        Body: body,
+        MessageSid: sid,
+      });
+      assert.match(await refused.text(), /cannot take card numbers/, body);
+    }
+    assert.equal(h.completions.length, before);
+    assert.doesNotMatch(fs.readFileSync(threadsPath, 'utf8'), /4111/);
+
+    const order = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119112',
+      Body: 'order 4111-1111-1111-1111',
+      MessageSid: 'SM_ORDER_ID',
+    });
+    assert.doesNotMatch(await order.text(), /cannot take card numbers/);
+    assert.match(JSON.stringify(h.completions.at(-1).messages), /order 4111-1111-1111-1111/);
+  });
+
+  const bills = harness();
+  await withServer(bills.app, async ({ base }) => {
+    bills.env.PUBLIC_BASE_URL = base;
+    const samples = [
+      ['+15551119201', 'Unsubscribe. Also I was charged twice.', /charged twice/],
+      ['+15551119202', 'remove me, I was charged twice', /charged twice/],
+      ['+15551119203', 'Stop, I want a refund', /refund/],
+      ['+15551119204', 'STOP charging my card', /charg/],
+    ];
+    for (const [phone, body, pattern] of samples) {
+      assert.equal(isOptOutMessage(body), true, body);
+      assert.equal(policy.classify(body), 'billing', body);
+      const res = await postTwilio(base, bills.env, '/api/twilio/sms', {
+        From: phone,
+        Body: body,
+        MessageSid: `SM_${phone}`,
+      });
+      assert.match(await res.text(), /unsubscribed/i, body);
+      assert.equal(bills.store.isOptedOut(phone), true, body);
+    }
+    assert.equal(bills.sent.length, samples.length);
+    for (let i = 0; i < samples.length; i += 1) {
+      assert.equal(bills.sent[i].to, '+15550001111', samples[i][1]);
+      assert.match(bills.sent[i].body, /billing/i, samples[i][1]);
+      assert.match(bills.sent[i].body, samples[i][2], samples[i][1]);
+    }
+    const pro = await postTwilio(base, bills.env, '/api/twilio/sms', {
+      From: '+15551119205',
+      Body: 'How do I unsubscribe from Pro?',
+      MessageSid: 'SM_PRO_Q',
+    });
+    assert.doesNotMatch(await pro.text(), /unsubscribed/i);
+    assert.equal(bills.store.isOptedOut('+15551119205'), false);
+    assert.equal(bills.sent.length, samples.length + 1);
+    const removed = await postTwilio(base, bills.env, '/api/twilio/sms', {
+      From: '+15551119206',
+      Body: 'remove me from the Pro subscription',
+      MessageSid: 'SM_PRO_REMOVE',
+    });
+    assert.doesNotMatch(await removed.text(), /unsubscribed/i);
+    assert.equal(bills.store.isOptedOut('+15551119206'), false);
+  });
+
+  for (const phrase of [
+    'Step 7: tighten the bolts',
+    'Fusion splicing',
+    'Rockwell hardness test',
+    'Go to step 7',
+    'fusion welding',
+    'The inventor of this machine',
+    'Google it',
+    'Hi, this is Claude Schneider',
+    'Inventory stays on the shelf',
+  ]) {
+    assert.equal(policy.applyGuardrails(phrase, env), phrase, phrase);
+  }
+  const scrubbed = [
+    ['I\'m Claude', /claude/i],
+    ['I am Claude', /claude/i],
+    ['I was made by Anthropic', /anthropic/i],
+    ['This model was built by OpenAI', /openai/i],
+    ['I was trained by Google', /google/i],
+    ['GOOGLE', /google/i],
+    ['google', /google/i],
+    ['gpt4', /gpt/i],
+    ['Allen\u2013Bradley', /allen|bradley/i],
+    ['inventor files', /inventor/i],
+    ['Schneider', /schneider/i],
+    ['Modicon', /modicon/i],
+    ['EcoStruxure', /ecostruxure/i],
+  ];
+  for (const [phrase, pattern] of scrubbed) {
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.notEqual(cleaned, phrase, phrase);
+    assert.doesNotMatch(cleaned, pattern, phrase);
+  }
+});
