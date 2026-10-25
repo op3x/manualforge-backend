@@ -7,7 +7,7 @@ const twilio = require('twilio');
 const { WebSocket } = require('ws');
 const { createApp } = require('../server');
 const { createSupportStore, removeTestSupportDirectories } = require('../lib/support/store');
-const { CONSENT_LIMIT } = require('../lib/support/http');
+const { CONSENT_LIMIT, createConsentLimiter } = require('../lib/support/http');
 const { createSmtpMailer } = require('../lib/support/mail');
 const policy = require('../lib/support/policy');
 
@@ -202,7 +202,10 @@ test('policy facts, budget math, guardrails, and caps', async () => {
   const prompt = policy.systemPrompt({}, 'voice');
   assert.match(prompt, /Starter is \$39 one-time for 3 manuals/);
   assert.match(prompt, /\$79 per month/);
-  assert.match(prompt, /31-day policy/);
+  assert.match(prompt, /Starter within 30 days of purchase/);
+  assert.match(prompt, /before that billing period ends/);
+  assert.match(prompt, /Never promise a refund/);
+  assert.doesNotMatch(prompt, /31-day/);
   assert.match(prompt, /support@manualos\.com/);
   assert.match(prompt, /not launched/);
   assert.doesNotMatch(prompt, /2,490/);
@@ -213,6 +216,11 @@ test('policy facts, budget math, guardrails, and caps', async () => {
   const cost = policy.tokenCost({ prompt_tokens: 1_000_000, completion_tokens: 1_000_000 });
   assert.ok(Math.abs(cost.usd - 0.75) < 1e-8);
   assert.equal(policy.containsCardNumber('4111 1111 1111 1111'), true);
+  assert.equal(policy.containsCardNumber('credit card'), false);
+  assert.equal(policy.containsCardNumber('debit card'), false);
+  assert.equal(policy.containsCardNumber('card number'), false);
+  assert.equal(policy.containsCardNumber('cvv'), false);
+  assert.equal(policy.classify('Was my credit card charged twice?'), 'billing');
   assert.equal(policy.containsCardNumber('4111-1111-1111-1111'), true);
   assert.equal(policy.containsCardNumber('Starter is $39'), false);
   assert.equal(policy.redactCardNumbers('card 4111111111111111 thanks'), 'card [redacted] thanks');
@@ -949,23 +957,41 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
   assert.match(smsBoth.reply, /A person will follow up by text/);
   assert.doesNotMatch(smsBoth.reply, /4111|four one/i);
 
-  for (const phrase of [
+  const refundPromises = [
     "I'll refund the charge",
     'I refunded you yesterday',
     'Your refund is on its way',
     'You can get your money back',
     'We can issue a refund',
-  ]) {
+    "we'll refund you",
+    'we will refund you',
+    "I've issued a refund",
+    'I have issued a refund',
+    'Your refund is on the way',
+    'You are eligible for a full refund',
+    'you will get your money back',
+    'You will receive a full refund',
+    'Your refund has been processed',
+    'I am going to approve a refund',
+    'The money will be refunded today',
+  ];
+  assert.ok(refundPromises.length >= 12);
+  for (const phrase of refundPromises) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
     const cleaned = policy.applyGuardrails(phrase, env);
     assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
-    assert.doesNotMatch(cleaned, /I'll refund|refunded you|on its way|money back/i);
+    assert.doesNotMatch(cleaned, /I'll refund|we'll refund|issued a refund|on the way|on its way|money back|eligible for a full refund|will be refunded/i, phrase);
   }
+  const policyLine = 'A purchase can be refunded only if no manual from it has been delivered: Starter within 30 days of purchase, Pro and Integrator charges before that billing period ends.';
+  assert.equal(policy.promisesRefund(policyLine), false);
+  assert.equal(policy.promisesRefund('I cannot approve or issue a refund'), false);
+  assert.equal(policy.classify('please unsubscribe me'), '');
 
   const branded = policy.applyGuardrails(
-    'Open Studio 5000, RSLogix, ControlLogix, TIA Portal, CODESYS, GX Works, Creo, and CATIA. Ask your PLC vendor TIA Portal.',
+    'Open Studio 5000, RSLogix, ControlLogix, CompactLogix, Logix Designer, Simatic, Step 7, TIA Portal, TwinCAT, Beckhoff, FactoryTalk, Inventor, Fusion 360, Fusion, CODESYS, GX Works, Creo, and CATIA. OpenAI, ChatGPT, GPT, Twilio, Google, Anthropic, and Claude helped. Ask your PLC vendor TIA Portal.',
     env,
   );
-  assert.doesNotMatch(branded, /studio|rslogix|controllogix|tia|portal|codesys|works|creo|catia/i);
+  assert.doesNotMatch(branded, /studio|rslogix|controllogix|compactlogix|logix|simatic|step\s*7|tia|portal|twincat|beckhoff|factorytalk|inventor|fusion|codesys|works|creo|catia|openai|chatgpt|\bgpt\b|twilio|google|anthropic|claude/i);
   assert.doesNotMatch(branded, /vendor\s+your/i);
   assert.match(branded, /your PLC software/);
 
@@ -1188,20 +1214,28 @@ test('consent is rate limited, append-only, and split from the other files', asy
     const headers = {
       'Content-Type': 'application/json',
       Origin: 'https://manualos.com',
-      'X-Real-IP': '198.51.100.10',
-      'X-Forwarded-For': '203.0.113.9, 10.0.0.8',
+      'X-Real-IP': '198.51.100.77',
+      'X-Forwarded-For': '203.0.113.9, 198.51.100.10',
     };
     for (let i = 0; i < CONSENT_LIMIT; i += 1) {
       const res = await fetch(`${base}/api/support/sms-consent`, {
         method: 'POST',
-        headers: { ...headers, 'X-Forwarded-For': `203.0.113.${i}, 10.0.0.8` },
+        headers: {
+          ...headers,
+          'X-Real-IP': `203.0.113.${i}`,
+          'X-Forwarded-For': `203.0.113.${i}, 198.51.100.10`,
+        },
         body: JSON.stringify({ phone: `+1555400${String(i).padStart(4, '0')}`, consentTextVersion: 'v1', source: 'form' }),
       });
       assert.equal(res.status, 201, `consent ${i}`);
     }
     const blocked = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
-      headers: { ...headers, 'X-Forwarded-For': '198.51.100.99, 10.0.0.8' },
+      headers: {
+        ...headers,
+        'X-Real-IP': '198.51.100.99',
+        'X-Forwarded-For': '198.51.100.99, 198.51.100.10',
+      },
       body: JSON.stringify({ phone: '+15554009999', consentTextVersion: 'v1', source: 'form' }),
     });
     assert.equal(blocked.status, 429);
@@ -1209,12 +1243,26 @@ test('consent is rate limited, append-only, and split from the other files', asy
     assert.equal(h.store.listConsents()[0].ip, '198.51.100.10');
     const other = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
-      headers: { ...headers, 'X-Real-IP': '198.51.100.11' },
+      headers: {
+        ...headers,
+        'X-Real-IP': '203.0.113.50',
+        'X-Forwarded-For': '203.0.113.50, 198.51.100.11',
+      },
       body: JSON.stringify({ phone: '+15554008888', consentTextVersion: 'v1', source: 'form' }),
     });
     assert.equal(other.status, 201);
     assert.equal(h.store.listConsents().at(-1).ip, '198.51.100.11');
   });
+
+  let clock = 0;
+  const limiter = createConsentLimiter({ limit: 1, windowMs: 1000, maxKeys: 2, now: () => clock });
+  assert.equal(limiter('198.51.100.1'), false);
+  assert.equal(limiter('198.51.100.1'), true);
+  assert.equal(limiter('198.51.100.2'), false);
+  assert.equal(limiter('198.51.100.3'), true);
+  assert.equal(limiter('198.51.100.1'), true);
+  clock = 1000;
+  assert.equal(limiter('198.51.100.3'), false);
 
   const store = tempStore();
   store.addUsage('2026-10', { inputTokens: 3, outputTokens: 4, usd: 0.2 });
@@ -1363,6 +1411,7 @@ test('a failed escalation text calls and emails the owner once', async () => {
     const thread = store.getThread('+15553000040');
     store.saveSmsNotice('SM_LATE', {
       key: `sms:+15553000040:${thread.startedAt}:complaint`,
+      interaction: `sms:+15553000040:${thread.startedAt}`,
       category: 'complaint',
       from: '+15553000040',
       line: 'complaint: card 4111111111111111',
@@ -1392,11 +1441,9 @@ test('a failed escalation text calls and emails the owner once', async () => {
       }),
     });
     assert.match(await dialing.text(), /<Dial /);
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
     assert.equal(emails.length, 2);
-    assert.match(calls[1].twiml, /Category safety/);
-    assert.match(calls[1].twiml, /Caller needs help/);
-    assert.doesNotMatch(calls[1].twiml, /4111|https?:/);
+    assert.match(emails[1].text, /Category: safety/);
     assert.match(emails[1].text, /Caller needs help/);
     assert.doesNotMatch(emails[1].text, /4111/);
   });
@@ -1577,6 +1624,7 @@ test('missing SMTP skips the escalation email and still calls', async () => {
       const thread = store.getThread('+15553000070');
       store.saveSmsNotice('SM_NO_SMTP_LATE', {
         key: `sms:+15553000070:${thread.startedAt}:complaint`,
+        interaction: `sms:+15553000070:${thread.startedAt}`,
         category: 'complaint',
         from: '+15553000070',
         line: 'still furious',
@@ -1606,6 +1654,280 @@ test('missing SMTP skips the escalation email and still calls', async () => {
   assert.match(logged, /Escalation email skipped: ESCALATION_EMAIL is not set/);
   assert.equal(logged.split('SMTP is not configured').length - 1, 1);
   assert.doesNotMatch(logged, /smtp-secret-should-not-log/);
+});
+
+test('billing and complaint messages that mention a card still reach the owner', async () => {
+  const pan = "I'm furious, you charged my card 4111 1111 1111 1111";
+  const question = 'Was my credit card charged twice?';
+  for (const channel of ['sms', 'voice']) {
+    const plain = await policy.triageTurn({
+      channel,
+      text: question,
+      state: state(),
+      env: aiEnv(),
+      spentUsd: 0,
+      complete: async () => { throw new Error('should not call'); },
+    });
+    assert.equal(plain.reason, 'billing', channel);
+    assert.equal(plain.escalate, true, channel);
+    assert.equal(plain.handoff, true, channel);
+    const digits = await policy.triageTurn({
+      channel,
+      text: pan,
+      state: state(),
+      env: aiEnv(),
+      spentUsd: 0,
+      complete: async () => { throw new Error('should not call'); },
+    });
+    assert.equal(digits.escalate, true, channel);
+    assert.equal(digits.handoff, true, channel);
+    assert.match(digits.reply, /cannot take card numbers/i, channel);
+    assert.doesNotMatch(`${digits.reply} ${digits.summary}`, /4111/, channel);
+  }
+
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const first = await postTwilio(base, h.env, '/api/twilio/voice', {
+      CallSid: 'CA_CARD_WORDS',
+      From: '+15551117001',
+      To: '+15557654321',
+    });
+    const relay = relayUrlFrom(await first.text());
+    const client = await openRelay(relay, twilio.getExpectedTwilioSignature(TOKEN, relay, {}));
+    try {
+      client.send({ type: 'setup', callSid: 'CA_CARD_WORDS', from: '+15551117001' });
+      client.send({ type: 'prompt', voicePrompt: question, lang: 'en-US', last: true });
+      const spoken = await client.next();
+      const ended = await client.next();
+      assert.equal(ended.type, 'end');
+      assert.equal(JSON.parse(ended.handoffData).reason, 'billing');
+      assert.match(spoken.token, /Connecting you now/);
+      const handoff = await postTwilio(base, h.env, '/api/twilio/voice/handoff', {
+        CallSid: 'CA_CARD_WORDS',
+        From: '+15551117001',
+        CallStatus: 'in-progress',
+        HandoffData: ended.handoffData,
+      });
+      assert.match(await handoff.text(), /<Dial /);
+      assert.equal(h.sent.length, 1);
+      assert.match(h.sent[0].body, /billing|charged/i);
+    } finally {
+      client.ws.close();
+    }
+
+    const second = await postTwilio(base, h.env, '/api/twilio/voice', {
+      CallSid: 'CA_CARD_DIGITS',
+      From: '+15551117002',
+      To: '+15557654321',
+    });
+    const relay2 = relayUrlFrom(await second.text());
+    const client2 = await openRelay(relay2, twilio.getExpectedTwilioSignature(TOKEN, relay2, {}));
+    try {
+      client2.send({ type: 'setup', callSid: 'CA_CARD_DIGITS', from: '+15551117002' });
+      client2.send({ type: 'prompt', voicePrompt: pan, lang: 'en-US', last: true });
+      const spoken = await client2.next();
+      const ended = await client2.next();
+      assert.match(spoken.token, /cannot take card numbers/i);
+      assert.doesNotMatch(spoken.token, /4111/);
+      const data = JSON.parse(ended.handoffData);
+      assert.equal(data.handoff, true);
+      assert.doesNotMatch(data.summary, /4111/);
+      const handoff = await postTwilio(base, h.env, '/api/twilio/voice/handoff', {
+        CallSid: 'CA_CARD_DIGITS',
+        From: '+15551117002',
+        CallStatus: 'in-progress',
+        HandoffData: ended.handoffData,
+      });
+      assert.match(await handoff.text(), /<Dial /);
+      assert.equal(h.sent.length, 2);
+      assert.doesNotMatch(h.sent[1].body, /4111/);
+      assert.match(h.sent[1].body, /furious|charged|billing/i);
+    } finally {
+      client2.ws.close();
+    }
+  });
+
+  const texts = harness();
+  await withServer(texts.app, async ({ base }) => {
+    texts.env.PUBLIC_BASE_URL = base;
+    const plain = await postTwilio(base, texts.env, '/api/twilio/sms', {
+      From: '+15551117003',
+      Body: question,
+      MessageSid: 'SM_CARD_WORDS',
+    });
+    assert.match(await plain.text(), /follow up|cannot approve or issue a refund/i);
+    assert.equal(texts.sent.length, 1);
+    const furious = await postTwilio(base, texts.env, '/api/twilio/sms', {
+      From: '+15551117004',
+      Body: pan,
+      MessageSid: 'SM_CARD_DIGITS',
+    });
+    const xml = await furious.text();
+    assert.match(xml, /cannot take card numbers/i);
+    assert.doesNotMatch(xml, /4111/);
+    assert.equal(texts.sent.length, 2);
+    assert.doesNotMatch(texts.sent[1].body, /4111/);
+    assert.match(texts.sent[1].body, /furious|charged|billing/i);
+  });
+});
+
+test('one call gets one fallback call and one fallback email', async () => {
+  const calls = [];
+  const emails = [];
+  const store = tempStore();
+  const env = escalationEnv({ ESCALATION_EMAIL: 'ryan@manualos.com' });
+  const app = escalationApp({
+    env,
+    store,
+    calls,
+    mailer: { sendMail: async (message) => { emails.push(message); } },
+    onMessage: async () => {
+      const err = new Error('toll-free unverified');
+      err.status = 400;
+      throw err;
+    },
+  });
+  await withServer(app, async ({ base }) => {
+    env.PUBLIC_BASE_URL = base;
+    const handoff = await postTwilio(base, env, '/api/twilio/voice/handoff', {
+      CallSid: 'CA_ONE_CALL',
+      From: '+15553000080',
+      CallStatus: 'in-progress',
+      HandoffData: JSON.stringify({ handoff: true, reason: 'safety', summary: 'Caller needs help', from: '+15553000080' }),
+    });
+    assert.match(await handoff.text(), /<Dial /);
+    assert.equal(calls.length, 0);
+    assert.equal(emails.length, 1);
+
+    const busy = await postTwilio(base, env, '/api/twilio/voice/dial-status', {
+      CallSid: 'CA_ONE_CALL',
+      From: '+15553000080',
+      DialCallStatus: 'busy',
+    });
+    assert.match(await busy.text(), /<Record /);
+    assert.equal(calls.length, 0);
+    assert.equal(emails.length, 1);
+
+    const transcript = await postTwilio(base, env, '/api/twilio/voice/transcription', {
+      CallSid: 'CA_ONE_CALL',
+      From: '+15553000080',
+      TranscriptionSid: 'TR_ONE',
+      TranscriptionStatus: 'completed',
+      TranscriptionText: 'Please call me back.',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE1',
+    });
+    assert.equal(transcript.status, 200);
+    const recording = await postTwilio(base, env, '/api/twilio/voice/recording', {
+      CallSid: 'CA_ONE_CALL',
+      From: '+15553000080',
+      RecordingSid: 'RE_ONE',
+      RecordingStatus: 'completed',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE1',
+    });
+    assert.equal(recording.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+    assert.match(calls[0].twiml, /Category voicemail/);
+    assert.doesNotMatch(calls[0].twiml, /https?:/);
+  });
+});
+
+test('an escalation text with no message id falls back', async () => {
+  const calls = [];
+  const emails = [];
+  const store = tempStore();
+  const env = escalationEnv({ ESCALATION_EMAIL: 'ryan@manualos.com' });
+  const app = escalationApp({
+    env,
+    store,
+    calls,
+    mailer: { sendMail: async (message) => { emails.push(message); } },
+    onMessage: async () => ({}),
+  });
+  await withServer(app, async ({ base }) => {
+    env.PUBLIC_BASE_URL = base;
+    const sms = await postTwilio(base, env, '/api/twilio/sms', {
+      From: '+15553000090',
+      Body: 'I am furious',
+      MessageSid: 'SM_NO_SID',
+    });
+    assert.match(await sms.text(), /person will follow up/);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+    assert.match(calls[0].twiml, /Category complaint/);
+    assert.equal(emails[0].to, 'ryan@manualos.com');
+  });
+});
+
+test('free-text opt-out does not escalate and YES opts back in', async () => {
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const before = h.sent.length;
+    const opt = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15553000100',
+      Body: 'please unsubscribe me',
+      MessageSid: 'SM_UNSUB',
+    });
+    assert.match(await opt.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15553000100'), true);
+    assert.equal(h.sent.length, before);
+    const yes = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15553000100',
+      Body: 'YES',
+      MessageSid: 'SM_YES',
+    });
+    assert.match(await yes.text(), /Msg frequency varies/);
+    assert.equal(h.store.isOptedOut('+15553000100'), false);
+    assert.equal(h.sent.length, before);
+  });
+});
+
+test('a toll-free STOP reply failure is logged and does not page', async () => {
+  const calls = [];
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  const store = tempStore();
+  const env = escalationEnv({ ESCALATION_EMAIL: 'ryan@manualos.com' });
+  const app = escalationApp({
+    env,
+    store,
+    calls,
+    mailer: { sendMail: async () => { throw new Error('mail should not be called'); } },
+    onMessage: async () => {
+      const err = new Error('toll-free unverified');
+      err.status = 400;
+      throw err;
+    },
+  });
+  try {
+    await withServer(app, async ({ base }) => {
+      env.PUBLIC_BASE_URL = base;
+      const stop = await postTwilio(base, env, '/api/twilio/sms', {
+        From: '+15553000110',
+        Body: 'STOP',
+        MessageSid: 'SM_STOP_TOLL',
+      });
+      assert.equal(stop.status, 200);
+      assert.match(await stop.text(), /unsubscribed/i);
+      assert.equal(store.isOptedOut('+15553000110'), true);
+      assert.equal(calls.length, 0);
+      const status = await postTwilio(base, env, '/api/twilio/sms/status', {
+        MessageSid: 'SM_STOP_TOLL',
+        MessageStatus: 'undelivered',
+        ErrorCode: '30034',
+      });
+      assert.equal(status.status, 200);
+      assert.equal(calls.length, 0);
+    });
+  } finally {
+    console.error = original;
+  }
+  const logged = errors.join('\n');
+  assert.match(logged, /Twilio message was not delivered/);
+  assert.doesNotMatch(logged, /twilio-test-auth-token|sk-test/);
 });
 
 test('after-hours billing calls and complaint texts escalate', async () => {

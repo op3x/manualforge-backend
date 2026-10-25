@@ -118,6 +118,8 @@ function createApp({
   const store = jobs || createJobStore({ env });
   const app = express();
   app.disable('x-powered-by');
+  // Railway is one proxy hop. req.ip is the client that hop saw, not a header the client can rotate.
+  app.set('trust proxy', 1);
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
