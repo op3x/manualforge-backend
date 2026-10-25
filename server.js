@@ -12,11 +12,11 @@ const {
   isProduction,
 } = require('./lib/config');
 const {
-  accessBlock,
   assertCanGenerate,
   blockForAccess,
   checkoutParams,
   isStripeNotFound,
+  checkoutSessionOf,
   publicAccess,
   commitStarterCredit,
   recordStarterManual,
@@ -66,6 +66,15 @@ const {
 } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
+const caBusiness = require('./lib/ca-business');
+const {
+  caGateEnabled,
+  ensureBillingAddressCollection,
+  createCaAttestationStore,
+  applyCaBusinessBackstop,
+  assertCaPurchaseAllowed,
+  caCheckoutStorageReady,
+} = caBusiness;
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -315,6 +324,7 @@ function createApp({
   now,
   onStripeEvent,
   creditLedger,
+  parseCaCheckoutFields = caBusiness.parseCaCheckoutFields,
   scheduleTimeout = setTimeout,
   cancelTimeout = clearTimeout,
 } = {}) {
@@ -340,6 +350,43 @@ function createApp({
     verifyCache.set(sessionId, { at: clock(), body: { ...body } });
   }
   const ledger = creditLedger || createCreditLedger({ env });
+  const caAttestations = createCaAttestationStore({ env });
+
+  async function expireCheckoutSession(sessionId) {
+    const expire = stripeClient && stripeClient.checkout && stripeClient.checkout.sessions && stripeClient.checkout.sessions.expire;
+    if (!sessionId || typeof expire !== 'function') return;
+    try {
+      await expire.call(stripeClient.checkout.sessions, sessionId);
+    } catch {
+      console.error('Checkout session could not be expired', maskSessionId(sessionId));
+    }
+  }
+
+  async function enforceCaPurchase(sessionId, access) {
+    await assertCaPurchaseAllowed({
+      stripe: stripeClient,
+      sessionId,
+      env,
+      store: caAttestations,
+      session: access ? checkoutSessionOf(access) : undefined,
+    });
+  }
+
+  async function blockAfterCa(sessionId) {
+    if (!sessionId || !stripeClient) return null;
+    let access;
+    try {
+      access = await verifyCheckoutSession(stripeClient, sessionId, env);
+    } catch (err) {
+      if (isStripeNotFound(err)) {
+        return { status: 402, message: 'Payment required. This checkout session is not valid.' };
+      }
+      throw err;
+    }
+    await enforceCaPurchase(sessionId, access);
+    return blockForAccess(access);
+  }
+
   jobTimeoutMs(env);
   warnSupportDataDir(env);
   ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
@@ -406,6 +453,13 @@ function createApp({
     } catch {
       console.error('Support data directory check failed');
     }
+    let caBackstopRefunds = 0;
+    try {
+      caBackstopRefunds = caAttestations.refundCount();
+    } catch {
+      caBackstopRefunds = null;
+      console.error('Canadian business refund count could not be read');
+    }
     res.json({
       status: 'ok',
       service: 'manualos-backend',
@@ -417,6 +471,7 @@ function createApp({
       creditLedgerOk,
       supportDataDirOk: dataDirOk,
       portalTokens: portalTokensEnabled(env),
+      caBackstopRefunds,
     });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -464,7 +519,16 @@ function createApp({
       return res.json({ received: true });
     }
     try {
-      if (typeof onStripeEvent === 'function') {
+      const backstop = await applyCaBusinessBackstop({
+        stripe: stripeForEvent,
+        event,
+        env,
+        store: caAttestations,
+        now: clock,
+      });
+      if (backstop.blocked) {
+        logWebhookEvent(event);
+      } else if (typeof onStripeEvent === 'function') {
         await onStripeEvent(event);
       } else {
         const starterResult = await applyStarterChargeEvent(stripeForEvent, event);
@@ -498,6 +562,15 @@ function createApp({
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       const plan = req.body && req.body.plan;
+      const gate = caGateEnabled(env);
+      const caFields = gate ? parseCaCheckoutFields(req.body) : null;
+      if (gate && caFields.caBusinessAttestation === true && !caCheckoutStorageReady(env)) {
+        console.error('Canadian business attestation cannot be stored');
+        const err = new Error('Checkout is temporarily unavailable.');
+        err.status = 500;
+        err.expose = true;
+        throw err;
+      }
       // #13 order is withCheckoutPolicy around checkout params. #10's withAttribution
       // wraps that result (either order). #16 applyManualosCheckout may replace the
       // price. Consent metadata is applied after that and only writes metadata, so it
@@ -505,7 +578,8 @@ function createApp({
       // the 400; present consent is stored either way. withManualosBrand stamps brand.
       // #17 rebuilds these params from checkoutParams when a product has no tax code.
       // applyCheckoutConsent and withManualosBrand have to run after that rebuild.
-      const params = withManualosBrand(applyCheckoutConsent(
+      // The Canadian attestation is not written onto these params.
+      let params = withManualosBrand(applyCheckoutConsent(
         await applyManualosCheckout(
           stripeClient,
           withCheckoutPolicy(checkoutParams(plan, env), { plan, env }),
@@ -514,10 +588,30 @@ function createApp({
         req.body,
         { ip: requestIp(req), now: clock(), env },
       ));
+      if (gate) params = ensureBillingAddressCollection(params);
       const session = await stripeClient.checkout.sessions.create(params);
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      }
+      if (gate && caFields.caBusinessAttestation === true) {
+        try {
+          const customerId = typeof session.customer === 'string'
+            ? session.customer
+            : (session.customer && session.customer.id) || params.customer;
+          await caAttestations.record({
+            sessionId: session.id,
+            customerId,
+            userId: session.client_reference_id,
+            at: new Date(clock()).toISOString(),
+            billingCountry: caFields.billingCountry,
+            caBusinessAttestation: true,
+            attestationVersion: caFields.attestationVersion,
+          });
+        } catch (err) {
+          await expireCheckoutSession(session && session.id);
+          throw err;
+        }
       }
       return res.json({ url: session.url });
     } catch (err) {
@@ -707,6 +801,7 @@ function createApp({
       let body;
       try {
         const access = await verifyCheckoutSession(stripeClient, sessionId, env);
+        await enforceCaPurchase(sessionId, access);
         body = publicAccess(access);
       } catch (err) {
         if (!isStripeNotFound(err)) throw err;
@@ -743,6 +838,7 @@ function createApp({
         }
         throw err;
       }
+      await enforceCaPurchase(sessionId, access);
       if (!access || !access.plan) {
         return res.status(404).json({ error: 'No purchase was found for this session.', code: 'purchase_not_found' });
       }
@@ -855,7 +951,14 @@ function createApp({
   async function runPaid(req, res, { reserveAtStart, respond }) {
     const caller = await generationCaller(req);
     verifyCache.delete(caller.sessionId);
-    const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
+    const loaded = await verifyCheckoutSession(stripeClient, caller.sessionId, env).catch((err) => {
+      if (isStripeNotFound(err)) {
+        throw exposed(404, 'No purchase was found for this session.', null, 'purchase_not_found');
+      }
+      throw err;
+    });
+    await enforceCaPurchase(caller.sessionId, loaded);
+    const access = await assertCanGenerate(stripeClient, caller.sessionId, env, loaded);
     const tooLong = overLengthField(req.body);
     if (tooLong) {
       throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
@@ -1029,7 +1132,7 @@ function createApp({
           stopRefresh();
           pageCount = pdfPageCount(result && result.pdf);
           try {
-            const block = await accessBlock(stripeClient, sessionId, env);
+            const block = await blockAfterCa(sessionId);
             if (block) throw blockedError(block);
             store.savePdf(job.id, result.pdf);
             if (result.pdf && result.pdf.length) stamp = await publishManual(access, sessionId);
@@ -1123,7 +1226,7 @@ function createApp({
       if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
       const sessionForBlock = job.sessionId || (caller && identityMatches(caller, job) ? caller.sessionId : '');
       if (sessionForBlock) {
-        const block = await accessBlock(stripeClient, sessionForBlock, env);
+        const block = await blockAfterCa(sessionForBlock);
         if (block) return res.status(block.status).json({ error: block.message });
       }
       const pdf = store.readPdf(job.id);
@@ -1162,7 +1265,7 @@ function createApp({
             env,
             renderPdf,
           });
-          const block = await accessBlock(stripeClient, sessionId, env);
+          const block = await blockAfterCa(sessionId);
           if (block) throw blockedError(block);
           if (!result.pdf || !result.pdf.length) {
             const err = new Error('Manual generation failed. Please try again.');
