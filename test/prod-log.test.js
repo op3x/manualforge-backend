@@ -140,12 +140,14 @@ test('an array, object, or repeated session_id is invalid and does not call Stri
     assert.equal(calls.retrieves, 0);
   }));
   const logged = lines.join('\n');
-  const hit = lines.find((line) => line.includes('...xxyz'));
-  assert.match(hit || '', /Rejected session id \(\.\.\.xxyz\)/);
+  const hit = lines.filter((line) => line.includes('Rejected session id')).pop();
+  assert.match(hit || '', /Rejected session id \(\.\.\.\*\*\*\*\)/);
   assert.equal(hit.includes('\r'), false);
+  assert.equal(hit.includes('\n'), false);
   assert.equal(hit.includes('\u0000'), false);
   assert.equal(hit.includes('\u202e'), false);
   assert.equal(logged.includes('cs_test_ok'), false);
+  assert.equal(logged.includes('xxyz'), false);
 });
 
 test('session ids are rejected before Stripe and only the last four characters are logged', async () => {
@@ -229,10 +231,11 @@ test('session ids are rejected before Stripe and only the last four characters a
   }));
 
   const logged = lines.join('\n');
-  assert.match(logged, /Rejected session id \(\.\.\.deup\)/);
   assert.match(logged, /Rejected session id \(\.\.\.\*\*\*\*\)/);
   assert.match(logged, /Rejected session id \(\.\.\.aaaa\)/);
   assert.equal(logged.includes('cs_made_up'), false);
+  assert.equal(logged.includes('e_up'), false);
+  assert.equal(logged.includes('deup'), false);
   assert.equal(logged.includes('not-a-session'), false);
   assert.equal(logged.includes('nope'), false);
   assert.equal(logged.includes(`cs_test_${'a'.repeat(20)}`), false);
@@ -641,4 +644,30 @@ test('an unbranded checkout event logs only the last 4 characters of the session
   assert.equal(combined.includes(unknownId), false);
   assert.equal(combined.includes('nobrand'), false);
   assert.equal(combined.includes('blankm'), false);
+
+  const dirtyId = 'cs_live_bad\r\nzz';
+  const dirtyLog = await capture('log', () => capture('error', () => withServer(app, async (base) => {
+    const dirty = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_dirty_checkout',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: dirtyId,
+            object: 'checkout.session',
+            payment_status: 'unpaid',
+            metadata: {},
+          },
+        },
+      }),
+    });
+    assert.equal(dirty.status, 200);
+  })));
+  const dirtyText = `${dirtyLog.lines.join('\n')}\n${dirtyLog.value.lines.join('\n')}`;
+  assert.match(dirtyText, /Webhook brand unknown checkout\.session\.completed evt_dirty_checkout \*\*\*\*/);
+  assert.equal(dirtyText.includes('\r'), false);
+  assert.equal(dirtyText.includes('\nzz'), false);
+  assert.equal(dirtyText.includes(dirtyId), false);
 });

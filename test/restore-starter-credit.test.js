@@ -404,6 +404,30 @@ test('the restore command rejects a live key and a bad id without printing them'
   assert.match(usage.stderr, /Usage/);
 });
 
+test('a restore audit stores stars when the last 4 are not alphanumeric', async () => {
+  const dir = tempDir();
+  const id = 'pi_xy';
+  const paid = fakeStripe({ manualsUsed: '1' });
+  try {
+    const result = await runRestore({
+      args: { apply: true, live: false, paymentIntentId: id, ticket: 'T-1' },
+      stripe: paid.stripe,
+      key: 'sk_test_secretvalue',
+      env: { SUPPORT_DATA_DIR: dir },
+    });
+    assert.equal(result.exitCode, 0);
+    const audit = fs.readFileSync(path.join(dir, 'credit-restores.jsonl'), 'utf8');
+    const line = JSON.parse(audit.trim());
+    assert.equal(line.paymentIntentId, '****');
+    assert.equal(audit.includes(id), false);
+    assert.equal(audit.includes('i_xy'), false);
+    assert.equal(audit.includes('\r'), false);
+    assert.equal(audit.includes('\n\n'), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a restore audit masks a short payment id completely', async () => {
   const dir = tempDir();
   const short = 'pi_1';

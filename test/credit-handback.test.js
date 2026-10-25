@@ -1134,6 +1134,30 @@ test('rewriting the hand-back queue keeps the rejected payment id count', () => 
   }
 });
 
+test('a payment id whose last 4 are not alphanumeric is stored as stars', () => {
+  const dir = tempDir();
+  const bad = 'ch_not_a_payment_intentAB\r\n';
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([{ paymentIntentId: bad, token: TOKEN }])}\n`);
+  const logs = [];
+  const original = console.warn;
+  console.warn = (...args) => logs.push(args.map(String).join(' '));
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    assert.equal(ledger.health().rejected, 1);
+    const warning = logs.find((line) => line.includes('not a PaymentIntent'));
+    assert.ok(warning);
+    assert.match(warning, /\(\.\.\.\*\*\*\*\)/);
+    assert.equal(warning.includes('\r'), false);
+    assert.equal(warning.includes('\n'), false);
+    assert.equal(warning.includes(bad), false);
+    assert.equal(warning.includes('AB'), false);
+  } finally {
+    console.warn = original;
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a payment id of 4 characters or fewer is masked completely', () => {
   const dir = tempDir();
   const short = 'ch_1';
