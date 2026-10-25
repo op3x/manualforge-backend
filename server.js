@@ -139,9 +139,9 @@ function rejectPortalTokens(res, env) {
   });
 }
 
-function tooMany(res, retryAfter) {
+function tooMany(res, retryAfter, error = 'Too many requests.') {
   if (retryAfter) res.set('Retry-After', String(retryAfter));
-  return res.status(429).json({ error: 'Too many requests.' });
+  return res.status(429).json({ error });
 }
 
 function bearerToken(req) {
@@ -495,6 +495,10 @@ function createApp({
 
   function callerNeedsLookup(caller, job) {
     if (!caller || !job || sessionMatches(caller, job)) return false;
+    // Read routes must not send a raw session id to Stripe. A bearer token
+    // already carries the customer and subscription ids. A new token is minted
+    // at POST /access-token.
+    if (caller.via !== 'token') return false;
     const customerBound = boundId(job.customerId) || boundId(job.customerIdHash);
     const subscriptionBound = boundId(job.subscriptionId) || boundId(job.subscriptionIdHash);
     if (!customerBound && !subscriptionBound) return false;
@@ -595,7 +599,9 @@ function createApp({
       const sessionId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
       if (!sessionId) return res.status(400).json({ error: 'session_id is required.' });
       const gate = tokenExchangeGate(sessionId, env);
-      if (!gate.ok) return tooMany(res, gate.retryAfter);
+      if (!gate.ok) {
+        return tooMany(res, gate.retryAfter, `Too many token exchanges. Try again in ${gate.retryAfter} seconds.`);
+      }
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });

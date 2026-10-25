@@ -165,6 +165,55 @@ test('cleanup interval is ten minutes, unrefd, and deletes aged pdfs by mtime', 
   }
 });
 
+test('a restart through SUPPORT_DATA_DIR keeps a two-hour-old PDF and drops a true orphan', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-support-'));
+  const supportEnv = { SUPPORT_DATA_DIR: root };
+  const clock = fakeClock(Date.UTC(2026, 4, 1, 12));
+  const first = createJobStore({
+    env: supportEnv,
+    now: () => clock.now(),
+    setInterval: (fn, ms) => clock.setInterval(fn, ms),
+    clearInterval: (timer) => clock.clearInterval(timer),
+  });
+  try {
+    assert.equal(first.dir, path.join(root, 'jobs'));
+    const job = first.create({ sessionId: 'cs_owner' });
+    first.savePdf(job.id, Buffer.from('%PDF-1.4\n%kept\n'));
+    job.status = 'succeeded';
+    first.persist(job);
+    const pdf = path.join(first.dir, `${job.id}.pdf`);
+    const sidecar = path.join(first.dir, `${job.id}.json`);
+    const orphan = path.join(first.dir, 'job_orphanold.pdf');
+    fs.writeFileSync(orphan, 'orphan');
+    const aged = clock.time - (2 * 60 * 60 * 1000);
+    touch(pdf, aged);
+    touch(sidecar, aged);
+    touch(orphan, aged);
+    const id = job.id;
+    first.close();
+
+    const restarted = createJobStore({
+      env: supportEnv,
+      now: () => clock.now(),
+      setInterval: (fn, ms) => clock.setInterval(fn, ms),
+      clearInterval: (timer) => clock.clearInterval(timer),
+    });
+    try {
+      const loaded = restarted.get(id);
+      assert.ok(loaded);
+      assert.equal(loaded.status, 'succeeded');
+      assert.equal(restarted.readPdf(id).toString().includes('%kept'), true);
+      assert.equal(restarted.ready().some((item) => item.id === id), true);
+      assert.equal(fs.existsSync(orphan), false);
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    first.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('startup sweep keeps recent orphan pdfs for one hour and still drops files older than 24 hours', () => {
   assert.equal(ORPHAN_GRACE_MS, 60 * 60 * 1000);
   const clock = fakeClock(Date.UTC(2026, 3, 2));
