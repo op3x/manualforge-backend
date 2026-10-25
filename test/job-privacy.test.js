@@ -261,6 +261,51 @@ test('no job file on disk contains the raw session id', () => {
   }
 });
 
+test('a finished PDF expires 24 hours after completedAt and the sweep is at most one interval late', () => {
+  const clock = fakeClock(Date.UTC(2026, 7, 1));
+  const dir = tempDir();
+  const store = openStore(clock, dir);
+  try {
+    const job = store.create();
+    const failed = store.create();
+    failed.status = 'failed';
+    store.persist(failed);
+    const queued = store.create();
+    assert.equal(failed.completedAt, undefined);
+    assert.equal(Date.parse(failed.expiresAt) - Date.parse(failed.createdAt), DAY_MS);
+    assert.equal(queued.completedAt, undefined);
+
+    clock.advance(2 * 60 * 60 * 1000);
+    store.savePdf(job.id, Buffer.from('%PDF-1.4 finished'));
+    job.status = 'succeeded';
+    store.persist(job);
+    const pdf = path.join(dir, `${job.id}.pdf`);
+    const finished = Date.parse(job.completedAt);
+    assert.equal(finished, clock.time);
+    assert.equal(Date.parse(job.expiresAt) - finished, DAY_MS);
+    assert.ok(finished > Date.parse(job.createdAt));
+
+    clock.advance(Date.parse(job.createdAt) + DAY_MS - clock.time);
+    assert.equal(store.get(failed.id), null);
+    assert.equal(store.get(queued.id), null);
+    assert.equal(fs.existsSync(pdf), true);
+    assert.ok(store.get(job.id));
+
+    const deadline = finished + DAY_MS;
+    clock.advance(deadline - clock.time - 1);
+    assert.equal(fs.existsSync(pdf), true);
+    assert.ok(store.get(job.id));
+
+    clock.advance(1 + CLEANUP_INTERVAL_MS);
+    assert.equal(fs.existsSync(pdf), false);
+    assert.equal(store.get(job.id), null);
+    assert.ok(clock.time <= deadline + CLEANUP_INTERVAL_MS);
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('lookup removes a job once its 24 hour expiry has passed', () => {
   const clock = fakeClock(Date.UTC(2026, 5, 1));
   const dir = tempDir();
