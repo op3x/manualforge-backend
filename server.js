@@ -11,6 +11,7 @@ const {
   isProduction,
 } = require('./lib/config');
 const {
+  accessBlock,
   assertCanGenerate,
   checkoutParams,
   isStripeNotFound,
@@ -21,12 +22,11 @@ const {
   verifyCheckoutSession,
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
-const {
-  applyManualosCheckout,
-  classifyStripeEvent,
-  createIdSet,
-  rememberManualosPayments,
-} = require('./lib/stripeBrand');
+const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
+const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
+const { applyPeriodAccessEvent } = require('./lib/period-access');
+const { applyOverageCreditEvent } = require('./lib/overage-credit');
+const { clearGenerationStarted, markFirstManualDelivered, markGenerationStarted, rollbackFirstManual } = require('./lib/delivery');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -42,11 +42,15 @@ function createStripe(env) {
 
 function sendError(res, err) {
   if (err && err.expose) {
-    if (err.logMessage) console.error(redactCustomerLog(err.logMessage));
+    if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
     return res.status(err.status || 500).json({ error: err.message });
   }
-  console.error(redactCustomerLog(err && err.stack ? err.stack : err));
+  console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
   return res.status(500).json({ error: 'Internal server error' });
+}
+
+function redactSecrets(value) {
+  return String(value || '').replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]');
 }
 
 function readSessionId(req) {
@@ -98,12 +102,30 @@ function logWebhookEvent(event) {
     case 'invoice.payment_failed':
     case 'charge.refunded':
     case 'charge.dispute.created':
+    case 'charge.dispute.closed':
     case 'radar.early_fraud_warning.created':
       console.log(event.type, object.id);
       break;
     default:
       console.log('Unhandled event:', event.type);
   }
+}
+
+function safeLogToken(value) {
+  if (typeof value !== 'string') return 'unknown';
+  if (!/^[A-Za-z0-9_.]{1,80}$/.test(value)) return 'unknown';
+  return value;
+}
+
+function isLoudUnknown(type) {
+  return typeof type === 'string' && (
+    type.startsWith('charge.')
+    || type.startsWith('refund.')
+    || type.startsWith('radar.early_fraud_warning.')
+    || type.startsWith('invoice.')
+    || type.startsWith('customer.subscription.')
+    || type.startsWith('checkout.session.')
+  );
 }
 
 function createApp({
@@ -118,13 +140,8 @@ function createApp({
   supportNow,
   mailer,
   onStripeEvent,
-  knownChargeIds,
-  knownCustomerIds,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
-  const knownCharges = createIdSet(knownChargeIds);
-  const knownCustomers = createIdSet(knownCustomerIds);
-  const handleStripeEvent = typeof onStripeEvent === 'function' ? onStripeEvent : logWebhookEvent;
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
@@ -158,23 +175,41 @@ function createApp({
     }
     let decision;
     try {
-      decision = await classifyStripeEvent(event, {
-        stripe: stripeClient,
-        env,
-        knownChargeIds: knownCharges,
-        knownCustomerIds: knownCustomers,
-      });
+      decision = await classifyStripeEvent(event, { stripe: stripeClient, env });
     } catch {
-      console.error('Webhook classification failed');
+      console.error('Webhook classification failed', safeLogToken(event && event.type), safeLogToken(event && event.id));
       return res.status(500).json({ error: 'Webhook processing failed' });
     }
-    if (decision !== 'ours') return res.json({ received: true });
+    if (decision === 'other') return res.json({ received: true });
+    if (decision !== 'ours') {
+      if (isLoudUnknown(event && event.type)) {
+        const object = event.data && event.data.object;
+        console.error(
+          'Webhook brand unknown',
+          safeLogToken(event.type),
+          safeLogToken(event.id),
+          safeLogToken(object && object.id),
+        );
+      }
+      return res.json({ received: true });
+    }
     try {
-      await handleStripeEvent(event);
-      rememberManualosPayments(knownCharges, knownCustomers, event);
-    } catch {
-      console.error('Webhook handler failed');
-      return res.status(500).json({ error: 'Webhook processing failed' });
+      if (typeof onStripeEvent === 'function') {
+        await onStripeEvent(event);
+      } else {
+        const starterResult = await applyStarterChargeEvent(stripeClient, event);
+        await applyPeriodAccessEvent(stripeClient, event, starterResult);
+        await applyOverageCreditEvent(stripeClient, event, starterResult);
+        logWebhookEvent(event);
+      }
+    } catch (err) {
+      const detail = err && err.message ? String(err.message) : 'error';
+      console.error(
+        'Webhook handler failed',
+        safeLogToken(event && event.type),
+        detail.replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]'),
+      );
+      return res.status(500).json({ error: 'Webhook handler failed' });
     }
     return res.json({ received: true });
   });
@@ -219,6 +254,29 @@ function createApp({
     }
   });
 
+  async function publishManual(access, sessionId) {
+    try {
+      return await markFirstManualDelivered(stripeClient, access, sessionId);
+    } catch (err) {
+      console.error(
+        'First manual delivery stamp failed',
+        access && access.plan ? access.plan : 'unknown',
+        redactSecrets(err && err.message),
+      );
+      const wrapped = new Error('Manual generation failed. Please try again.');
+      wrapped.status = 500;
+      wrapped.expose = true;
+      throw wrapped;
+    }
+  }
+
+  function blockedError(block) {
+    const err = new Error(block.message);
+    err.status = block.status;
+    err.expose = true;
+    return err;
+  }
+
   async function runPaid(req, res, { reserveAtStart, respond }) {
     const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
     const files = collectFiles(req);
@@ -259,7 +317,9 @@ function createApp({
     runPaid(req, res, {
       reserveAtStart: true,
       respond: async (access, files, credit, project) => {
-        const job = store.create();
+        const sessionId = readSessionId(req);
+        await markGenerationStarted(stripeClient, access, sessionId);
+        const job = store.create({ sessionId });
         res.status(202).json(publicJob(job));
         job.status = 'running';
         job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
@@ -276,20 +336,24 @@ function createApp({
               job.progress = { stage, percent, message };
             },
           });
+          const block = await accessBlock(stripeClient, sessionId, env);
+          if (block) throw blockedError(block);
+          if (result.pdf && result.pdf.length) await publishManual(access, sessionId);
           store.savePdf(job.id, result.pdf);
           job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
           job.warnings = result.warnings || [];
           job.status = 'succeeded';
           job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
         } catch (err) {
+          await clearGenerationStarted(stripeClient, access, sessionId);
           if (credit) {
             try {
               await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
             } catch (refundErr) {
-              console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
+              console.error('Starter credit refund failed', redactSecrets(refundErr && refundErr.message ? refundErr.message : refundErr));
             }
           }
-          console.error(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message)));
+          console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
           job.status = 'failed';
           job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
           job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
@@ -307,42 +371,70 @@ function createApp({
     return res.json(publicJob(job));
   });
 
-  app.get('/jobs/:id/pdf', (req, res) => {
-    const job = store.get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
-    if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
-    const pdf = store.readPdf(job.id);
-    if (!pdf) return res.status(404).json({ error: 'Job not found or expired.' });
-    res.set({
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': 'attachment; filename="manual.pdf"',
-      'Content-Length': pdf.length,
-    });
-    return res.send(pdf);
+  app.get('/jobs/:id/pdf', async (req, res) => {
+    try {
+      const job = store.get(req.params.id);
+      if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
+      if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
+      if (job.sessionId) {
+        const block = await accessBlock(stripeClient, job.sessionId, env);
+        if (block) return res.status(block.status).json({ error: block.message });
+      }
+      const pdf = store.readPdf(job.id);
+      if (!pdf) return res.status(404).json({ error: 'Job not found or expired.' });
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': 'attachment; filename="manual.pdf"',
+        'Content-Length': pdf.length,
+      });
+      return res.send(pdf);
+    } catch (err) {
+      return sendError(res, err);
+    }
   });
 
   app.post('/generate-manual', upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
       respond: async (access, files, credit, project) => {
-        const result = await generateManual({
-          files,
-          project,
-          fields: fieldsFrom(req),
-          anthropic: anthropicClient,
-          env,
-          renderPdf,
-        });
-        if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
-        res.set({
-          'Content-Type': 'application/pdf',
-          'Content-Disposition': 'attachment; filename="manual.pdf"',
-          'Content-Length': result.pdf.length,
-          Deprecation: 'true',
-          Link: '</jobs>; rel="successor-version"',
-          'X-ManualOS-Replacement': 'POST /jobs',
-        });
-        res.send(result.pdf);
+        const sessionId = readSessionId(req);
+        let stamp = null;
+        try {
+          await markGenerationStarted(stripeClient, access, sessionId);
+          const result = await generateManual({
+            files,
+            project,
+            fields: fieldsFrom(req),
+            anthropic: anthropicClient,
+            env,
+            renderPdf,
+          });
+          const block = await accessBlock(stripeClient, sessionId, env);
+          if (block) throw blockedError(block);
+          if (!result.pdf || !result.pdf.length) {
+            const err = new Error('Manual generation failed. Please try again.');
+            err.status = 500;
+            err.expose = true;
+            throw err;
+          }
+          stamp = await publishManual(access, sessionId);
+          if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
+          res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': 'attachment; filename="manual.pdf"',
+            'Content-Length': result.pdf.length,
+            Deprecation: 'true',
+            Link: '</jobs>; rel="successor-version"',
+            'X-ManualOS-Replacement': 'POST /jobs',
+          });
+          res.send(result.pdf);
+        } catch (err) {
+          if (stamp && stamp.created && !res.headersSent) {
+            await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
+          }
+          if (!res.headersSent) await clearGenerationStarted(stripeClient, access, sessionId);
+          throw err;
+        }
       },
     }).catch(next);
   });
@@ -365,7 +457,7 @@ function createApp({
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err && err.expose) return sendError(res, err);
-    console.error(redactCustomerLog(err && err.stack ? err.stack : err));
+    console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
     if (err && err.name === 'MulterError') {
       const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
       return res.status(400).json({ error: message });

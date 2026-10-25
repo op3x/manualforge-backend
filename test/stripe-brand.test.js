@@ -98,52 +98,53 @@ function invoiceObject(type, kind) {
 }
 
 function chargeObject(type, kind) {
+  const id = kind === 'unbranded' ? 'ch_known' : `ch_${tag(type, kind)}`;
+  const charge = {
+    id,
+    object: 'charge',
+    metadata: {},
+    customer: { id: `cus_${tag(type, kind)}`, metadata: {} },
+  };
   if (kind === 'unbranded') {
-    return {
-      id: 'ch_known',
-      object: 'charge',
-      customer: { id: 'cus_legacy_charge', metadata: {} },
-      payment_intent: 'pi_known',
-    };
+    charge.metadata = {};
+    charge.payment_intent = { id: 'pi_known', metadata: { plan: 'starter' } };
+    return charge;
   }
-  const id = `ch_${tag(type, kind)}`;
-  const customer = { id: `cus_${tag(type, kind)}`, metadata: {} };
-  if (kind === 'manualos') customer.metadata.brand = 'manualos';
-  if (kind === 'htsatlas') customer.metadata.brand = 'htsatlas';
-  return { id, object: 'charge', customer, payment_intent: `pi_${tag(type, kind)}` };
+  if (kind === 'manualos') charge.metadata = { brand: 'manualos' };
+  if (kind === 'htsatlas') charge.metadata = { brand: 'htsatlas' };
+  if (kind !== 'blank') charge.payment_intent = `pi_${tag(type, kind)}`;
+  return charge;
 }
 
 function disputeObject(type, kind) {
-  if (kind === 'unbranded') {
-    return { id: `dp_${tag(type, kind)}`, object: 'dispute', charge: 'ch_known' };
-  }
-  const customer = { id: `cus_${tag(type, kind)}`, metadata: {} };
-  if (kind === 'manualos') customer.metadata.brand = 'manualos';
-  if (kind === 'htsatlas') customer.metadata.brand = 'htsatlas';
-  return {
-    id: `dp_${tag(type, kind)}`,
-    object: 'dispute',
-    charge: { id: `ch_${tag(type, kind)}`, customer },
+  const id = `dp_${tag(type, kind)}`;
+  const charge = {
+    id: `ch_${tag(type, kind)}`,
+    object: 'charge',
+    metadata: {},
+    customer: { id: `cus_${tag(type, kind)}`, metadata: {} },
   };
+  if (kind === 'unbranded') {
+    charge.metadata = {};
+    charge.payment_intent = { id: 'pi_known', metadata: { plan: 'starter' } };
+  } else if (kind === 'manualos') charge.metadata = { brand: 'manualos' };
+  else if (kind === 'htsatlas') charge.metadata = { brand: 'htsatlas' };
+  return { id, object: 'dispute', metadata: {}, charge };
 }
 
 function efwObject(type, kind) {
-  if (kind === 'unbranded') {
-    return {
-      id: `issfr_${tag(type, kind)}`,
-      object: 'radar.early_fraud_warning',
-      charge: `ch_${tag(type, kind)}`,
-      payment_intent: 'pi_known',
-    };
-  }
-  const customer = { id: `cus_${tag(type, kind)}`, metadata: {} };
-  if (kind === 'manualos') customer.metadata.brand = 'manualos';
-  if (kind === 'htsatlas') customer.metadata.brand = 'htsatlas';
-  return {
-    id: `issfr_${tag(type, kind)}`,
-    object: 'radar.early_fraud_warning',
-    charge: { id: `ch_${tag(type, kind)}`, customer },
+  const id = `issfr_${tag(type, kind)}`;
+  const charge = {
+    id: `ch_${tag(type, kind)}`,
+    object: 'charge',
+    metadata: {},
+    customer: { id: `cus_${tag(type, kind)}`, metadata: {} },
   };
+  if (kind === 'unbranded') {
+    charge.payment_intent = { id: 'pi_known', metadata: { plan: 'starter' } };
+  } else if (kind === 'manualos') charge.metadata = { brand: 'manualos' };
+  else if (kind === 'htsatlas') charge.metadata = { brand: 'htsatlas' };
+  return { id, object: 'radar.early_fraud_warning', metadata: {}, charge };
 }
 
 function fixture(type, kind) {
@@ -152,7 +153,7 @@ function fixture(type, kind) {
   else if (type.startsWith('customer.subscription.')) object = subscriptionObject(type, kind);
   else if (type.startsWith('invoice.')) object = invoiceObject(type, kind);
   else if (type === 'charge.refunded') object = chargeObject(type, kind);
-  else if (type === 'charge.dispute.created') object = disputeObject(type, kind);
+  else if (type === 'charge.dispute.created' || type === 'charge.dispute.closed') object = disputeObject(type, kind);
   else object = efwObject(type, kind);
   return { id: `evt_${tag(type, kind)}`, type, data: { object } };
 }
@@ -206,6 +207,7 @@ test('webhook brand matrix for every handled event', async () => {
     'invoice.payment_failed',
     'charge.refunded',
     'charge.dispute.created',
+    'charge.dispute.closed',
     'radar.early_fraud_warning.created',
   ]);
 
@@ -359,19 +361,23 @@ test('webhook brand matrix for every handled event', async () => {
       },
     }), 'invoice.payment_failed manualos lookup');
 
-    const knownCharge = await post({
-      id: 'evt_known_charge_foreign_customer',
+    assertProcessed(await post({
+      id: 'evt_charge_brand_beats_customer',
       type: 'charge.dispute.created',
       data: {
         object: {
-          id: 'dp_known_foreign',
+          id: 'dp_charge_brand',
           object: 'dispute',
-          charge: 'ch_known',
-          customer: { id: 'cus_known', metadata: { brand: 'htsatlas' } },
+          metadata: {},
+          charge: {
+            id: 'ch_branded',
+            object: 'charge',
+            metadata: { brand: 'manualos' },
+            customer: { id: 'cus_known', metadata: { brand: 'htsatlas' } },
+          },
         },
       },
-    });
-    assertProcessed(knownCharge, 'charge.dispute.created known charge');
+    }), 'charge.dispute.created charge brand');
 
     assertIgnored(await post({
       id: 'evt_known_customer_foreign',
@@ -418,13 +424,19 @@ test('webhook brand matrix for every handled event', async () => {
   }
 });
 
-test('charge lookup uses customer brand and a known payment intent', async () => {
+test('charge lookup uses payment intent plan and ignores a later customer brand', async () => {
   const calls = [];
   const stripe = {
     charges: {
       retrieve: async (id) => {
         calls.push(['charge', id]);
-        return { id, object: 'charge', payment_intent: 'pi_known', customer: 'cus_later' };
+        return { id, object: 'charge', metadata: {}, payment_intent: 'pi_known', customer: 'cus_later' };
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => {
+        calls.push(['pi', id]);
+        return { id, metadata: { plan: 'starter' } };
       },
     },
     customers: {
@@ -436,18 +448,31 @@ test('charge lookup uses customer brand and a known payment intent', async () =>
   };
   const ours = await classifyStripeEvent({
     type: 'charge.dispute.created',
-    data: { object: { id: 'dp_pi', object: 'dispute', charge: 'ch_hidden' } },
-  }, { stripe, knownChargeIds: new Set(['pi_known']), knownCustomerIds: new Set(['cus_later']) });
+    data: { object: { id: 'dp_pi', object: 'dispute', metadata: {}, charge: 'ch_hidden' } },
+  }, { stripe, env });
   assert.equal(ours, 'ours');
-  assert.deepEqual(calls, [['charge', 'ch_hidden']]);
+  assert.deepEqual(calls, [['charge', 'ch_hidden'], ['pi', 'pi_known']]);
 
   calls.length = 0;
+  const foreignStripe = {
+    charges: {
+      retrieve: async (id) => {
+        calls.push(['charge', id]);
+        return {
+          id,
+          object: 'charge',
+          metadata: {},
+          customer: { id: 'cus_later', metadata: { brand: 'htsatlas' } },
+        };
+      },
+    },
+  };
   const foreign = await classifyStripeEvent({
     type: 'radar.early_fraud_warning.created',
     data: { object: { id: 'issfr_id', object: 'radar.early_fraud_warning', charge: 'ch_foreign' } },
-  }, { stripe, knownChargeIds: new Set(), knownCustomerIds: new Set(['cus_later']) });
+  }, { stripe: foreignStripe, env });
   assert.equal(foreign, 'other');
-  assert.deepEqual(calls, [['charge', 'ch_foreign'], ['customer', 'cus_later']]);
+  assert.deepEqual(calls, [['charge', 'ch_foreign']]);
 
   const priceOnly = await classifyStripeEvent({
     type: 'invoice.paid',
@@ -459,7 +484,7 @@ test('charge lookup uses customer brand and a known payment intent', async () =>
     type: 'invoice.paid',
     data: { object: { id: 'in_secret', object: 'invoice', lines: { data: [{ price: 'price_from_secret' }] } } },
   }, { env: { ...env, STRIPE_SECRET_KEY: 'price_from_secret', STRIPE_WEBHOOK_SECRET: 'price_from_secret' } });
-  assert.equal(secretShaped, 'other');
+  assert.equal(secretShaped, 'unknown');
 
   const missing = await classifyStripeEvent({ id: 'evt_bad', type: 'invoice.paid' }, { env });
   assert.equal(missing, 'other');
@@ -508,10 +533,11 @@ test('checkout creates a manualos customer and prefers the lookup key', async ()
     assert.equal(creates[0].line_items[0].price, 'price_from_lookup');
     assert.equal(creates[0].metadata.brand, 'manualos');
     assert.equal(creates[0].payment_intent_data.metadata.brand, 'manualos');
-    assert.equal(creates[0].customer, 'cus_created');
-    assert.deepEqual(creates[0].customer_update, { address: 'auto' });
+    assert.equal(creates[0].customer, undefined);
+    assert.equal(creates[0].customer_update, undefined);
+    assert.equal(creates[0].customer_creation, 'always');
     assert.equal(creates[0].payment_method_types, undefined);
-    assert.deepEqual(customers[0], { metadata: { brand: 'manualos' } });
+    assert.deepEqual(customers, []);
     assert.deepEqual(lists[0], { lookup_keys: ['manualos_starter'], active: true, limit: 1 });
 
     const pro = await fetch(`${base}/create-checkout-session`, {
@@ -556,7 +582,17 @@ test('checkout and webhook failures do not echo secrets or apply side effects', 
       },
       update: writing(writes, 'customers.update'),
     },
-    charges: { retrieve: async () => { throw new Error('sk_live_SHOULD_NOT_LEAK'); } },
+    charges: {
+      retrieve: async (id) => {
+        if (id === 'ch_gone') {
+          const missing = new Error('No such charge');
+          missing.statusCode = 404;
+          missing.code = 'resource_missing';
+          throw missing;
+        }
+        throw new Error('sk_live_SHOULD_NOT_LEAK');
+      },
+    },
     prices: {
       list: async () => {
         throw new Error('sk_live_SHOULD_NOT_LEAK');
@@ -585,19 +621,10 @@ test('checkout and webhook failures do not echo secrets or apply side effects', 
       body: JSON.stringify({ plan: 'starter' }),
     });
     const checkoutText = await checkout.text();
-    assert.equal(checkout.status, 500);
+    assert.equal(checkout.status, 200);
     assert.equal(checkoutText.includes('sk_live_SHOULD_NOT_LEAK'), false);
-    assert.equal(writes.includes('sessions.create'), false);
-
-    const priced = stripe.customers.create;
-    stripe.customers.create = async () => ({ id: 'cus_ok' });
-    const fallback = await fetch(`${base}/create-checkout-session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: 'pro' }),
-    });
-    assert.equal(fallback.status, 200);
-    stripe.customers.create = priced;
+    assert.equal(writes.includes('sessions.create'), true);
+    assert.equal(writes.includes('customers.create'), false);
 
     const failedLookup = await fetch(`${base}/webhook`, {
       method: 'POST',
@@ -616,50 +643,38 @@ test('checkout and webhook failures do not echo secrets or apply side effects', 
     assert.equal(fs.existsSync(path.join(dir, 'side-effect.txt')), false);
     assert.equal(knownChargeIds.has('ch_need'), false);
 
-    const knownStripe = {
-      ...stripe,
-      customers: {
-        ...stripe.customers,
-        retrieve: async () => {
-          throw new Error('sk_live_SHOULD_NOT_LEAK');
-        },
-      },
-      webhooks: { constructEvent },
-    };
-    const knownApp = createApp({
-      env,
-      stripe: knownStripe,
-      anthropic: null,
-      jobs: {},
-      supportStore: {},
-      knownChargeIds: new Set(['ch_known']),
-      onStripeEvent: async () => {
-        handled.push('known');
-      },
-    });
-    const knownServer = await listen(knownApp);
-    try {
-      const knownBase = `http://127.0.0.1:${knownServer.address().port}`;
-      const known = await fetch(`${knownBase}/webhook`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
-        body: JSON.stringify({
-          id: 'evt_known_despite_retrieve',
-          type: 'charge.refunded',
-          data: {
-            object: {
-              id: 'ch_known',
-              object: 'charge',
-              customer: 'cus_foreign',
-            },
+    const brandedDespiteCustomer = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_brand_on_charge',
+        type: 'charge.refunded',
+        data: {
+          object: {
+            id: 'ch_branded',
+            object: 'charge',
+            metadata: { brand: 'manualos' },
+            customer: 'cus_foreign',
           },
-        }),
-      });
-      assert.equal(known.status, 200);
-      assert.equal(handled.includes('known'), true);
-    } finally {
-      await new Promise((resolve) => knownServer.close(resolve));
-    }
+        },
+      }),
+    });
+    assert.equal(brandedDespiteCustomer.status, 200);
+    assert.equal(handled.includes('ran'), true);
+
+    const missingCharge = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_missing_charge',
+        type: 'charge.dispute.created',
+        data: { object: { id: 'dp_missing', object: 'dispute', metadata: {}, charge: 'ch_gone' } },
+      }),
+    });
+    const missingText = await missingCharge.text();
+    assert.equal(missingCharge.status, 200);
+    assert.equal(missingText.includes('sk_live'), false);
+    assert.equal(handled.length, 1);
 
     const boom = createApp({
       env,
@@ -693,12 +708,301 @@ test('checkout and webhook failures do not echo secrets or apply side effects', 
     const joined = logs.join('\n');
     assert.equal(joined.includes('sk_live'), false);
     assert.match(joined, /Price lookup key search failed/);
-    assert.match(joined, /Stripe customer create failed/);
+    assert.equal(joined.includes('Stripe customer create failed'), false);
     assert.match(joined, /Webhook classification failed/);
+    assert.match(joined, /Webhook brand unknown/);
     assert.match(joined, /Webhook handler failed/);
   } finally {
     console.error = originalError;
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('managed payments fixtures classify from the charge, payment intent, or invoice', async () => {
+  const calls = [];
+  const handled = [];
+  const logs = [];
+  const originalError = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const missing = (id) => {
+    const err = new Error(`No such ${id}`);
+    err.statusCode = 404;
+    err.code = 'resource_missing';
+    throw err;
+  };
+  const stripe = {
+    charges: {
+      retrieve: async (id) => {
+        calls.push(`charge ${id}`);
+        if (id === 'ch_mp') {
+          return {
+            id,
+            object: 'charge',
+            metadata: { brand: 'manualos' },
+            customer: 'cus_mp',
+            payment_intent: 'pi_mp',
+          };
+        }
+        if (id === 'ch_pi_only') {
+          return { id, object: 'charge', metadata: {}, customer: 'cus_blank', payment_intent: 'pi_only' };
+        }
+        if (id === 'ch_renew') {
+          return { id, object: 'charge', metadata: {}, customer: 'cus_blank', payment_intent: 'pi_renew' };
+        }
+        if (id === 'ch_price') {
+          return { id, object: 'charge', metadata: {}, customer: null, payment_intent: 'pi_price' };
+        }
+        if (id === 'ch_product') {
+          return { id, object: 'charge', metadata: {}, customer: 'cus_blank', payment_intent: 'pi_product' };
+        }
+        return missing(id);
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => {
+        calls.push(`pi ${id}`);
+        if (id === 'pi_only') return { id, metadata: { brand: 'manualos' } };
+        if (id === 'pi_plan') return { id, metadata: { plan: 'starter' } };
+        if (id === 'pi_renew' || id === 'pi_price' || id === 'pi_product') return { id, metadata: {} };
+        return missing(id);
+      },
+    },
+    customers: {
+      retrieve: async (id) => {
+        calls.push(`customer ${id}`);
+        if (id === 'cus_del') return { id, object: 'customer', deleted: true };
+        if (id === 'cus_blank' || id === 'cus_mp') return { id, metadata: {} };
+        return missing(id);
+      },
+    },
+    invoicePayments: {
+      list: async (params) => {
+        calls.push(`inpay ${params.payment.payment_intent}`);
+        const id = params.payment.payment_intent;
+        if (id === 'pi_renew') {
+          return {
+            data: [{
+              status: 'paid',
+              invoice: {
+                id: 'in_renew',
+                metadata: {},
+                parent: { subscription_details: { metadata: { plan: 'pro' }, subscription: 'sub_pro' } },
+              },
+            }],
+          };
+        }
+        if (id === 'pi_price') {
+          return {
+            data: [{
+              status: 'paid',
+              invoice: {
+                id: 'in_price',
+                metadata: {},
+                lines: { data: [{ pricing: { price_details: { price: 'price_pro', product: 'prod_pro' } } }] },
+              },
+            }],
+          };
+        }
+        if (id === 'pi_product') {
+          return {
+            data: [{
+              status: 'paid',
+              invoice: {
+                id: 'in_product',
+                metadata: {},
+                lines: { data: [{ pricing: { price_details: { price: 'price_other', product: 'prod_mos' } } }] },
+              },
+            }],
+          };
+        }
+        return { data: [] };
+      },
+    },
+    prices: {
+      retrieve: async (id) => {
+        calls.push(`price ${id}`);
+        if (id === 'price_other') return { id, lookup_key: null, product: 'prod_mos' };
+        if (id === 'price_pro') return { id, lookup_key: null, product: 'prod_pro' };
+        return missing(id);
+      },
+    },
+    products: {
+      retrieve: async (id) => {
+        calls.push(`product ${id}`);
+        if (id === 'prod_mos') return { id, metadata: { brand: 'manualos', plan: 'pro' } };
+        return { id, metadata: {} };
+      },
+    },
+    subscriptions: {
+      retrieve: async (id) => {
+        calls.push(`sub ${id}`);
+        return { id, metadata: { plan: 'pro' } };
+      },
+    },
+    webhooks: { constructEvent },
+  };
+  const app = createApp({
+    env,
+    stripe,
+    anthropic: null,
+    jobs: {},
+    supportStore: {},
+    onStripeEvent: async (event) => handled.push(event.id),
+  });
+  const server = await listen(app);
+  async function post(event) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify(event),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+  try {
+    const chargeBrand = await post({
+      id: 'evt_mp_charge',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_mp_inline',
+          object: 'charge',
+          metadata: { brand: 'manualos', purpose: 'mp_webhook_refund_test' },
+          customer: { id: 'cus_mp', metadata: {} },
+          payment_intent: 'pi_mp',
+        },
+      },
+    });
+    assert.equal(chargeBrand.status, 200);
+    assert.deepEqual(handled, ['evt_mp_charge']);
+
+    const dispute = await post({
+      id: 'evt_mp_dispute',
+      type: 'charge.dispute.created',
+      data: { object: { id: 'du_mp', object: 'dispute', metadata: {}, charge: 'ch_mp', payment_intent: 'pi_mp' } },
+    });
+    assert.equal(dispute.status, 200);
+    assert.deepEqual(handled, ['evt_mp_charge', 'evt_mp_dispute']);
+    assert.equal(calls.includes('customer cus_mp'), false);
+
+    const piOnly = await post({
+      id: 'evt_pi_only',
+      type: 'charge.dispute.created',
+      data: { object: { id: 'du_pi', object: 'dispute', metadata: {}, charge: 'ch_pi_only' } },
+    });
+    assert.equal(piOnly.status, 200);
+    assert.equal(handled.includes('evt_pi_only'), true);
+
+    const guest = await post({
+      id: 'evt_guest',
+      type: 'charge.dispute.created',
+      data: {
+        object: {
+          id: 'du_guest',
+          object: 'dispute',
+          metadata: {},
+          charge: { id: 'ch_guest', object: 'charge', metadata: {}, customer: null, payment_intent: 'pi_plan' },
+        },
+      },
+    });
+    assert.equal(guest.status, 200);
+    assert.equal(handled.includes('evt_guest'), true);
+
+    const supportRefund = await post({
+      id: 'evt_support_refund',
+      type: 'refund.created',
+      data: {
+        object: {
+          id: 're_support',
+          object: 'refund',
+          metadata: { brand: 'manualos' },
+          charge: { id: 'ch_hts_refund', object: 'charge', metadata: { brand: 'htsatlas' }, customer: { id: 'cus_blank', metadata: {} } },
+        },
+      },
+    });
+    assert.equal(supportRefund.status, 200);
+    assert.equal(handled.includes('evt_support_refund'), false);
+    assert.equal(logs.some((line) => line.includes('evt_support_refund')), false);
+
+    const beforeRenew = logs.length;
+    const renewal = await post({
+      id: 'evt_renew',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_renew_inline',
+          object: 'charge',
+          metadata: {},
+          customer: { id: 'cus_blank', metadata: {} },
+          payment_intent: 'pi_renew',
+        },
+      },
+    });
+    assert.equal(renewal.status, 200);
+    assert.equal(handled.includes('evt_renew'), true);
+    assert.equal(logs.length, beforeRenew);
+
+    const priced = await post({
+      id: 'evt_price',
+      type: 'radar.early_fraud_warning.created',
+      data: { object: { id: 'issfr_price', object: 'radar.early_fraud_warning', metadata: {}, charge: 'ch_price' } },
+    });
+    assert.equal(priced.status, 200);
+    assert.equal(handled.includes('evt_price'), true);
+
+    const product = await classifyStripeEvent({
+      id: 'evt_product',
+      type: 'charge.dispute.created',
+      data: { object: { id: 'du_product', object: 'dispute', metadata: {}, charge: 'ch_product' } },
+    }, { stripe, env });
+    assert.equal(product, 'ours');
+
+    const deleted = await post({
+      id: 'evt_deleted',
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_deleted',
+          object: 'charge',
+          metadata: {},
+          customer: { id: 'cus_del', object: 'customer', deleted: true },
+        },
+      },
+    });
+    assert.equal(deleted.status, 200);
+    assert.equal(handled.includes('evt_deleted'), false);
+    assert.equal(logs.some((line) => line.includes('Webhook brand unknown') && line.includes('evt_deleted') && line.includes('ch_deleted')), true);
+
+    const gone = await post({
+      id: 'evt_gone',
+      type: 'charge.refunded',
+      data: { object: { id: 'ch_customer_gone', object: 'charge', metadata: {}, customer: 'cus_gone' } },
+    });
+    assert.equal(gone.status, 200);
+    assert.equal(handled.includes('evt_gone'), false);
+    assert.equal(logs.some((line) => line.includes('evt_gone')), true);
+
+    stripe.customers.retrieve = async () => {
+      const err = new Error('sk_live_SHOULD_NOT_LEAK');
+      err.statusCode = 500;
+      throw err;
+    };
+    const down = await fetch(`http://127.0.0.1:${server.address().port}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_down',
+        type: 'charge.refunded',
+        data: { object: { id: 'ch_down', object: 'charge', metadata: {}, customer: 'cus_down' } },
+      }),
+    });
+    const downText = await down.text();
+    assert.equal(down.status, 500);
+    assert.equal(downText.includes('sk_live'), false);
+    assert.equal(handled.includes('evt_down'), false);
+    assert.equal(logs.join('\n').includes('sk_live'), false);
+  } finally {
+    console.error = originalError;
+    await new Promise((resolve) => server.close(resolve));
   }
 });

@@ -516,14 +516,15 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
       assert.deepEqual(Object.keys(body), ['url']);
     }
     const starterExpected = withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv });
-    starterExpected.customer = 'cus_1';
-    starterExpected.customer_update = { address: 'auto' };
     const proExpected = withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv });
-    proExpected.customer = 'cus_2';
-    proExpected.customer_update = { address: 'auto' };
     assert.deepEqual(calls[0], starterExpected);
     assert.deepEqual(calls[1], proExpected);
-    assert.deepEqual(customerCalls, [{ metadata: { brand: 'manualos' } }, { metadata: { brand: 'manualos' } }]);
+    assert.equal(calls[0].customer, undefined);
+    assert.equal(calls[0].customer_update, undefined);
+    assert.equal(calls[0].customer_creation, 'always');
+    assert.equal(calls[1].customer, undefined);
+    assert.equal(calls[1].customer_update, undefined);
+    assert.deepEqual(customerCalls, []);
     assert.deepEqual(priceLists[0], { lookup_keys: ['manualos_starter'], active: true, limit: 1 });
     assert.deepEqual(priceLists[1], { lookup_keys: ['manualos_pro'], active: true, limit: 1 });
     assert.equal(calls[0].consent_collection, undefined);

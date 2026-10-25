@@ -21,6 +21,9 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.equal(starter.payment_intent_data.metadata.manuals_used, '0');
   assert.equal(starter.payment_intent_data.metadata.plan, 'starter');
   assert.equal(starter.payment_intent_data.metadata.brand, 'manualos');
+  assert.equal(starter.customer_creation, 'always');
+  assert.equal(starter.customer, undefined);
+  assert.equal(starter.customer_update, undefined);
   assert.equal(starter.payment_method_types, undefined);
   assert.match(starter.integration_identifier, /manualos_starter_[a-z]{8}$/);
 
@@ -70,6 +73,26 @@ test('starter remaining is credits minus manuals_used', () => {
   );
   assert.equal(exhausted.valid, true);
   assert.equal(exhausted.remaining, 0);
+
+  const revoked = accessFromSession(
+    { metadata: { plan: 'starter' }, payment_status: 'paid' },
+    { id: 'pi_1', metadata: { manuals_used: '1', credit_status: 'revoked' } },
+    null,
+    env
+  );
+  assert.equal(revoked.valid, false);
+  assert.equal(revoked.remaining, 0);
+  assert.equal(revoked.creditStatus, 'revoked');
+
+  const suspended = accessFromSession(
+    { metadata: { plan: 'starter' }, payment_status: 'paid' },
+    { id: 'pi_1', metadata: { manuals_used: '1', credit_status: 'suspended' } },
+    null,
+    env
+  );
+  assert.equal(suspended.valid, false);
+  assert.equal(suspended.remaining, 0);
+  assert.equal(suspended.creditStatus, 'suspended');
 });
 
 test('pro is valid only while the subscription is active or trialing', () => {
@@ -93,6 +116,35 @@ test('pro is valid only while the subscription is active or trialing', () => {
   assert.equal(lapsed.valid, false);
   assert.equal(lapsed.plan, 'pro');
   assert.equal(lapsed.remaining, null);
+});
+
+test('a refunded or suspended pro period is not valid while the subscription stays active', () => {
+  const refunded = accessFromSession(
+    { metadata: { plan: 'pro' }, payment_status: 'paid' },
+    null,
+    { id: 'sub_1', status: 'active', metadata: { period_access: 'revoked', period_access_reason: 'refund' } },
+    env,
+  );
+  assert.equal(refunded.valid, false);
+  assert.equal(refunded.plan, 'pro');
+  assert.equal(refunded.periodAccess, 'revoked');
+  assert.equal(refunded.periodRevokeReason, 'refund');
+  const lost = accessFromSession(
+    { metadata: { plan: 'pro' } },
+    null,
+    { id: 'sub_1', status: 'active', metadata: { period_access: 'revoked', period_access_reason: 'dispute' } },
+    env,
+  );
+  assert.equal(lost.valid, false);
+  assert.equal(lost.periodRevokeReason, 'dispute');
+  const suspended = accessFromSession(
+    { metadata: { plan: 'pro' } },
+    null,
+    { id: 'sub_1', status: 'trialing', metadata: { period_access: 'suspended', period_access_reason: 'dispute' } },
+    env,
+  );
+  assert.equal(suspended.valid, false);
+  assert.equal(suspended.periodAccess, 'suspended');
 });
 
 test('assertCanGenerate returns 402 when starter credits are gone', async () => {
