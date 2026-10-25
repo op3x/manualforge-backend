@@ -206,12 +206,12 @@ test('binary DXF keeps units, layers, and title text and does not render a manua
         return Buffer.from('%PDF-1.4\n');
       },
     }),
-    (err) => err.code === 'no_model_result',
+    (err) => err.status === 422 && err.code === 'no_machine_content' && /credit was not used/.test(err.message),
   );
   assert.equal(rendered, false);
 });
 
-test('ASCII STL reports size and shape only', { timeout: 120000 }, async () => {
+test('ASCII STL reports size and shape only and is not a manual', async () => {
   const source = `solid Conveyor plate
   facet normal 0 0 1
     outer loop
@@ -229,15 +229,29 @@ test('ASCII STL reports size and shape only', { timeout: 120000 }, async () => {
   endfacet
 endsolid Conveyor plate
 `;
-  const { project, html, pages } = await renderManual('plate.stl', Buffer.from(source));
+  const project = await parseUploads([{ name: 'plate.stl', buffer: Buffer.from(source) }]);
   assert.equal(project.cad.meshOnly, true);
   assert.equal(project.cad.shape, 'a flat plate');
   assert.equal(project.cad.triangleCount, 2);
   assert.match(project.cad.boundingBox.max.join(','), /100/);
-  assert.match(html, /triangle mesh/);
-  assert.match(html, /flat plate/);
-  assert.match(html, /Export STEP/);
-  remember({ format: 'ASCII STL', file: 'plate.stl', rungs: 0, pages });
+  assert.match(project.warnings.join('\n'), /triangle mesh/);
+  assert.match(project.warnings.join('\n'), /flat plate/);
+  assert.match(project.warnings.join('\n'), /no part names/);
+  assert.match(project.warnings.join('\n'), /Export STEP/);
+  let rendered = false;
+  await assert.rejects(
+    () => generateManual({
+      project,
+      anthropic: mockAi(),
+      env: { ...process.env, MANUALOS_AI_RETRIES: '0' },
+      renderPdf: async () => {
+        rendered = true;
+        return Buffer.from('%PDF-1.4\n');
+      },
+    }),
+    (err) => err.status === 422 && /triangle mesh/.test(err.message) && /credit was not used/.test(err.message),
+  );
+  assert.equal(rendered, false);
 });
 
 function boxTriangles(width, depth, height) {
@@ -269,15 +283,28 @@ function binaryStl(name, triangles) {
   return Buffer.concat([header, count, body]);
 }
 
-test('binary STL reports a compact block and no part names', { timeout: 120000 }, async () => {
+test('binary STL reports a compact block and no part names and is not a manual', async () => {
   const buffer = binaryStl('Guard block', boxTriangles(10, 10, 10));
-  const { project, html, pages } = await renderManual('guard.stl', buffer);
+  const project = await parseUploads([{ name: 'guard.stl', buffer }]);
   assert.equal(project.cad.meshOnly, true);
   assert.equal(project.cad.shape, 'a compact block');
   assert.equal(project.cad.triangleCount, 12);
-  assert.match(html, /compact block/);
-  assert.match(html, /no part names/);
-  remember({ format: 'Binary STL', file: 'guard.stl', rungs: 0, pages });
+  assert.match(project.warnings.join('\n'), /compact block/);
+  assert.match(project.warnings.join('\n'), /no part names/);
+  let rendered = false;
+  await assert.rejects(
+    () => generateManual({
+      project,
+      anthropic: mockAi(),
+      env: { ...process.env, MANUALOS_AI_RETRIES: '0' },
+      renderPdf: async () => {
+        rendered = true;
+        return Buffer.from('%PDF-1.4\n');
+      },
+    }),
+    (err) => err.status === 422 && /no part names/.test(err.message),
+  );
+  assert.equal(rendered, false);
 });
 
 test('ACD ladder reaches a PDF and unread languages are named', { timeout: 180000 }, async () => {

@@ -47,7 +47,7 @@ const {
 const { createSmtpMailer } = require('./lib/support/mail');
 const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
-const { emptyGenerationReason, generateManual } = require('./lib/pipeline');
+const { emptyGenerationReason, generateManual, machineContentReason } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
@@ -431,6 +431,14 @@ function createApp({
       throw err;
     }
     const project = await parseUploads(files, fieldsFrom(req), env);
+    const geometry = machineContentReason(project);
+    if (geometry) {
+      const err = new Error(geometry);
+      err.status = 422;
+      err.expose = true;
+      err.code = 'no_machine_content';
+      throw err;
+    }
     if (!anthropicClient) {
       const err = new Error('Manual generation is temporarily unavailable.');
       err.status = 503;

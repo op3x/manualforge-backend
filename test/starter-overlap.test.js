@@ -6,7 +6,8 @@ const path = require('path');
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 const { parseUploads } = require('../lib/parsers');
-const { emptyGenerationReason, generateManual } = require('../lib/pipeline');
+const { emptyGenerationReason, generateManual, machineContentReason } = require('../lib/pipeline');
+const { corpusRoot } = require('./corpus-env');
 const {
   commitStarterCredit,
   readCreditHolds,
@@ -426,7 +427,16 @@ function drawingBuffer() {
   return { name: 'sketch.dxf', buffer: Buffer.from(text) };
 }
 
-test('a drawing with no machine content returns its Starter credit once', async () => {
+async function postFile(base, file) {
+  const form = new FormData();
+  form.set('session_id', 'cs_test_starter');
+  form.set('file', new Blob([file.buffer]), file.name);
+  const posted = await fetch(`${base}/jobs`, { method: 'POST', body: form });
+  const body = await posted.json();
+  return { status: posted.status, body };
+}
+
+test('a drawing with no machine content is rejected before a credit is reserved', async () => {
   const paid = starterStripe();
   let calls = 0;
   const quiet = {
@@ -447,39 +457,93 @@ test('a drawing with no machine content returns its Starter credit once', async 
       return Buffer.from('%PDF-1.4\n%ok\n');
     },
   });
-  const drawing = drawingBuffer();
   await withServer(app, async (base) => {
-    const form = new FormData();
-    form.set('session_id', 'cs_test_starter');
-    form.set('file', new Blob([drawing.buffer]), drawing.name);
-    const posted = await fetch(`${base}/jobs`, { method: 'POST', body: form });
-    assert.equal(posted.status, 202);
-    const job = await waitJob(base, (await posted.json()).id);
-    assert.equal(job.status, 'failed');
-    assert.equal(job.error, CREDIT_RETURN_MESSAGE);
+    const posted = await postFile(base, drawingBuffer());
+    assert.equal(posted.status, 422);
+    assert.match(posted.body.error, /no machine content/);
+    assert.match(posted.body.error, /credit was not used/);
     assert.equal(calls, 0);
     assert.equal(rendered, false);
     assert.equal(paid.meta.manuals_used, '0');
-    assert.equal(paid.decrements.count, 1);
+    assert.equal(paid.decrements.count, 0);
     assert.equal(readCreditHolds(paid.meta).size, 0);
-    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
-    assert.equal(pdf.status, 409);
   });
+});
+
+function corpusStlFiles() {
+  const roots = [corpusRoot(), path.join(__dirname, 'fixtures', 'corpus')];
+  const found = [];
+  for (const root of roots) {
+    const cad = path.join(root, 'cad');
+    if (!fs.existsSync(cad)) continue;
+    for (const name of fs.readdirSync(cad)) {
+      if (/\.stl$/i.test(name)) found.push(path.join(cad, name));
+    }
+  }
+  return found;
+}
+
+test('a geometry-only STL from the corpus is rejected before a credit is reserved', async () => {
+  const files = corpusStlFiles();
+  assert.ok(files.length > 0, 'the corpus has an STL mesh');
+  const file = files[0];
+  const mesh = { name: path.basename(file), buffer: fs.readFileSync(file) };
+  const parsed = await parseUploads([mesh]);
+  assert.equal(parsed.cad.meshOnly, true);
+  assert.match(machineContentReason(parsed), /triangle mesh/);
+  const paid = starterStripe();
+  let calls = 0;
+  let rendered = false;
+  const app = createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: {
+      messages: {
+        create: async () => {
+          calls += 1;
+          return modelReply({ messages: [{ content: '' }] });
+        },
+      },
+    },
+    renderPdf: async () => {
+      rendered = true;
+      return Buffer.from('%PDF-1.4\n%ok\n');
+    },
+  });
+  await withServer(app, async (base) => {
+    const posted = await postFile(base, mesh);
+    assert.equal(posted.status, 422);
+    assert.match(posted.body.error, /no part names/);
+    assert.match(posted.body.error, /assembly structure/);
+    assert.match(posted.body.error, /credit was not used/);
+    assert.equal(calls, 0);
+    assert.equal(rendered, false);
+    assert.equal(paid.meta.manuals_used, '0');
+    assert.equal(paid.decrements.count, 0);
+    assert.equal(readCreditHolds(paid.meta).size, 0);
+  });
+  const withLogic = await parseUploads([{ name: 'line.L5X', buffer: L5X }]);
+  withLogic.cad.meshOnly = true;
+  assert.equal(machineContentReason(withLogic), '');
+  const pulley = path.join(__dirname, 'fixtures', 'corpus', 'cad', 'pulley.stp');
+  const part = await parseUploads([{ name: 'pulley.stp', buffer: fs.readFileSync(pulley) }]);
+  assert.equal(part.cad.meshOnly, undefined);
+  assert.equal(machineContentReason(part), '');
 });
 
 test('a no-machine-content signal is rejected even when a model call succeeds', async () => {
   assert.equal(emptyGenerationReason({
     noMachineContent: true,
     modelCalls: { succeeded: 2 },
-  }), 'This upload has no machine content.');
+  }), 'This upload has no machine content. Your credit was not used.');
   assert.equal(emptyGenerationReason({
     machineContent: false,
     modelCalls: { succeeded: 1 },
-  }), 'This upload has no machine content.');
+  }), 'This upload has no machine content. Your credit was not used.');
   assert.equal(emptyGenerationReason({
     hasMachineContent: false,
     modelCalls: { succeeded: 1 },
-  }), 'This upload has no machine content.');
+  }), 'This upload has no machine content. Your credit was not used.');
   assert.equal(emptyGenerationReason({ modelCalls: { succeeded: 0 } }), 'No model call succeeded.');
   assert.equal(emptyGenerationReason({ modelCalls: { succeeded: 1 } }), '');
 
@@ -496,10 +560,9 @@ test('a no-machine-content signal is rejected even when a model call succeeds', 
         return Buffer.from('%PDF-1.4\n%ok\n');
       },
     }),
-    (err) => err.code === 'no_machine_content' && err.message === 'This upload has no machine content.',
+    (err) => err.code === 'no_machine_content' && /no machine content/.test(err.message) && /credit was not used/.test(err.message),
   );
   assert.equal(rendered, false);
-  assert.equal(project.modelCalls.succeeded > 0, true);
 });
 
 test('a hung model call is stopped by the job timeout and the hold is released', async () => {
