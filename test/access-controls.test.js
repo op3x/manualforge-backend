@@ -9,6 +9,7 @@ const { assertCanGenerate, accessFromSession, STARTER_REFUNDED_MESSAGE } = requi
 const { contentDisposition, downloadFileName } = require('../lib/download-name');
 const {
   dropRevokedJti,
+  forgetSessionCredential,
   loadRevocations,
   signAccessToken,
   verifyAccessToken,
@@ -173,7 +174,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
   const meta = { manuals_used: '0', plan: 'starter' };
   const stripe = {
     checkout: { sessions: { retrieve: async (id) => {
-      if (id === 'cs_owner') return starterSession('cs_owner', meta);
+      if (id === 'cs_token_owner') return starterSession('cs_token_owner', meta);
       if (id === 'cs_gone') throw notFound();
       if (id === 'cs_canceled') {
         return {
@@ -190,7 +191,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
   };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-token-'));
   const store = createJobStore({ directory: dir, env: { NODE_ENV: 'test' } });
-  const job = store.create({ sessionId: 'cs_owner', customerId: 'cus_pro', subscriptionId: 'sub_pro', nameSource: 'Widget' });
+  const job = store.create({ sessionId: 'cs_token_owner', customerId: 'cus_pro', subscriptionId: 'sub_pro', nameSource: 'Widget' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
   job.status = 'succeeded';
   store.persist(job);
@@ -216,7 +217,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       const exchanged = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_owner' }),
+        body: JSON.stringify({ session_id: 'cs_token_owner' }),
       });
       assert.equal(exchanged.status, 200);
       const tokenBody = await exchanged.json();
@@ -255,7 +256,7 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       assert.equal(after.status, 401);
       assert.equal((await after.json()).code, 'access_token_invalid');
 
-      const expired = signAccessToken({ sessionId: 'cs_owner' }, env, Date.now() - ACCESS_TOKEN_TTL_MS - 1000);
+      const expired = signAccessToken({ sessionId: 'cs_token_owner' }, env, Date.now() - ACCESS_TOKEN_TTL_MS - 1000);
       assert.equal(verifyAccessToken(expired.token, env), null);
       const stale = await fetch(`${base}/jobs/${job.id}`, { headers: authHeaders(expired.token) });
       assert.equal(stale.status, 401);
@@ -581,10 +582,23 @@ test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () =
   const app = createApp({ env: sunsetEnv, stripe, jobs: store, anthropic: null });
   try {
     await withServer(app, async (base) => {
+      const health = await fetch(`${base}/health`);
+      assert.equal((await health.json()).portalTokens, true);
       const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_owner' } });
       assert.equal(listed.status, 401);
+      assert.equal((await listed.json()).code, 'session_id_retired');
       const verified = await fetch(`${base}/verify-session?session_id=cs_owner`);
-      assert.equal(verified.status, 400);
+      assert.equal(verified.status, 401);
+      assert.equal((await verified.json()).code, 'session_id_retired');
+      const pdfBlocked = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      assert.equal(pdfBlocked.status, 401);
+      assert.equal((await pdfBlocked.json()).code, 'session_id_retired');
+      const started = new FormData();
+      started.set('session_id', 'cs_owner');
+      started.set('file', new Blob(['<xml/>']), 'line.L5X');
+      const jobStart = await fetch(`${base}/jobs`, { method: 'POST', body: started });
+      assert.equal(jobStart.status, 401);
+      assert.equal((await jobStart.json()).code, 'session_id_retired');
       const exchanged = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -602,62 +616,191 @@ test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () =
   }
 });
 
-test('a short portal secret disables tokens and a revocation survives a restart', async () => {
-  const warnings = [];
-  const original = console.warn;
-  console.warn = (...args) => warnings.push(args.join(' '));
+test('a short or missing portal secret disables tokens and reports that on health', async () => {
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
   const shortEnv = { ...env, PORTAL_TOKEN_SECRET: 'too-short' };
+  const { PORTAL_TOKEN_SECRET: _omitted, ...missingEnv } = env;
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async () => starterSession('cs_short', { manuals_used: '0', plan: 'starter' }) } },
     paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
   };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-revoke-'));
-  const store = createJobStore({ directory: dir, env });
-  const job = store.create({ sessionId: 'cs_owner', nameSource: 'Pump' });
-  store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
-  job.status = 'succeeded';
-  store.persist(job);
   try {
-    const shortApp = createApp({ env: shortEnv, stripe, jobs: store, anthropic: null });
+    const shortApp = createApp({ env: shortEnv, stripe, anthropic: null });
     await withServer(shortApp, async (base) => {
+      const health = await fetch(`${base}/health`);
+      const healthBody = await health.json();
+      assert.equal(healthBody.portalTokens, false);
+      assert.equal(JSON.stringify(healthBody).includes('too-short'), false);
       const minted = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: 'cs_owner' }),
+        body: JSON.stringify({ session_id: 'cs_short' }),
       });
       assert.equal(minted.status, 503);
-      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      const body = await minted.json();
+      assert.equal(body.code, 'portal_tokens_disabled');
+      assert.equal(JSON.stringify(body).includes('too-short'), false);
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_short' } });
       assert.equal(listed.status, 200);
-      assert.equal((await listed.json()).jobs.length, 1);
     });
-    assert.match(warnings.join('\n'), /shorter than 32 bytes/);
-
-    const supportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-support-'));
-    const durableEnv = { ...env, SUPPORT_DATA_DIR: supportDir };
-    const minted = signAccessToken({ sessionId: 'cs_owner' }, durableEnv);
-    const durable = createApp({ env: durableEnv, stripe, jobs: store, anthropic: null });
-    try {
-      await withServer(durable, async (base) => {
-        const revoked = await fetch(`${base}/access-token/revoke`, {
-          method: 'POST',
-          headers: authHeaders(minted.token),
-        });
-        assert.equal(revoked.status, 200);
-        const jti = JSON.parse(Buffer.from(minted.token.split('.')[0], 'base64url').toString('utf8')).jti;
-        dropRevokedJti(jti);
-        assert.ok(verifyAccessToken(minted.token, durableEnv));
-        loadRevocations(durableEnv);
-        assert.equal(verifyAccessToken(minted.token, durableEnv), null);
-        const after = await fetch(`${base}/jobs/${job.id}`, { headers: authHeaders(minted.token) });
-        assert.equal(after.status, 401);
-        const saved = JSON.parse(fs.readFileSync(path.join(supportDir, 'revoked-tokens.json'), 'utf8'));
-        assert.equal(typeof saved[jti], 'number');
+    const missingApp = createApp({ env: missingEnv, stripe, anthropic: null });
+    await withServer(missingApp, async (base) => {
+      const health = await fetch(`${base}/health`);
+      assert.equal((await health.json()).portalTokens, false);
+      const minted = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_short' }),
       });
-    } finally {
-      fs.rmSync(supportDir, { recursive: true, force: true });
-    }
+      assert.equal(minted.status, 503);
+      assert.equal((await minted.json()).code, 'portal_tokens_disabled');
+    });
   } finally {
-    console.warn = original;
+    console.error = original;
+  }
+  const logged = errors.join('\n');
+  assert.match(logged, /PORTAL_TOKEN_SECRET is missing or shorter than 32 bytes\. Portal tokens are disabled\./);
+  assert.equal(logged.includes('too-short'), false);
+  assert.equal(logged.includes(env.PORTAL_TOKEN_SECRET), false);
+});
+
+test('revoking a token blocks the checkout session until a new token is exchanged', async () => {
+  const updates = [];
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_bug27', { manuals_used: '0', plan: 'starter' }) } },
+    paymentIntents: {
+      retrieve: async () => ({ id: 'pi_bug27', metadata: { manuals_used: '0', plan: 'starter' } }),
+      update: async (id, params) => {
+        updates.push(params);
+        return { id };
+      },
+    },
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-bug27-'));
+  const supportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-bug27-support-'));
+  const bugEnv = { ...env, SUPPORT_DATA_DIR: supportDir };
+  const store = createJobStore({ directory: dir, env: bugEnv });
+  const job = store.create({ sessionId: 'cs_bug27', nameSource: 'Pump' });
+  store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
+  job.status = 'succeeded';
+  store.persist(job);
+  const app = createApp({ env: bugEnv, stripe, jobs: store, anthropic: { messages: { create: async () => { throw new Error('should not run'); } } } });
+  try {
+    await withServer(app, async (base) => {
+      const first = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_bug27' }),
+      });
+      assert.equal(first.status, 200);
+      const firstToken = (await first.json()).access_token;
+      const second = signAccessToken({ sessionId: 'cs_bug27' }, bugEnv);
+      const rawPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      assert.equal(rawPdf.status, 200);
+      await rawPdf.arrayBuffer();
+
+      const revoked = await fetch(`${base}/access-token/revoke`, {
+        method: 'POST',
+        headers: authHeaders(firstToken),
+      });
+      assert.equal(revoked.status, 200);
+      const old = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(firstToken) });
+      assert.equal(old.status, 401);
+      const sibling = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(second.token) });
+      assert.equal(sibling.status, 401);
+      const rawAfter = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      assert.equal(rawAfter.status, 401);
+      assert.equal((await rawAfter.json()).code, 'credential_revoked');
+      const started = new FormData();
+      started.set('session_id', 'cs_bug27');
+      started.set('file', new Blob(['<xml/>']), 'line.L5X');
+      const jobStart = await fetch(`${base}/jobs`, { method: 'POST', body: started });
+      assert.equal(jobStart.status, 401);
+      assert.equal((await jobStart.json()).code, 'credential_revoked');
+      assert.equal(updates.length, 0);
+
+      const jti = JSON.parse(Buffer.from(firstToken.split('.')[0], 'base64url').toString('utf8')).jti;
+      dropRevokedJti(jti);
+      forgetSessionCredential('cs_bug27', bugEnv);
+      assert.ok(verifyAccessToken(firstToken, bugEnv));
+      loadRevocations(bugEnv);
+      assert.equal(verifyAccessToken(firstToken, bugEnv), null);
+      const persisted = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      assert.equal(persisted.status, 401);
+      assert.equal((await persisted.json()).code, 'credential_revoked');
+      const saved = fs.readFileSync(path.join(supportDir, 'revoked-tokens.json'), 'utf8');
+      assert.equal(saved.includes('cs_bug27'), false);
+      const parsed = JSON.parse(saved);
+      assert.equal(typeof parsed.tokens[jti], 'number');
+      assert.equal(Object.values(parsed.sessions).some((state) => state.rawBlocked === true), true);
+
+      const fresh = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_bug27' }),
+      });
+      assert.equal(fresh.status, 200);
+      const freshToken = (await fresh.json()).access_token;
+      const again = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(freshToken) });
+      assert.equal(again.status, 200);
+      await again.arrayBuffer();
+      const rawAgain = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27' } });
+      assert.equal(rawAgain.status, 200);
+      await rawAgain.arrayBuffer();
+      const stale = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(firstToken) });
+      assert.equal(stale.status, 401);
+      assert.equal(updates.length, 0);
+    });
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(supportDir, { recursive: true, force: true });
+  }
+});
+
+test('a revoked session cannot bypass the access-token rate limit', async () => {
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_bug27_limit', { manuals_used: '0', plan: 'starter' }) } },
+    paymentIntents: { retrieve: async () => ({ id: 'pi_bug27_limit', metadata: { manuals_used: '0', plan: 'starter' } }) },
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-bug27-limit-'));
+  const store = createJobStore({ directory: dir, env });
+  const job = store.create({ sessionId: 'cs_bug27_limit', nameSource: 'Pump' });
+  store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
+  job.status = 'succeeded';
+  store.persist(job);
+  const app = createApp({ env, stripe, jobs: store, anthropic: null });
+  try {
+    await withServer(app, async (base) => {
+      let token = '';
+      for (let i = 0; i < EXCHANGE_LIMIT; i += 1) {
+        const ok = await fetch(`${base}/access-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
+        });
+        assert.equal(ok.status, 200);
+        token = (await ok.json()).access_token;
+      }
+      const revoked = await fetch(`${base}/access-token/revoke`, {
+        method: 'POST',
+        headers: authHeaders(token),
+      });
+      assert.equal(revoked.status, 200);
+      const blocked = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_bug27_limit' }),
+      });
+      assert.equal(blocked.status, 429);
+      assert.deepEqual(await blocked.json(), { error: 'Too many requests.' });
+      const raw = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_bug27_limit' } });
+      assert.equal(raw.status, 401);
+      assert.equal((await raw.json()).code, 'credential_revoked');
+    });
+  } finally {
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -24,15 +24,18 @@ const {
   verifyCheckoutSession,
 } = require('./lib/billing');
 const {
+  clearRawSessionBlock,
   legacySessionAllowed,
   loadRevocations,
+  logPortalTokenStatus,
+  portalTokensEnabled,
+  rawSessionBlocked,
   recordTokenExchange,
   revokeAccessToken,
   signAccessToken,
   tokenExchangeGate,
   tokenSecret,
   verifyAccessToken,
-  warnIfTokenSecretShort,
   safeEqual,
 } = require('./lib/access-token');
 const { contentDisposition, downloadFileName, sourceName } = require('./lib/download-name');
@@ -123,9 +126,17 @@ function clientLimiter(max) {
 function tokenSecretProblem(env) {
   const value = env && env.PORTAL_TOKEN_SECRET;
   if (value != null && String(value).trim() && !tokenSecret(env)) {
-    return 'PORTAL_TOKEN_SECRET is shorter than 32 bytes';
+    return 'PORTAL_TOKEN_SECRET is shorter than 32 bytes. Portal tokens are disabled.';
   }
-  return 'PORTAL_TOKEN_SECRET is not set';
+  return 'PORTAL_TOKEN_SECRET is missing. Portal tokens are disabled.';
+}
+
+function rejectPortalTokens(res, env) {
+  console.error(tokenSecretProblem(env));
+  return res.status(503).json({
+    error: 'Access tokens are unavailable.',
+    code: 'portal_tokens_disabled',
+  });
 }
 
 function tooMany(res, retryAfter) {
@@ -243,7 +254,7 @@ function createApp({
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
   const store = jobs || createJobStore({ env });
-  warnIfTokenSecretShort(env);
+  logPortalTokenStatus(env);
   loadRevocations(env);
   const app = express();
   app.disable('x-powered-by');
@@ -306,6 +317,7 @@ function createApp({
       creditHandbacksRejected,
       creditLedgerOk,
       supportDataDirOk: dataDirOk,
+      portalTokens: portalTokensEnabled(env),
     });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -423,7 +435,7 @@ function createApp({
 
   function verifiedBearer(token) {
     if (!tokenSecret(env)) {
-      throw exposed(503, 'Access tokens are temporarily unavailable.', tokenSecretProblem(env));
+      throw exposed(503, 'Access tokens are unavailable.', tokenSecretProblem(env), 'portal_tokens_disabled');
     }
     const caller = verifyAccessToken(token, env);
     if (!caller) throw exposed(401, 'Access token is invalid or expired.', null, 'access_token_invalid');
@@ -436,9 +448,15 @@ function createApp({
   // A bearer token wins when both are sent. Query session_id is not a download
   // credential. POST /access-token still accepts session_id after the sunset.
   function compatCaller(req) {
-    if (!legacySessionAllowed(env)) return null;
     const sessionId = readSessionId(req);
+    if (!legacySessionAllowed(env)) {
+      if (sessionId) throw exposed(401, 'session_id is no longer accepted.', null, 'session_id_retired');
+      return null;
+    }
     if (!sessionId) return null;
+    if (rawSessionBlocked(sessionId, env)) {
+      throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+    }
     return { sessionId, customerId: '', subscriptionId: '', via: 'compat' };
   }
 
@@ -544,8 +562,15 @@ function createApp({
   async function sessionForVerify(req) {
     const token = bearerToken(req);
     if (token) return verifiedBearer(token).sessionId;
-    if (!legacySessionAllowed(env)) return '';
-    return typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    const query = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    if (!legacySessionAllowed(env)) {
+      if (query) throw exposed(401, 'session_id is no longer accepted.', null, 'session_id_retired');
+      return '';
+    }
+    if (query && rawSessionBlocked(query, env)) {
+      throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+    }
+    return query;
   }
 
   app.get('/verify-session', verifyLimiter, async (req, res) => {
@@ -574,10 +599,7 @@ function createApp({
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
-      if (!tokenSecret(env)) {
-        console.error(tokenSecretProblem(env));
-        return res.status(503).json({ error: 'Access tokens are temporarily unavailable.' });
-      }
+      if (!tokenSecret(env)) return rejectPortalTokens(res, env);
       let access;
       try {
         access = await verifyCheckoutSession(stripeClient, sessionId, env);
@@ -603,6 +625,7 @@ function createApp({
         subscriptionId: access.plan === 'starter' ? '' : (access.subscriptionId || ''),
       }, env);
       recordTokenExchange(sessionId, env);
+      clearRawSessionBlock(sessionId, env);
       const sidHash = typeof store.hashCredential === 'function' ? store.hashCredential(sessionId) : '';
       if (sidHash) console.log('access_token_minted', sidHash.slice(0, 12));
       res.set(PRIVATE_RESPONSE);
@@ -623,10 +646,7 @@ function createApp({
       res.set(PRIVATE_RESPONSE);
       const token = bearerToken(req);
       if (!token) return res.status(401).json({ error: 'Access token is invalid or expired.', code: 'access_token_invalid' });
-      if (!tokenSecret(env)) {
-        console.error(tokenSecretProblem(env));
-        return res.status(503).json({ error: 'Access tokens are temporarily unavailable.' });
-      }
+      if (!tokenSecret(env)) return rejectPortalTokens(res, env);
       if (!revokeAccessToken(token, env)) {
         return res.status(401).json({ error: 'Access token is invalid or expired.', code: 'access_token_invalid' });
       }
