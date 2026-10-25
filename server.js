@@ -28,6 +28,7 @@ const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
 const { mountSupport } = require('./lib/support/http');
+const { startSupportRetention } = require('./lib/support/retention');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
@@ -357,6 +358,7 @@ function prepareListen(env = process.env, exit = process.exit) {
 
 function installShutdown(server, {
   closeBrowser: close = closeBrowser,
+  closeExtra = () => {},
   exit = process.exit,
   on = (signal, listener) => process.on(signal, listener),
   setTimeout: schedule = setTimeout,
@@ -367,6 +369,11 @@ function installShutdown(server, {
   const handler = () => new Promise((resolve) => {
     if (shuttingDown) return resolve();
     shuttingDown = true;
+    try {
+      closeExtra();
+    } catch {
+      // Stopping the retention sweep must not block shutdown.
+    }
     let settled = false;
     let timer;
     const finish = () => {
@@ -396,10 +403,14 @@ function start() {
   logPythonAvailability();
   const port = process.env.PORT || 3001;
   const app = createApp();
+  // Disk deletion runs before listen. Twilio, when credentials exist, finishes in the background.
+  const retention = startSupportRetention({ env: process.env, warn: false });
   const server = app.listen(port, () => {
     console.log(`ManualOS backend running on port ${port}`);
   });
-  installShutdown(server);
+  installShutdown(server, {
+    closeExtra: () => retention.stop(),
+  });
   return server;
 }
 

@@ -99,7 +99,8 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `LLM_USD_PER_1M_INPUT` | No | Default `0.15`, the gpt-4o-mini input rate. Change this if `LLM_MODEL` changes. |
 | `LLM_USD_PER_1M_OUTPUT` | No | Default `0.60`, the gpt-4o-mini output rate. |
 | `PUBLIC_BASE_URL` | Recommended on Railway | Public origin only, for example `https://manualforge-backend-production.up.railway.app`. Signature checks and the `wss://` relay URL use it. |
-| `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, and the budget counter. Railway's disk is ephemeral; mount a volume. |
+| `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, threads, and the budget counter. Railway's disk is ephemeral; mount a volume. |
+| `SUPPORT_RETENTION_DAYS` | No | Days to keep support threads, messages, transcripts, and Twilio recordings. Default `90`. A number below `1` is raised to `1`. A non-numeric value keeps the default. |
 | `SUPPORT_INTEGRATOR_ENABLED` | No | `true` mentions Integrator pricing. Default off, because that plan is not launched. |
 
 `STRIPE_PUBLISHABLE_KEY` is not read by this server. Hosted Checkout only needs the URL returned by `/create-checkout-session`. The old `STRIPE_PRICE_ID` variable is unused.
@@ -136,6 +137,20 @@ Escalation texts are sent from `TWILIO_FROM_NUMBER` to `ESCALATION_PHONE`. Toll-
 The spoken script, the email, and the saved status record never include a customer card number. If `ESCALATION_EMAIL` or `SMTP_HOST` / `SMTP_FROM` is unset, the email is skipped and a warning is logged. One customer call, or one SMS thread, produces at most one fallback call and one fallback email no matter how many alerts that interaction creates. While a live transfer to `ESCALATION_PHONE` is in progress, the fallback is email only so that phone is not rung twice. Until toll-free verification passes, every escalation text fails and uses this call-plus-email fallback. `PUBLIC_BASE_URL` has to be set or the status callback is omitted and only the API error can fall back. A local number avoids the toll-free messaging block. A text Twilio accepts without a message id is treated as unconfirmed and uses the same fallback.
 
 `SUPPORT_DATA_DIR` holds separate files: `opt-outs.json`, append-only `consents.jsonl` (never trimmed), `budget.json`, `threads.json`, `once.json`, and `sms-notices.json` (the status-callback payload, with card numbers redacted). A legacy `state.json` is split once and renamed `state.json.migrated`. Without a Railway volume those files disappear on redeploy, and the counter is only safe on one replica.
+
+## Retention
+
+Support threads, the messages stored on them, call recordings, and transcripts are deleted after 90 days. That is the promise on the privacy policy. The sweep runs when the server starts and every 6 hours after that. `npm run support:retention` runs the same sweep once and exits. `SUPPORT_RETENTION_DAYS` changes the window (default `90`, minimum `1`).
+
+On disk, the sweep deletes `threads.json` entries older than the window and the message history on those entries. Age is `updatedAt`, or `startedAt` when that is the only timestamp. An entry with no timestamp is deleted. It also deletes message files, transcript files, `sms-notices.json` rows (those rows store the voicemail transcript and the escalation text), and any other support artifact under `SUPPORT_DATA_DIR` older than the window. JSON is replaced by writing a temporary file in the same directory and renaming it into place. `opt-outs.json` and `consents.jsonl` are not trimmed. `budget.json` and `once.json` have no message content and are left in place. The log line is counts only: days, threads, messages, transcripts, files, recordings, transcriptions, and errors. Bodies, phone numbers, recording URLs, and transcript text are not logged.
+
+Twilio recordings and transcriptions older than the same window are deleted through the REST API (`client.recordings` and `client.transcriptions`). A recording is deleted only when its `dateCreated` instant is past the window. The list filter is calendar-day granularity, so the sweep checks the timestamp before it deletes anything. The Twilio step does nothing unless both `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are set. With the support line off, the sweep never calls Twilio. This repository does not set those variables and does not turn the line on.
+
+Belt and braces in the Twilio console, an ops step for Ryan: ordinary Programmable Voice recordings stay in the account until something deletes them. Twilio does not offer a 90-day auto-delete switch for non-PCI recordings. In the console, open **Monitor → Logs → Voice → Call recordings** (legacy Console: Programmable Voice → Recording logs), filter a range shorter than 90 days, and choose **Actions → Delete recordings**. A range of 90 days or longer fails in the console. Leave **PCI Mode** off. Its automatic deletion runs at one year, which is longer than this policy. If Voice settings later shows an automatic recording-retention control, set it to 90 days or fewer. That control does not replace this sweep.
+
+Escalation email is a second ops step for Ryan. Mail goes to `ESCALATION_EMAIL`, the Microsoft 365 mailbox, and those messages include the transcript and the recording link. This app cannot delete mail. The mailbox needs an M365 retention policy (on the mailbox, or on the folder those messages land in) that deletes them after 90 days. Until that policy is on, the mailbox copy outlives the promise.
+
+Backups are a third ops step for Ryan, once the support volume is attached. Use the volume plan's rotation: Railway **Daily** backups kept **6 days**, and **Weekly** backups kept **27 days**. Do not enable **Monthly** (kept 89 days). A monthly backup would still hold a thread deleted on day 90 until about day 179, so backups would extend well past the 90-day deletion. Daily plus weekly is the rotation that avoids that: the longest backup lasts 27 days, and it only contains data that was still on disk when the snapshot was taken.
 
 ## Stripe setup
 
