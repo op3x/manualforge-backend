@@ -22,6 +22,26 @@ const INTEGRATOR_YEARLY = 'ManualOS Integrator: 25 manuals per month, billed yea
 const OVERAGE_DESCRIPTION = 'ManualOS Integrator: one extra manual';
 
 const AI_WORD = /\bAI\b/i;
+const CONSENT_KEYS = ['terms_version', 'disclosure_version', 'renewal_consent_at', 'terms_consent_at', 'consent_ip'];
+
+function consentBody(plan) {
+  const body = { plan, termsAccepted: true, termsVersion: 'terms-2026-10-25' };
+  if (plan === 'pro') {
+    body.renewalConsent = true;
+    body.disclosureVersion = 'disclosure-2026-10-25';
+  }
+  return body;
+}
+
+function withoutConsent(params) {
+  const copy = structuredClone(params);
+  for (const slot of ['metadata', 'subscription_data', 'payment_intent_data']) {
+    const record = slot === 'metadata' ? copy.metadata : copy[slot] && copy[slot].metadata;
+    if (!record) continue;
+    for (const key of CONSENT_KEYS) delete record[key];
+  }
+  return copy;
+}
 
 const env = {
   FRONTEND_URL: 'https://manualos.com/',
@@ -509,16 +529,14 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
       const response = await fetch(base + '/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan }),
+        body: JSON.stringify(consentBody(plan)),
       });
       assert.equal(response.status, 200);
       const body = await response.json();
       assert.deepEqual(Object.keys(body), ['url']);
     }
-    const starterExpected = withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv });
-    const proExpected = withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv });
-    assert.deepEqual(calls[0], starterExpected);
-    assert.deepEqual(calls[1], proExpected);
+    assert.deepEqual(withoutConsent(calls[0]), withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
+    assert.deepEqual(withoutConsent(calls[1]), withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
     assert.equal(calls[0].customer, undefined);
     assert.equal(calls[0].customer_update, undefined);
     assert.equal(calls[0].customer_creation, 'always');
@@ -550,7 +568,7 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
       const paid = await fetch(tosBase + '/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: 'starter' }),
+        body: JSON.stringify(consentBody('starter')),
       });
       assert.equal(paid.status, 200);
       assert.equal(tosCalls[0].consent_collection.terms_of_service, 'required');

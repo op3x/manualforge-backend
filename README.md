@@ -13,16 +13,37 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 
 ### `POST /create-checkout-session`
 
-Request JSON: `{ "plan": "starter" }` or `{ "plan": "pro" }`.
+Request JSON:
+
+- Starter: `{ "plan": "starter", "termsAccepted": true, "termsVersion": "<terms version>" }`
+- Pro: the Starter fields plus `"renewalConsent": true` and `"disclosureVersion": "<auto-renew disclosure version>"`
+
+`termsAccepted` and `renewalConsent` must be the boolean `true`. The version strings are the copy the buyer was shown, trimmed, with no control characters, at most 80 characters. A subscription plan (Pro, and Integrator when that checkout exists) is rejected with **400** when the renewal flag or `disclosureVersion` is missing. Starter is a one-time payment and does not require the renewal flag. Integrator overage, also one-time, follows the Starter rule.
+
+The server writes `terms_version` on the Checkout Session metadata. A subscription also writes `disclosure_version`, `renewal_consent_at` (ISO-8601), and `plan` on both the session metadata and `subscription_data.metadata`. Starter writes `terms_consent_at` instead of the renewal fields. `consent_ip` is added on those same objects when the request IP is already available (`req.ip`). This does not set `consent_collection` or `custom_text`.
 
 Response JSON: `{ "url": "<hosted Checkout URL>" }`.
 
-Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mode: "subscription"` and `STRIPE_PRICE_PRO` (a recurring monthly price). Session metadata is `{ plan }`. Redirects:
+Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mode: "subscription"` and `STRIPE_PRICE_PRO` (a recurring monthly price). Redirects:
 
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
 
-Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard.
+Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard. Renewal and Terms consent for this API are the request flags above, not that Stripe checkbox.
+
+### `POST /access-link`
+
+Request JSON: `{ "email": "buyer@example.com" }`.
+
+`202` `{ "ok": true }` for every valid address, whether or not a subscription exists. The response is sent before the Stripe lookup, so an unknown address takes the same time as a known one. `400` `{ "error": "A valid email is required." }` for a missing or invalid address. `429` `{ "error": "Too many requests. Try again later." }` after 10 requests from one IP in an hour, or 3 requests for one address in an hour. The 429 body is the same in both cases.
+
+When the address has a paid subscription Checkout Session from the last 12 months, the server emails `${FRONTEND_URL}/cancel?token=...`. The token is an HMAC tied to that session's Stripe customer and expires after one hour. It is not a Checkout `session_id` and cannot be used to generate a manual. No email is sent for an unknown address or a Starter-only buyer. The route does not say which of those happened.
+
+### `POST /billing-portal`
+
+Request JSON: `{ "token": "<token from the email>" }` or `{ "session_id": "cs_..." }` for the buyer who still has their Checkout Session. Send one of those, not both. An optional `customer` must equal the customer on the token or session; a different customer is rejected and no portal session is created.
+
+`200` `{ "url": "<Billing Portal URL>" }`. `return_url` is `${FRONTEND_URL}/cancel`. When `STRIPE_PORTAL_CONFIGURATION_ID` is set, that configuration id is sent. `400` when the token or session is missing, invalid, expired, unpaid, or not a subscription. The same error is returned for an unknown session and for a Starter session. `429` uses the same body as `/access-link` after 10 requests from one IP in an hour.
 
 ### `GET /verify-session?session_id=cs_...`
 
@@ -77,7 +98,9 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_PRICE_STARTER` | Yes | Price id for the $39 one-time Starter price |
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
-| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. |
+| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. Renewal consent does not use this flag. |
+| `PORTAL_TOKEN_SECRET` | No | HMAC key for cancel links. When unset, `STRIPE_WEBHOOK_SECRET` is the key. Never logged. |
+| `STRIPE_PORTAL_CONFIGURATION_ID` | No | Billing Portal configuration id (`bpc_...`). Unset uses the account's default configuration. |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
@@ -146,8 +169,9 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
    `https://manualforge-backend-production.up.railway.app/webhook`
    Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
-4. Create a restricted API key with read access to Charges, PaymentIntents, Invoices, Subscriptions, Prices, Products, Checkout Sessions, and Customers, and write access to PaymentIntents, Subscriptions, and Checkout Sessions. Customers Write is not used. Also grant read access to Invoice payments, because renewal classification lists them. The delivery stamp writes metadata on the period charge, or on the invoice when that invoice has no charge, so Charges write and Invoices write are required for that stamp. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. The server updates subscription metadata only after the brand gate accepts the event. A lost dispute also cancels that subscription with no proration. A refund does not cancel it.
+4. Create a restricted API key with read access to Charges, PaymentIntents, Invoices, Subscriptions, Prices, Products, Checkout Sessions, and Customers, and write access to PaymentIntents, Subscriptions, Checkout Sessions, and Billing Portal sessions. Customers Write is not used. Also grant read access to Invoice payments, because renewal classification lists them. The delivery stamp writes metadata on the period charge, or on the invoice when that invoice has no charge, so Charges write and Invoices write are required for that stamp. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. The server updates subscription metadata only after the brand gate accepts the event. A lost dispute also cancels that subscription with no proration. A refund does not cancel it.
 5. On the Starter price set lookup key `manualos_starter`. On the Pro price set lookup key `manualos_pro`. Checkout uses the lookup key when it finds one, and otherwise uses the price id variables above. Setting those lookup keys is a Dashboard change and is not done by this repository.
+6. In **Settings → Billing → Customer portal** (test mode and live mode), turn the portal on and allow customers to cancel subscriptions at the end of the billing period. Save. The cancel API creates a portal session only; cancellation itself is this Dashboard setting. Optionally create a portal configuration with that setting and put its id in `STRIPE_PORTAL_CONFIGURATION_ID`.
 
 ### Shared Stripe account
 

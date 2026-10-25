@@ -36,6 +36,10 @@ const {
   rollbackFirstManual,
   touchGenerationStarted,
 } = require('./lib/delivery');
+const { applyCheckoutConsent } = require('./lib/checkout-consent');
+const { requestIp } = require('./lib/client-ip');
+const { mountBillingPortal } = require('./lib/billing-portal');
+const { createSmtpMailer } = require('./lib/support/mail');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -148,10 +152,13 @@ function createApp({
   supportComplete,
   supportNow,
   mailer,
+  now,
   onStripeEvent,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
+  const clock = typeof now === 'function' ? now : () => Date.now();
+  const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
   const store = jobs || createJobStore({ env });
@@ -252,10 +259,17 @@ function createApp({
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       const plan = req.body && req.body.plan;
-      const params = await applyManualosCheckout(
-        stripeClient,
-        withCheckoutPolicy(checkoutParams(plan, env), { plan, env }),
-        plan,
+      // #13 order is withCheckoutPolicy around checkout params. #10's withAttribution
+      // wraps that result (either order). #16 applyManualosCheckout may replace the
+      // price. Consent metadata is applied after that and only writes metadata.
+      const params = applyCheckoutConsent(
+        await applyManualosCheckout(
+          stripeClient,
+          withCheckoutPolicy(checkoutParams(plan, env), { plan, env }),
+          plan,
+        ),
+        req.body,
+        { ip: requestIp(req), now: clock() },
       );
       const session = await stripeClient.checkout.sessions.create(params);
       if (!session || !session.url) {
@@ -266,6 +280,14 @@ function createApp({
     } catch (err) {
       return sendError(res, err);
     }
+  });
+
+  mountBillingPortal(app, {
+    env,
+    stripe: stripeClient,
+    mailer: mailerClient,
+    now: clock,
+    sendError,
   });
 
   app.get('/verify-session', async (req, res) => {

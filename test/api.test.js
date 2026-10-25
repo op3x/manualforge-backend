@@ -21,6 +21,15 @@ const L5X = `<?xml version="1.0" encoding="UTF-8"?>
   </Controller>
 </RSLogix5000Content>`;
 
+function checkoutRequest(plan) {
+  const body = { plan, termsAccepted: true, termsVersion: 'terms-2026-10-25' };
+  if (plan === 'pro') {
+    body.renewalConsent = true;
+    body.disclosureVersion = 'disclosure-2026-10-25';
+  }
+  return JSON.stringify(body);
+}
+
 function baseEnv(extra = {}) {
   return {
     NODE_ENV: 'test',
@@ -187,7 +196,7 @@ test('health, checkout, verify, and webhook', async () => {
     const checkout = await fetch(base + '/create-checkout-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
-      body: JSON.stringify({ plan: 'pro' }),
+      body: checkoutRequest('pro'),
     });
     assert.equal(checkout.status, 200);
     assert.equal(checkout.headers.get('access-control-allow-origin'), 'https://manualos.com');
@@ -303,7 +312,7 @@ test('pro generation does not touch the starter counter and checkout failures st
     const boom = await fetch(base + '/create-checkout-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: 'starter' }),
+      body: checkoutRequest('starter'),
     });
     assert.equal(boom.status, 500);
     const boomBody = await boom.json();
