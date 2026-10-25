@@ -56,8 +56,8 @@
       "hazard": "Drive and power-supply capacitors stay charged after power is removed.",
       "consequence": "Touching DC bus terminals before discharge will cause death or severe injury.",
       "avoidance": [
-        "After isolation wait at least the stated discharge time ({discharge_time_min} min).",
-        "Measure the DC bus before work and confirm it is below 50 V."
+        "After isolation, wait at least the discharge time printed on the drive label or in the drive manual.",
+        "Measure the DC bus before work and confirm it is below the voltage stated on the drive label or in the drive manual."
       ],
       "triggers": {
         "plc": "VFD/servo drive present",
@@ -528,6 +528,7 @@
       ],
       "applies_to_sections": [
         "safety.residual_risks",
+        "safety.energy_isolation",
         "maint.safety",
         "product.subsystem_function"
       ],
@@ -542,8 +543,9 @@
       "iso12100_group": "Thermal",
       "signal_word": "WARNING",
       "hazard": "Hot oil, coolant, steam or water under pressure.",
-      "consequence": "Spraying hot fluid can cause severe burns.",
+      "consequence": "Spraying hot fluid can cause severe burns and scalds.",
       "avoidance": [
+        "Isolate and lock the supply before you vent steam, drain hot fluid, or open a fitting.",
         "Let the system cool and depressurise before opening caps or drains."
       ],
       "triggers": {
@@ -554,8 +556,12 @@
         "gloves"
       ],
       "applies_to_sections": [
+        "safety.residual_risks",
+        "safety.energy_isolation",
+        "safety.signs",
         "maint.lubrication",
         "maint.procedures",
+        "maint.safety",
         "product.subsystem_function"
       ],
       "iso7010_symbol": "W017",
@@ -969,7 +975,7 @@
       "iso12100_group": "Property / process",
       "signal_word": "NOTICE",
       "hazard": "Wrong supply voltage, phase rotation, air quality, lubricant or fluid.",
-      "consequence": "Can damage the machine and void the warranty.",
+      "consequence": "Can damage the machine.",
       "avoidance": [
         "Check supply data against the nameplate before connecting.",
         "Use only the specified lubricants and fluids."

@@ -54,8 +54,8 @@ test('a CAD manual describes motion and does not treat the frame as a product st
   assert.equal((schedule.match(/<tr>/g) || []).length >= 16, true);
   const troubleAt = html.indexOf('Troubleshooting guide</h2>');
   const trouble = html.slice(troubleAt, html.indexOf('Accidents, breakdowns</h2>', troubleAt));
-  assert.match(trouble, /Subsystem/);
-  assert.equal((trouble.match(/<tr>/g) || []).length >= 4, true);
+  assert.match(trouble, /NEEDS INPUT/);
+  assert.equal(/does not start/.test(trouble), false);
 });
 
 test('calculation logic is not described as a packaging line', async () => {

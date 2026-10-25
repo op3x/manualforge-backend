@@ -137,7 +137,8 @@ test('alarms name the device, drop raw member codes, and troubleshooting is grou
   assert.match(html, /Control logic description/);
   assert.equal(/Control the device/.test(html), false);
   assert.match(html, /Cooker 1 level high-high/);
-  assert.match(html, /stops and stays stopped/);
+  assert.match(html, /Lower the level/);
+  assert.equal(/ALM-\d+/.test(html), false);
   const alarms = html.slice(html.indexOf('Alarm and fault messages</h2>'), html.indexOf('Troubleshooting guide</h2>'));
   assert.equal(/high_high_alarm|\bHH\b/.test(alarms), false);
   assert.equal((alarms.match(/Cooker 1 level high-high/g) || []).length, 1);

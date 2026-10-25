@@ -145,9 +145,8 @@ test('troubleshooting is grounded and a drawing still has rows', () => {
   assert.equal(/does not move/i.test(trouble), false);
   assert.equal(/jammed, loose, or unpowered/i.test(trouble), false);
   assert.equal(/End Cap on /.test(trouble), false);
-  assert.match(trouble, /does not start/);
-  assert.match(trouble, /permissive|interlock/i);
-  assert.ok((trouble.match(/<tr>/g) || []).length > 4);
+  assert.match(trouble, /NEEDS INPUT/);
+  assert.equal(/does not start/.test(trouble), false);
 
   const dxf = `0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n2\n0\nLAYER\n2\nVisible\n70\n0\n0\nLAYER\n2\nSketch1\n70\n0\n0\nENDTAB\n0\nENDSEC\n0\nEOF\n`;
   return parseUploads([{ name: 'onlinerobotics_gripper.dxf', buffer: Buffer.from(dxf) }]).then((drawn) => {
@@ -156,7 +155,8 @@ test('troubleshooting is grounded and a drawing still has rows', () => {
     assert.equal(/<h2[^>]*>\s*Visible\s*</i.test(drawnHtml), false);
     assert.equal(/Sketch1/.test(drawnHtml), false);
     const drawnTrouble = drawnHtml.slice(drawnHtml.indexOf('Troubleshooting guide</h2>'), drawnHtml.indexOf('Accidents, breakdowns</h2>'));
-    assert.ok((drawnTrouble.match(/<tr>/g) || []).length >= 7, drawnTrouble.slice(0, 500));
+    assert.match(drawnTrouble, /NEEDS INPUT/);
+    assert.equal(/does not start/.test(drawnTrouble), false);
     assert.equal(/does not move/i.test(drawnTrouble), false);
   });
 });
@@ -206,12 +206,14 @@ END_FUNCTION_BLOCK
   ];
   const alarmHtml = renderHtml(buildDocument(cooker));
   const alarms = alarmHtml.slice(alarmHtml.indexOf('Alarm and fault messages</h2>'), alarmHtml.indexOf('Troubleshooting guide</h2>'));
-  assert.match(alarms, /ALM-1/);
+  assert.match(alarms, /Cooker 1 level high-high/);
+  assert.equal(/ALM-\d+/.test(alarms), false);
   assert.equal(/Device Alarm/.test(alarms), false);
   assert.equal(sanitizeProse('ALM-1 is the first code.', cooker), 'ALM-1 is the first code.');
   assert.equal(/Cfg high-high|Alarms in Bypass/.test(alarms), false);
   assert.match(alarms, /Warning/);
-  assert.match(alarms, /keeps running and the warning stays on/);
+  assert.match(alarms, /Watch the trend/);
+  assert.equal(/keeps running and the warning stays on/.test(alarms), false);
   const supply = alarmHtml.slice(alarmHtml.indexOf('Information to supply</h2>'), alarmHtml.indexOf('About this manual</h2>'));
   assert.equal(/Supply the information for Control logic description/.test(supply), false);
 });
