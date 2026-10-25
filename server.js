@@ -66,13 +66,15 @@ const {
 } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
+const caBusiness = require('./lib/ca-business');
 const {
   caGateEnabled,
-  parseCaCheckoutFields,
   ensureBillingAddressCollection,
   createCaAttestationStore,
   applyCaBusinessBackstop,
-} = require('./lib/ca-business');
+  assertCaPurchaseAllowed,
+  caCheckoutStorageReady,
+} = caBusiness;
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -323,6 +325,7 @@ function createApp({
   now,
   onStripeEvent,
   creditLedger,
+  parseCaCheckoutFields = caBusiness.parseCaCheckoutFields,
   scheduleTimeout = setTimeout,
   cancelTimeout = clearTimeout,
 } = {}) {
@@ -349,6 +352,26 @@ function createApp({
   }
   const ledger = creditLedger || createCreditLedger({ env });
   const caAttestations = createCaAttestationStore({ env });
+
+  async function expireCheckoutSession(sessionId) {
+    const expire = stripeClient && stripeClient.checkout && stripeClient.checkout.sessions && stripeClient.checkout.sessions.expire;
+    if (!sessionId || typeof expire !== 'function') return;
+    try {
+      await expire.call(stripeClient.checkout.sessions, sessionId);
+    } catch {
+      console.error('Checkout session could not be expired', maskSessionId(sessionId));
+    }
+  }
+
+  async function enforceCaPurchase(sessionId) {
+    await assertCaPurchaseAllowed({
+      stripe: stripeClient,
+      sessionId,
+      env,
+      store: caAttestations,
+    });
+  }
+
   jobTimeoutMs(env);
   warnSupportDataDir(env);
   ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
@@ -525,7 +548,14 @@ function createApp({
       }
       const plan = req.body && req.body.plan;
       const gate = caGateEnabled(env);
-      if (gate) parseCaCheckoutFields(req.body);
+      const caFields = gate ? parseCaCheckoutFields(req.body) : null;
+      if (gate && caFields.caBusinessAttestation === true && !caCheckoutStorageReady(env)) {
+        console.error('Canadian business attestation cannot be stored');
+        const err = new Error('Checkout is temporarily unavailable.');
+        err.status = 500;
+        err.expose = true;
+        throw err;
+      }
       // #13 order is withCheckoutPolicy around checkout params. #10's withAttribution
       // wraps that result (either order). #16 applyManualosCheckout may replace the
       // price. Consent metadata is applied after that and only writes metadata, so it
@@ -549,9 +579,8 @@ function createApp({
         console.error('Stripe Checkout Session did not include a URL');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
-      if (gate) {
-        const fields = parseCaCheckoutFields(req.body);
-        if (fields.caBusinessAttestation === true) {
+      if (gate && caFields.caBusinessAttestation === true) {
+        try {
           const customerId = typeof session.customer === 'string'
             ? session.customer
             : (session.customer && session.customer.id) || params.customer;
@@ -560,10 +589,13 @@ function createApp({
             customerId,
             userId: session.client_reference_id,
             at: new Date(clock()).toISOString(),
-            billingCountry: fields.billingCountry,
+            billingCountry: caFields.billingCountry,
             caBusinessAttestation: true,
-            attestationVersion: fields.attestationVersion,
+            attestationVersion: caFields.attestationVersion,
           });
+        } catch (err) {
+          await expireCheckoutSession(session && session.id);
+          throw err;
         }
       }
       return res.json({ url: session.url });
@@ -754,6 +786,7 @@ function createApp({
       let body;
       try {
         const access = await verifyCheckoutSession(stripeClient, sessionId, env);
+        await enforceCaPurchase(sessionId, access);
         body = publicAccess(access);
       } catch (err) {
         if (!isStripeNotFound(err)) throw err;
@@ -902,7 +935,14 @@ function createApp({
   async function runPaid(req, res, { reserveAtStart, respond }) {
     const caller = await generationCaller(req);
     verifyCache.delete(caller.sessionId);
-    const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
+    const loaded = await verifyCheckoutSession(stripeClient, caller.sessionId, env).catch((err) => {
+      if (isStripeNotFound(err)) {
+        throw exposed(404, 'No purchase was found for this session.', null, 'purchase_not_found');
+      }
+      throw err;
+    });
+    await enforceCaPurchase(caller.sessionId, loaded);
+    const access = await assertCanGenerate(stripeClient, caller.sessionId, env, loaded);
     const tooLong = overLengthField(req.body);
     if (tooLong) {
       throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
@@ -1076,6 +1116,7 @@ function createApp({
           stopRefresh();
           pageCount = pdfPageCount(result && result.pdf);
           try {
+            await enforceCaPurchase(sessionId);
             const block = await accessBlock(stripeClient, sessionId, env);
             if (block) throw blockedError(block);
             store.savePdf(job.id, result.pdf);
@@ -1170,6 +1211,7 @@ function createApp({
       if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
       const sessionForBlock = job.sessionId || (caller && identityMatches(caller, job) ? caller.sessionId : '');
       if (sessionForBlock) {
+        await enforceCaPurchase(sessionForBlock);
         const block = await accessBlock(stripeClient, sessionForBlock, env);
         if (block) return res.status(block.status).json({ error: block.message });
       }
@@ -1209,6 +1251,7 @@ function createApp({
             env,
             renderPdf,
           });
+          await enforceCaPurchase(sessionId);
           const block = await accessBlock(stripeClient, sessionId, env);
           if (block) throw blockedError(block);
           if (!result.pdf || !result.pdf.length) {

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { checkoutParams, PRO_REFUNDED_MESSAGE, STARTER_REFUNDED_MESSAGE } = require('../lib/billing');
+const { checkoutParams } = require('../lib/billing');
 const { withCheckoutPolicy } = require('../lib/checkoutPolicy');
 const { applyCheckoutConsent, withManualosBrand } = require('../lib/checkout-consent');
 const { applyManualosCheckout } = require('../lib/stripeBrand');
@@ -12,8 +12,11 @@ const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 const {
   ATTESTATION_FILE,
+  CA_BUSINESS_CODE,
   CA_BUSINESS_MESSAGE,
   REFUND_FILE,
+  caCheckoutStorageReady,
+  caGateEnabled,
   createCaAttestationStore,
   ensureBillingAddressCollection,
 } = require('../lib/ca-business');
@@ -60,10 +63,20 @@ async function withServer(app, fn) {
 }
 
 function createStripe() {
-  const calls = { create: [], refunds: [], cancels: [], piUpdates: [], subUpdates: [] };
+  const calls = {
+    create: [],
+    refunds: [],
+    cancels: [],
+    piUpdates: [],
+    subUpdates: [],
+    expires: [],
+    invoicePaymentLists: [],
+  };
   const sessions = {};
   const intents = {};
   const subs = {};
+  const invoices = {};
+  const listedPayments = {};
   const stripe = {
     checkout: {
       sessions: {
@@ -71,28 +84,51 @@ function createStripe() {
           calls.create.push(params);
           const id = `cs_created_${calls.create.length}`;
           const plan = params.metadata && params.metadata.plan;
-          const paymentIntent = `pi_${id}`;
           const prior = (params.payment_intent_data && params.payment_intent_data.metadata) || {};
-          intents[paymentIntent] = {
-            metadata: { ...prior, plan, brand: 'manualos', manuals_used: prior.manuals_used || '0' },
-          };
           const session = {
             id,
             object: 'checkout.session',
             mode: params.mode,
             metadata: { ...(params.metadata || {}) },
             payment_status: 'paid',
-            payment_intent: paymentIntent,
+            payment_intent: null,
             subscription: null,
+            invoice: null,
           };
           if (params.mode === 'subscription') {
             const subId = `sub_${id}`;
+            const invoiceId = `in_${id}`;
+            const paymentIntent = `pi_${id}`;
             const subMeta = (params.subscription_data && params.subscription_data.metadata) || {};
-            subs[subId] = { id: subId, status: 'active', metadata: { ...subMeta } };
+            intents[paymentIntent] = { metadata: { ...subMeta, plan, brand: 'manualos' } };
+            invoices[invoiceId] = {
+              id: invoiceId,
+              payments: {
+                data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: paymentIntent } }],
+              },
+            };
+            subs[subId] = {
+              id: subId,
+              status: 'active',
+              metadata: { ...subMeta },
+              latest_invoice: invoiceId,
+            };
             session.subscription = subId;
+            session.invoice = invoiceId;
+          } else {
+            const paymentIntent = `pi_${id}`;
+            intents[paymentIntent] = {
+              metadata: { ...prior, plan, brand: 'manualos', manuals_used: prior.manuals_used || '0' },
+            };
+            session.payment_intent = paymentIntent;
           }
           sessions[id] = session;
           return { id, url: `https://checkout.example.test/${id}`, customer: 'cus_created' };
+        },
+        expire: async (id) => {
+          calls.expires.push(id);
+          if (sessions[id]) sessions[id].status = 'expired';
+          return { id, status: 'expired' };
         },
         retrieve: async (id) => {
           if (!sessions[id]) {
@@ -139,7 +175,12 @@ function createStripe() {
           err.code = 'resource_missing';
           throw err;
         }
-        return { id, status: subs[id].status, metadata: { ...subs[id].metadata } };
+        return {
+          id,
+          status: subs[id].status,
+          metadata: { ...subs[id].metadata },
+          latest_invoice: subs[id].latest_invoice || null,
+        };
       },
       update: async (id, params) => {
         calls.subUpdates.push({ id, metadata: { ...params.metadata } });
@@ -152,6 +193,29 @@ function createStripe() {
         return { id, status: 'canceled', metadata: { ...subs[id].metadata } };
       },
     },
+    invoices: {
+      retrieve: async (id) => {
+        if (!invoices[id]) {
+          const err = new Error('missing invoice');
+          err.statusCode = 404;
+          err.code = 'resource_missing';
+          throw err;
+        }
+        return invoices[id];
+      },
+    },
+    invoicePayments: {
+      list: async (params) => {
+        calls.invoicePaymentLists.push(params);
+        const id = params && typeof params.invoice === 'string' ? params.invoice : '';
+        if (Object.prototype.hasOwnProperty.call(listedPayments, id)) {
+          return { object: 'list', data: listedPayments[id] };
+        }
+        const invoice = invoices[id];
+        const data = invoice && invoice.payments && Array.isArray(invoice.payments.data) ? invoice.payments.data : [];
+        return { object: 'list', data };
+      },
+    },
     webhooks: {
       constructEvent(body, signature, secret) {
         if (signature !== 't=1,v1=ok' || secret !== 'whsec_test') {
@@ -161,7 +225,7 @@ function createStripe() {
       },
     },
   };
-  return { stripe, calls, sessions, intents, subs };
+  return { stripe, calls, sessions, intents, subs, invoices, listedPayments };
 }
 
 function seedStarter(mock, id) {
@@ -184,18 +248,39 @@ function seedStarter(mock, id) {
 function seedPro(mock, id) {
   const paymentIntent = `pi_${id}`;
   const subId = `sub_${id}`;
+  const invoiceId = `in_${id}`;
   mock.intents[paymentIntent] = { metadata: { plan: 'pro', brand: 'manualos' } };
-  mock.subs[subId] = { id: subId, status: 'active', metadata: { plan: 'pro', brand: 'manualos' } };
+  mock.invoices[invoiceId] = {
+    id: invoiceId,
+    payments: {
+      data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: paymentIntent } }],
+    },
+  };
+  mock.subs[subId] = {
+    id: subId,
+    status: 'active',
+    metadata: { plan: 'pro', brand: 'manualos' },
+    latest_invoice: invoiceId,
+  };
   mock.sessions[id] = {
     id,
     object: 'checkout.session',
     mode: 'subscription',
     metadata: { plan: 'pro', brand: 'manualos' },
     payment_status: 'paid',
-    payment_intent: paymentIntent,
+    payment_intent: null,
+    invoice: invoiceId,
     subscription: subId,
   };
   return mock.sessions[id];
+}
+
+function setCountry(session, country) {
+  session.customer_details = {
+    email: 'buyer@example.com',
+    address: { country },
+  };
+  return session;
 }
 
 function completedEvent(session, country) {
@@ -251,13 +336,14 @@ function readJsonl(dir, name) {
     .map((line) => JSON.parse(line));
 }
 
-function appFor(env, stripe) {
+function appFor(env, stripe, extra = {}) {
   return createApp({
     env,
     stripe,
     anthropic: null,
     now: () => FIXED,
     creditLedger: createCreditLedger({ env, intervalMs: 0 }),
+    ...extra,
   });
 }
 
@@ -322,7 +408,7 @@ test('an attestation record is fsynced before it is renamed', async () => {
       caBusinessAttestation: true,
       attestationVersion: 'ca-b2b-v1',
     });
-    assert.deepEqual(events, ['fsync', 'rename', 'fsync', 'rename']);
+    assert.deepEqual(events, ['fsync', 'rename', 'fsync', 'fsync', 'rename', 'fsync']);
     const rows = readJsonl(dir, ATTESTATION_FILE);
     assert.deepEqual(rows.map((row) => row.sessionId), ['cs_fsync', 'cs_fsync_2']);
   } finally {
@@ -455,9 +541,9 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const mock = createStripe();
-  const starter = seedStarter(mock, 'cs_block');
-  const pro = seedPro(mock, 'cs_pro_block');
-  seedStarter(mock, 'cs_us');
+  const starter = setCountry(seedStarter(mock, 'cs_block'), 'CA');
+  const pro = setCountry(seedPro(mock, 'cs_pro_block'), 'CA');
+  setCountry(seedStarter(mock, 'cs_us'), 'US');
   const app = appFor(env, mock.stripe);
   try {
     await capture(async (lines) => {
@@ -479,10 +565,11 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
         assert.equal(mock.calls.cancels.length, 0);
 
         const access = await fetch(`${base}/verify-session?session_id=cs_block`);
-        assert.deepEqual(await access.json(), { valid: false, plan: 'starter', remaining: 0 });
+        assert.equal(access.status, 400);
+        assert.deepEqual(await access.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
         const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_block' } });
-        assert.equal(job.status, 402);
-        assert.equal((await job.json()).error, STARTER_REFUNDED_MESSAGE);
+        assert.equal(job.status, 400);
+        assert.deepEqual(await job.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
         const health = await fetch(`${base}/health`);
         assert.equal((await health.json()).caBackstopRefunds, 1);
@@ -508,16 +595,23 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
           id: 'sub_cs_pro_block',
           metadata: { period_access: 'revoked', period_access_reason: 'refund' },
         }]);
+        assert.equal(pro.payment_intent, null);
+        assert.equal(mock.invoices.in_cs_pro_block.payment_intent, undefined);
+        assert.equal(mock.invoices.in_cs_pro_block.charge, undefined);
         const proAccess = await fetch(`${base}/verify-session?session_id=cs_pro_block`);
-        assert.deepEqual(await proAccess.json(), { valid: false, plan: 'pro', remaining: null });
+        assert.equal(proAccess.status, 400);
+        assert.deepEqual(await proAccess.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
         const proJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_pro_block' } });
-        assert.equal(proJob.status, 402);
-        assert.equal((await proJob.json()).error, PRO_REFUNDED_MESSAGE);
+        assert.equal(proJob.status, 400);
+        assert.deepEqual(await proJob.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
         assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 2);
       });
       const logged = lines.join('\n');
-      assert.match(logged, /Canadian business check refunded cs_block/);
-      assert.match(logged, /Canadian business check already refunded cs_block/);
+      assert.match(logged, /Canadian business check refunded lock/);
+      assert.match(logged, /Canadian business check already refunded lock/);
+      assert.equal(logged.includes('cs_block'), false);
+      assert.equal(logged.includes('cs_pro_block'), false);
+      assert.equal(logged.includes('cs_us'), false);
       assert.equal(logged.includes('buyer@example.com'), false);
       assert.equal(logged.includes('sk_test_'), false);
       assert.equal(logged.includes('whsec_'), false);
@@ -545,7 +639,7 @@ test('a Canadian billing country with a valid attestation is granted', async () 
         attestationVersion: 'ca-b2b-v1',
       });
       assert.equal(opened.status, 200);
-      const session = mock.sessions.cs_created_1;
+      const session = setCountry(mock.sessions.cs_created_1, 'CA');
       const hook = await postWebhook(base, completedEvent(session, 'CA'));
       assert.equal(hook.status, 200);
       assert.equal(mock.calls.refunds.length, 0);
@@ -565,7 +659,9 @@ test('a Canadian billing country with a valid attestation is granted', async () 
         attestationVersion: 'ca-b2b-v1',
       });
       assert.equal(pro.status, 200);
-      const proHook = await postWebhook(base, completedEvent(mock.sessions.cs_created_2, 'CA'));
+      const proSession = setCountry(mock.sessions.cs_created_2, 'CA');
+      assert.equal(proSession.payment_intent, null);
+      const proHook = await postWebhook(base, completedEvent(proSession, 'CA'));
       assert.equal(proHook.status, 200);
       assert.equal(mock.calls.refunds.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
@@ -609,7 +705,7 @@ test('turning the gate off restores checkout and webhook behavior', async () => 
   const env = baseEnv({ SUPPORT_DATA_DIR: dir, MANUALOS_CA_B2B_GATE: '0' });
   const mock = createStripe();
   const expected = await expectedParams(mock.stripe, 'starter', env);
-  const session = seedStarter(mock, 'cs_open');
+  const session = setCountry(seedStarter(mock, 'cs_open'), 'CA');
   const app = appFor(env, mock.stripe);
   try {
     await withServer(app, async (base) => {
@@ -670,6 +766,291 @@ test('another product on the shared account is not refunded', async () => {
       assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 0);
     });
     assert.equal(fs.existsSync(path.join(dir, REFUND_FILE)), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unattested Canadian session is refused before any credit or Pro access', async () => {
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir, MANUALOS_LEGACY_GENERATE: '1' });
+  const mock = createStripe();
+  const starter = setCountry(seedStarter(mock, 'cs_window'), 'CA');
+  const pro = setCountry(seedPro(mock, 'cs_window_pro'), 'CA');
+  setCountry(seedStarter(mock, 'cs_window_us'), 'US');
+  const app = appFor(env, mock.stripe);
+  try {
+    await withServer(app, async (base) => {
+      const verify = await fetch(`${base}/verify-session?session_id=cs_window`);
+      assert.equal(verify.status, 400);
+      assert.deepEqual(await verify.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+
+      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_window' } });
+      assert.equal(job.status, 400);
+      assert.deepEqual(await job.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+
+      const legacy = await fetch(`${base}/generate-manual`, { method: 'POST', headers: { 'X-Session-Id': 'cs_window' } });
+      assert.equal(legacy.status, 400);
+      assert.deepEqual(await legacy.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+
+      const proVerify = await fetch(`${base}/verify-session?session_id=cs_window_pro`);
+      assert.equal(proVerify.status, 400);
+      assert.deepEqual(await proVerify.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+      const proJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_window_pro' } });
+      assert.equal(proJob.status, 400);
+      assert.deepEqual(await proJob.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+
+      const unitedStates = await fetch(`${base}/verify-session?session_id=cs_window_us`);
+      assert.equal(unitedStates.status, 200);
+      assert.deepEqual(await unitedStates.json(), { valid: true, plan: 'starter', remaining: 3 });
+    });
+    assert.equal(mock.intents[starter.payment_intent].metadata.manuals_used, '0');
+    assert.equal(mock.calls.piUpdates.length, 0);
+    assert.equal(mock.calls.refunds.length, 0);
+    assert.equal(mock.calls.cancels.length, 0);
+    assert.equal(mock.subs[pro.subscription].status, 'active');
+    assert.equal(pro.payment_intent, null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a subscription refund uses invoice payments and is not counted when none exist', async () => {
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const mock = createStripe();
+  const listed = setCountry(seedPro(mock, 'cs_list_pay'), 'CA');
+  mock.invoices[listed.invoice] = { id: listed.invoice };
+  mock.listedPayments[listed.invoice] = [{
+    status: 'paid',
+    payment: { type: 'charge', charge: 'ch_list_pay' },
+  }];
+  const missing = setCountry(seedPro(mock, 'cs_no_payment'), 'CA');
+  mock.invoices[missing.invoice] = { id: missing.invoice };
+  mock.listedPayments[missing.invoice] = [];
+  const app = appFor(env, mock.stripe);
+  try {
+    await withServer(app, async (base) => {
+      const paid = await postWebhook(base, completedEvent(listed, 'CA'));
+      assert.equal(paid.status, 200);
+      assert.equal(listed.payment_intent, null);
+      assert.deepEqual(mock.calls.invoicePaymentLists[0], { invoice: listed.invoice, limit: 10 });
+      assert.deepEqual(mock.calls.refunds[0].params, { charge: 'ch_list_pay' });
+      assert.equal(Object.hasOwn(mock.calls.refunds[0].params, 'amount'), false);
+      assert.equal(mock.calls.cancels.length, 1);
+      assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 1);
+
+      const unpaid = await postWebhook(base, completedEvent(missing, 'CA'));
+      assert.equal(unpaid.status, 500);
+      assert.equal(mock.calls.refunds.length, 1);
+      assert.equal(mock.calls.cancels.length, 1);
+      assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 1);
+    });
+    assert.deepEqual(readJsonl(dir, REFUND_FILE).map((row) => row.sessionId), ['cs_list_pay']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unpaid completed session waits for async payment success', async () => {
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const mock = createStripe();
+  const session = setCountry(seedStarter(mock, 'cs_delay'), 'CA');
+  session.payment_status = 'unpaid';
+  const app = appFor(env, mock.stripe);
+  try {
+    await capture(async (lines) => {
+      await withServer(app, async (base) => {
+        const waiting = await postWebhook(base, completedEvent(session, 'CA'));
+        assert.equal(waiting.status, 200);
+        assert.equal(mock.calls.refunds.length, 0);
+        assert.equal(mock.calls.piUpdates.length, 0);
+        assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 0);
+        assert.equal(fs.existsSync(path.join(dir, REFUND_FILE)), false);
+
+        session.payment_status = 'paid';
+        const asyncEvent = {
+          id: 'evt_async_delay',
+          type: 'checkout.session.async_payment_succeeded',
+          data: { object: { ...session, payment_status: 'paid' } },
+        };
+        const succeeded = await postWebhook(base, asyncEvent);
+        assert.equal(succeeded.status, 200);
+        assert.equal(mock.calls.refunds.length, 1);
+        assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_delay' });
+        const again = await postWebhook(base, asyncEvent);
+        assert.equal(again.status, 200);
+        assert.equal(mock.calls.refunds.length, 1);
+        assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 1);
+      });
+      const logged = lines.join('\n');
+      assert.equal(logged.includes('cs_delay'), false);
+      assert.match(logged, /Canadian business check refunded elay/);
+    });
+    assert.equal(readJsonl(dir, REFUND_FILE).length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a United States attestation does not satisfy a Canadian payment', async () => {
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const mock = createStripe();
+  const app = appFor(env, mock.stripe);
+  try {
+    await withServer(app, async (base) => {
+      const opened = await postJson(base, '/create-checkout-session', {
+        plan: 'starter',
+        billingCountry: 'US',
+        caBusinessAttestation: true,
+        attestationVersion: 'ca-b2b-v1',
+      });
+      assert.equal(opened.status, 200);
+      const session = setCountry(mock.sessions.cs_created_1, 'CA');
+      const hook = await postWebhook(base, completedEvent(session, 'CA'));
+      assert.equal(hook.status, 200);
+      assert.equal(mock.calls.refunds.length, 1);
+      assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_created_1' });
+      const access = await fetch(`${base}/verify-session?session_id=cs_created_1`);
+      assert.equal(access.status, 400);
+      assert.deepEqual(await access.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_created_1' } });
+      assert.equal(job.status, 400);
+      assert.deepEqual(await job.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+    });
+    const rows = readJsonl(dir, ATTESTATION_FILE);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].billingCountry, 'US');
+    assert.equal(rows[0].caBusinessAttestation, true);
+    assert.deepEqual(readJsonl(dir, REFUND_FILE).map((row) => row.sessionId), ['cs_created_1']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unwritable attestation directory expires the checkout session', async () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, ATTESTATION_FILE));
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const mock = createStripe();
+  const app = appFor(env, mock.stripe);
+  try {
+    await withServer(app, async (base) => {
+      const response = await postJson(base, '/create-checkout-session', {
+        plan: 'starter',
+        billingCountry: 'CA',
+        caBusinessAttestation: true,
+        attestationVersion: 'ca-b2b-v1',
+      });
+      assert.equal(response.status, 500);
+      const body = await response.json();
+      assert.equal(body.error, 'Internal server error');
+      assert.equal(body.url, undefined);
+      assert.equal(mock.calls.create.length, 1);
+      assert.deepEqual(mock.calls.expires, ['cs_created_1']);
+      assert.equal(mock.sessions.cs_created_1.status, 'expired');
+    });
+    assert.equal(fs.existsSync(path.join(dir, REFUND_FILE)), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('production without a support directory does not open a Canadian business checkout', async () => {
+  const dir = tempDir();
+  assert.equal(caCheckoutStorageReady({ NODE_ENV: 'production' }), false);
+  assert.equal(caCheckoutStorageReady({ RAILWAY_ENVIRONMENT: 'production' }), false);
+  assert.equal(caCheckoutStorageReady({ NODE_ENV: 'production', SUPPORT_DATA_DIR: dir }), true);
+  assert.equal(caCheckoutStorageReady({ NODE_ENV: 'test' }), true);
+  const cases = [
+    baseEnv({ NODE_ENV: 'production' }),
+    baseEnv({ RAILWAY_ENVIRONMENT: 'production' }),
+  ];
+  try {
+    for (const env of cases) {
+      const mock = createStripe();
+      const app = appFor(env, mock.stripe);
+      await withServer(app, async (base) => {
+        const canadian = await postJson(base, '/create-checkout-session', {
+          plan: 'starter',
+          billingCountry: 'CA',
+          caBusinessAttestation: true,
+          attestationVersion: 'ca-b2b-v1',
+        });
+        assert.equal(canadian.status, 500);
+        assert.deepEqual(await canadian.json(), { error: 'Checkout is temporarily unavailable.' });
+        assert.equal(mock.calls.create.length, 0);
+        assert.equal(mock.calls.expires.length, 0);
+
+        const unitedStates = await postJson(base, '/create-checkout-session', { plan: 'starter' });
+        assert.equal(unitedStates.status, 200);
+        assert.deepEqual(Object.keys(await unitedStates.json()), ['url']);
+        assert.equal(mock.calls.create.length, 1);
+      });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only the exact string 0 turns the Canadian gate off', async () => {
+  assert.equal(caGateEnabled({}), true);
+  assert.equal(caGateEnabled({ MANUALOS_CA_B2B_GATE: '0' }), false);
+  assert.equal(caGateEnabled({ MANUALOS_CA_B2B_GATE: ' 0 ' }), true);
+  assert.equal(caGateEnabled({ MANUALOS_CA_B2B_GATE: '0\n' }), true);
+  assert.equal(caGateEnabled({ MANUALOS_CA_B2B_GATE: 'false' }), true);
+  assert.equal(caGateEnabled({ MANUALOS_CA_B2B_GATE: null }), true);
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir, MANUALOS_CA_B2B_GATE: ' 0 ' });
+  const mock = createStripe();
+  const app = appFor(env, mock.stripe);
+  try {
+    await withServer(app, async (base) => {
+      const response = await postJson(base, '/create-checkout-session', {
+        plan: 'starter',
+        billingCountry: 'CA',
+        caBusinessAttestation: false,
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+      assert.equal(mock.calls.create.length, 0);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkout parses the Canadian fields once', async () => {
+  const dir = tempDir();
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const mock = createStripe();
+  let parses = 0;
+  const app = appFor(env, mock.stripe, {
+    parseCaCheckoutFields(body) {
+      parses += 1;
+      return require('../lib/ca-business').parseCaCheckoutFields(body);
+    },
+  });
+  try {
+    await withServer(app, async (base) => {
+      const rejected = await postJson(base, '/create-checkout-session', { plan: 'starter', billingCountry: 'CA' });
+      assert.equal(rejected.status, 400);
+      assert.equal(parses, 1);
+      assert.equal(mock.calls.create.length, 0);
+
+      const opened = await postJson(base, '/create-checkout-session', {
+        plan: 'starter',
+        billingCountry: 'CA',
+        caBusinessAttestation: true,
+        attestationVersion: 'ca-b2b-v1',
+      });
+      assert.equal(opened.status, 200);
+      assert.equal(parses, 2);
+      assert.equal(mock.calls.create.length, 1);
+    });
+    assert.equal(readJsonl(dir, ATTESTATION_FILE).length, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
