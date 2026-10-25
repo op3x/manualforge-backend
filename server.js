@@ -38,7 +38,12 @@ const {
 } = require('./lib/delivery');
 const { applyCheckoutConsent, withManualosBrand } = require('./lib/checkout-consent');
 const { requestIp } = require('./lib/client-ip');
-const { mountBillingPortal, warnIfSmtpUnconfigured, warnIfManagedPaymentsWithoutPortal } = require('./lib/billing-portal');
+const {
+  maybeSendCancellationConfirmation,
+  mountBillingPortal,
+  warnIfManagedPaymentsWithoutPortal,
+  warnIfSmtpUnconfigured,
+} = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -159,6 +164,7 @@ function createApp({
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const clock = typeof now === 'function' ? now : () => Date.now();
   const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
+  const sentCancellationNotices = new Set();
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
   const store = jobs || createJobStore({ env });
@@ -239,6 +245,13 @@ function createApp({
         await applyOverageCreditEvent(stripeForEvent, event, starterResult);
         logWebhookEvent(event);
       }
+      await maybeSendCancellationConfirmation({
+        event,
+        stripe: stripeForEvent,
+        env,
+        mailer: mailerClient,
+        sent: sentCancellationNotices,
+      });
     } catch (err) {
       const detail = err && err.message ? String(err.message) : 'error';
       console.error(
@@ -264,6 +277,8 @@ function createApp({
       // price. Consent metadata is applied after that and only writes metadata, so it
       // does not set consent_collection or custom_text. CHECKOUT_REQUIRE_CONSENT gates
       // the 400; present consent is stored either way. withManualosBrand stamps brand.
+      // #17 rebuilds these params from checkoutParams when a product has no tax code.
+      // applyCheckoutConsent and withManualosBrand have to run after that rebuild.
       const params = withManualosBrand(applyCheckoutConsent(
         await applyManualosCheckout(
           stripeClient,

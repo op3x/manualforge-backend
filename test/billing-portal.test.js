@@ -11,6 +11,7 @@ const {
   MP_NO_PORTAL_WARNING,
   ONLINE_CANCEL_LOG,
   ONLINE_CANCEL_UNAVAILABLE,
+  PORTAL_BLOCKED_LOG,
   PORTAL_UNAVAILABLE,
   SESSION_PORTAL_MAX_AGE_MS,
   SMTP_SKIP_WARNING,
@@ -103,13 +104,43 @@ function manualosStripeExtras() {
         }
         if (customer === 'cus_unmarked') return { data: [{ metadata: { plan: 'pro' } }] };
         return {
-          data: [{
-            metadata: { brand: 'manualos' },
-            items: { data: [{ price: { id: 'price_pro', lookup_key: 'manualos_pro_mhtbvcln' } }] },
-          }],
+          data: [manualosSubscription()],
         };
       },
     },
+  };
+}
+
+function manualosSubscription({
+  id = 'sub_manualos',
+  status = 'active',
+  managed = false,
+  cancelAt = null,
+} = {}) {
+  return {
+    id,
+    status,
+    cancel_at: cancelAt,
+    cancel_at_period_end: false,
+    metadata: { brand: 'manualos' },
+    items: { data: [{ price: { id: 'price_pro', lookup_key: 'manualos_pro_mhtbvcln' } }] },
+    managed_payments: { enabled: managed === true },
+  };
+}
+
+function htsSubscription({
+  id = 'sub_hts',
+  status = 'active',
+  cancelAt = null,
+} = {}) {
+  return {
+    id,
+    status,
+    cancel_at: cancelAt,
+    cancel_at_period_end: false,
+    metadata: { brand: 'htsatlas' },
+    items: { data: [{ price: { id: 'price_hts', lookup_key: 'htsatlas_pro' } }] },
+    managed_payments: { enabled: false },
   };
 }
 
@@ -117,9 +148,10 @@ test.after(() => {
   removeTestJobDirectories();
 });
 
-test('portal tokens are bound to one customer and expire', () => {
+test('portal tokens are bound to one customer, reusable for one hour, and then expire', () => {
   const env = baseEnv();
   const token = signPortalToken('cus_buyer', env, FIXED);
+  assert.equal(verifyPortalToken(token, env, FIXED), 'cus_buyer');
   assert.equal(verifyPortalToken(token, env, FIXED), 'cus_buyer');
   assert.equal(verifyPortalToken(token, env, FIXED + TOKEN_TTL_MS - 1), 'cus_buyer');
   assert.equal(verifyPortalToken(token, env, FIXED + TOKEN_TTL_MS), '');
@@ -530,6 +562,9 @@ test('a portal configuration id is sent and rate limits match the consent route'
         },
       },
     },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
   };
   const app = createApp({
     env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_cancel123' }),
@@ -604,6 +639,9 @@ test('a bad portal configuration and a Stripe failure stay generic', async () =>
           throw new Error('SUPER_SECRET_PORTAL');
         },
       },
+    },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
     },
   };
   const bad = createApp({
@@ -774,6 +812,9 @@ test('each skipped cancel email warns when SMTP is not configured', async () => 
         },
       },
     },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
   };
   const app = createApp({
     env: baseEnv(),
@@ -855,6 +896,9 @@ test('customer portal is the cancel path when a configuration can open a session
         },
       },
     },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
   };
   const app = createApp({
     env: baseEnv({ MANUALOS_MANAGED_PAYMENTS: '1' }),
@@ -896,6 +940,9 @@ test('Managed Payments shows app.link.com when the portal session cannot be crea
       },
     },
     ...manualosStripeExtras(),
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription({ managed: true })] }),
+    },
   };
   const app = createApp({
     env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '', MANUALOS_MANAGED_PAYMENTS: '1' }),
@@ -944,6 +991,9 @@ test('Managed Payments shows app.link.com when the portal session cannot be crea
           },
         },
       },
+      subscriptions: {
+        list: async () => ({ data: [manualosSubscription({ managed: true })] }),
+      },
     },
     anthropic: null,
     now: () => FIXED,
@@ -963,7 +1013,7 @@ test('Managed Payments shows app.link.com when the portal session cannot be crea
   }
 }));
 
-test('portal unavailable without Managed Payments returns an error and does not email', async () => exclusive(async () => {
+test('app.link.com stays off unless the ManualOS subscription has managed payments', async () => exclusive(async () => {
   const logs = [];
   const sent = [];
   const lists = [];
@@ -988,9 +1038,12 @@ test('portal unavailable without Managed Payments returns an error and does not 
         },
       },
     },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription({ managed: false })] }),
+    },
   };
   const app = createApp({
-    env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '' }),
+    env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '', MANUALOS_MANAGED_PAYMENTS: '1' }),
     stripe,
     anthropic: null,
     mailer: { async sendMail(message) { sent.push(message); } },
@@ -1003,6 +1056,7 @@ test('portal unavailable without Managed Payments returns an error and does not 
     const body = await res.json();
     assert.deepEqual(body, { error: ONLINE_CANCEL_UNAVAILABLE });
     assert.equal(created.length, 0);
+    assert.equal(JSON.stringify(body).includes('app.link.com'), false);
     assert.equal(/email/i.test(JSON.stringify(body)), false);
     assert.equal(logs.some((line) => line === ONLINE_CANCEL_LOG), true);
 
@@ -1010,7 +1064,7 @@ test('portal unavailable without Managed Payments returns an error and does not 
     assert.equal(mailed.status, 202);
     await app.settle();
     assert.equal(sent.length, 0);
-    assert.equal(lists.length, 0);
+    assert.equal(lists.length, 1);
     assert.equal(logs.filter((line) => line === ONLINE_CANCEL_LOG).length >= 2, true);
     assert.equal(logs.some((line) => line.includes('buyer@example.com')), false);
     for (const line of logs) assert.equal(/\bemail support@/i.test(line), false);
@@ -1018,5 +1072,262 @@ test('portal unavailable without Managed Payments returns an error and does not 
     console.error = original;
     await app.settle();
     await new Promise((resolve) => server.close(resolve));
+  }
+}));
+
+test('a non-canceled HTS subscription blocks the portal on the token and session paths', async () => exclusive(async () => {
+  const logs = [];
+  const created = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const env = baseEnv({ MANUALOS_MANAGED_PAYMENTS: '1' });
+  const token = signPortalToken('cus_mixed', env, FIXED);
+
+  function stripeFor(subs) {
+    return {
+      checkout: { sessions: { retrieve: async () => proSession('cus_mixed') } },
+      customers: {
+        retrieve: async () => ({ id: 'cus_mixed', metadata: { brand: 'manualos' }, email: 'buyer@example.com' }),
+      },
+      subscriptions: { list: async () => ({ data: subs }) },
+      billingPortal: {
+        sessions: {
+          create: async (params) => {
+            created.push(params);
+            return { url: 'https://billing.stripe.com/p/session/should-stay-closed' };
+          },
+        },
+      },
+    };
+  }
+
+  async function bothPaths(subs, ipBase) {
+    const before = created.length;
+    const logFrom = logs.length;
+    const app = createApp({ env, stripe: stripeFor(subs), anthropic: null, now: () => FIXED });
+    const { server, base } = await listen(app);
+    try {
+      const sessionRes = await post(base, '/billing-portal', { session_id: 'cs_test_pro' }, ipBase);
+      const sessionBody = await sessionRes.json();
+      const tokenRes = await post(base, '/billing-portal', { token }, `${ipBase.slice(0, -1)}9`);
+      const tokenBody = await tokenRes.json();
+      return {
+        sessionRes,
+        sessionBody,
+        tokenRes,
+        tokenBody,
+        opened: created.slice(before),
+        lines: logs.slice(logFrom),
+      };
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+
+  try {
+    const canceledManualos = await bothPaths([
+      manualosSubscription({ id: 'sub_os_old', status: 'canceled', managed: true }),
+      htsSubscription({ id: 'sub_hts_live', status: 'active' }),
+    ], '198.51.100.96');
+    for (const body of [canceledManualos.sessionBody, canceledManualos.tokenBody]) {
+      assert.equal(body.method, 'link');
+      assert.equal(body.url, LINK_CANCEL_URL);
+      assert.equal(JSON.stringify(body).includes('billing.stripe.com'), false);
+    }
+    assert.equal(canceledManualos.sessionRes.status, 200);
+    assert.equal(canceledManualos.tokenRes.status, 200);
+    assert.equal(canceledManualos.opened.length, 0);
+    assert.equal(canceledManualos.lines.some((line) => line === PORTAL_BLOCKED_LOG), true);
+
+    const activePair = await bothPaths([
+      manualosSubscription({ id: 'sub_os_live', status: 'active', managed: false }),
+      htsSubscription({ id: 'sub_hts_live', status: 'active' }),
+    ], '198.51.100.97');
+    for (const result of [activePair.sessionRes, activePair.tokenRes]) {
+      assert.equal(result.status, 503);
+    }
+    for (const body of [activePair.sessionBody, activePair.tokenBody]) {
+      assert.deepEqual(body, { error: ONLINE_CANCEL_UNAVAILABLE });
+      assert.equal(JSON.stringify(body).includes('app.link.com'), false);
+    }
+    assert.equal(activePair.opened.length, 0);
+    assert.equal(activePair.lines.some((line) => line === PORTAL_BLOCKED_LOG), true);
+    assert.equal(activePair.lines.some((line) => line === ONLINE_CANCEL_LOG), true);
+
+    const activeManaged = await bothPaths([
+      manualosSubscription({ id: 'sub_os_mp', status: 'active', managed: true }),
+      htsSubscription({ id: 'sub_hts_live', status: 'active' }),
+    ], '198.51.100.98');
+    assert.equal(activeManaged.sessionBody.method, 'link');
+    assert.equal(activeManaged.tokenBody.url, LINK_CANCEL_URL);
+    assert.equal(activeManaged.opened.length, 0);
+    assert.equal(activeManaged.lines.some((line) => line === PORTAL_BLOCKED_LOG), true);
+
+    const scheduledHts = await bothPaths([
+      manualosSubscription({ id: 'sub_os_live', status: 'active', managed: false }),
+      htsSubscription({ id: 'sub_hts_scheduled', status: 'active', cancelAt: Math.floor(FIXED / 1000) }),
+    ], '198.51.100.100');
+    assert.equal(scheduledHts.sessionRes.status, 503);
+    assert.equal(scheduledHts.tokenRes.status, 503);
+    assert.equal(scheduledHts.opened.length, 0);
+    assert.equal(scheduledHts.lines.some((line) => line === PORTAL_BLOCKED_LOG), true);
+
+    const canceledHts = await bothPaths([
+      manualosSubscription({ id: 'sub_os_live', status: 'active' }),
+      htsSubscription({ id: 'sub_hts_done', status: 'canceled' }),
+    ], '198.51.100.110');
+    assert.equal(canceledHts.sessionRes.status, 200);
+    assert.equal(canceledHts.tokenRes.status, 200);
+    assert.equal(canceledHts.sessionBody.method, 'portal');
+    assert.equal(canceledHts.tokenBody.method, 'portal');
+    assert.equal(canceledHts.opened.length, 2);
+    assert.equal(canceledHts.lines.some((line) => line === PORTAL_BLOCKED_LOG), false);
+  } finally {
+    console.error = original;
+  }
+}));
+
+test('a ManualOS cancellation confirmation is sent once', async () => exclusive(async () => {
+  const sent = [];
+  const warnings = [];
+  const logs = [];
+  const retrieved = [];
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
+  const later = Math.floor(Date.parse('2026-11-01T00:00:00.000Z') / 1000);
+  const stripe = {
+    customers: {
+      retrieve: async (id) => {
+        retrieved.push(id);
+        return { id, email: id === 'cus_hts' ? 'hts@example.com' : 'buyer@example.com' };
+      },
+    },
+    webhooks: {
+      constructEvent(body, signature, secret) {
+        if (signature !== 't=1,v1=ok' || secret !== 'whsec_test') throw new Error('bad signature');
+        return JSON.parse(Buffer.from(body).toString('utf8'));
+      },
+    },
+  };
+  function eventFor(object, previous) {
+    return {
+      id: `evt_${object.id}`,
+      type: 'customer.subscription.updated',
+      data: { object, previous_attributes: previous },
+    };
+  }
+  async function postEvent(base, payload) {
+    return fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify(payload),
+    });
+  }
+  const portalCancel = eventFor({
+    id: 'sub_os',
+    status: 'active',
+    customer: 'cus_buyer',
+    cancel_at: end,
+    cancel_at_period_end: false,
+    metadata: { brand: 'manualos' },
+    items: { data: [{ price: { id: 'price_pro' } }] },
+  }, { cancel_at: null });
+  const app = createApp({
+    env: baseEnv(),
+    stripe,
+    anthropic: null,
+    mailer: { async sendMail(message) { sent.push(message); } },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const first = await postEvent(base, portalCancel);
+    assert.equal(first.status, 200);
+    const again = await postEvent(base, portalCancel);
+    assert.equal(again.status, 200);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, 'buyer@example.com');
+    assert.equal(sent[0].subject, 'Your ManualOS subscription is scheduled to cancel');
+    assert.match(sent[0].text, /October 25, 2026/);
+    assert.match(sent[0].text, /There are no further charges/);
+
+    const hts = await postEvent(base, eventFor({
+      id: 'sub_hts',
+      status: 'active',
+      customer: 'cus_hts',
+      cancel_at: end,
+      cancel_at_period_end: false,
+      metadata: { brand: 'htsatlas' },
+      items: { data: [{ price: { id: 'price_hts', lookup_key: 'htsatlas_pro' } }] },
+    }, { cancel_at: null }));
+    assert.equal(hts.status, 200);
+    assert.equal(sent.length, 1);
+    assert.equal(retrieved.includes('cus_hts'), false);
+
+    const plain = await postEvent(base, eventFor({
+      id: 'sub_plain',
+      status: 'active',
+      customer: 'cus_buyer',
+      cancel_at: end,
+      cancel_at_period_end: false,
+      metadata: { plan: 'pro' },
+    }, { cancel_at: null }));
+    assert.equal(plain.status, 200);
+    assert.equal(sent.length, 1);
+
+    const period = await postEvent(base, eventFor({
+      id: 'sub_period',
+      status: 'active',
+      customer: 'cus_buyer',
+      cancel_at: null,
+      cancel_at_period_end: true,
+      current_period_end: later,
+      metadata: { brand: 'manualos' },
+    }, { cancel_at_period_end: false }));
+    assert.equal(period.status, 200);
+    assert.equal(sent.length, 2);
+    assert.match(sent[1].text, /November 1, 2026/);
+    assert.match(sent[1].text, /There are no further charges/);
+
+    const metadataOnly = await postEvent(base, eventFor({
+      id: 'sub_os',
+      status: 'active',
+      customer: 'cus_buyer',
+      cancel_at: end,
+      cancel_at_period_end: false,
+      metadata: { brand: 'manualos', note: 'later' },
+    }, { metadata: { note: 'earlier' } }));
+    assert.equal(metadataOnly.status, 200);
+    assert.equal(sent.length, 2);
+    assert.equal(logs.some((line) => line.includes('buyer@example.com') || line.includes('hts@example.com')), false);
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  const quietWarnings = [];
+  console.warn = (...args) => quietWarnings.push(args.join(' '));
+  const quiet = createApp({
+    env: baseEnv(),
+    stripe,
+    anthropic: null,
+    mailer: null,
+    now: () => FIXED,
+  });
+  const quietServer = await listen(quiet);
+  try {
+    const res = await postEvent(quietServer.base, portalCancel);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { received: true });
+    assert.equal(quietWarnings.filter((line) => line === SMTP_SKIP_WARNING).length, 1);
+    assert.equal(quietWarnings.some((line) => line.includes('buyer@example.com')), false);
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+    await new Promise((resolve) => quietServer.server.close(resolve));
   }
 }));

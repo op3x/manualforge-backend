@@ -107,10 +107,22 @@ test('pro is valid only while the subscription is active or trialing', () => {
     assert.equal(access.plan, 'pro');
     assert.equal(access.remaining, null);
   }
+  for (const scheduled of [
+    { id: 'sub_1', status: 'active', cancel_at: 1792800000, cancel_at_period_end: false },
+    { id: 'sub_1', status: 'active', cancel_at: null, cancel_at_period_end: true },
+  ]) {
+    const access = accessFromSession(
+      { metadata: { plan: 'pro' }, payment_status: 'paid' },
+      null,
+      scheduled,
+      env
+    );
+    assert.equal(access.valid, true, JSON.stringify(scheduled));
+  }
   const lapsed = accessFromSession(
     { metadata: { plan: 'pro' } },
     null,
-    { id: 'sub_1', status: 'past_due' },
+    { id: 'sub_1', status: 'past_due', cancel_at_period_end: true },
     env
   );
   assert.equal(lapsed.valid, false);
