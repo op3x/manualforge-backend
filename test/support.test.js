@@ -7,6 +7,7 @@ const twilio = require('twilio');
 const { WebSocket } = require('ws');
 const { createApp } = require('../server');
 const { createSupportStore, removeTestSupportDirectories } = require('../lib/support/store');
+const { CONSENT_LIMIT } = require('../lib/support/http');
 const policy = require('../lib/support/policy');
 
 const TOKEN = 'twilio-test-auth-token';
@@ -17,10 +18,10 @@ test.after(() => {
   removeTestSupportDirectories();
 });
 
-function tempStore() {
+function tempStore(now = () => Date.parse('2026-10-25T12:00:00Z')) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-support-test-'));
   dirs.push(directory);
-  return createSupportStore({ directory, env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: directory } });
+  return createSupportStore({ directory, env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: directory }, now });
 }
 
 function answer(reply, extra = {}) {
@@ -42,8 +43,10 @@ function answer(reply, extra = {}) {
 
 function harness(extra = {}) {
   const sent = [];
+  const calls = [];
   const completions = [];
-  const store = tempStore();
+  const now = () => Date.parse('2026-10-25T12:00:00Z');
+  const store = tempStore(now);
   const env = {
     NODE_ENV: 'test',
     FRONTEND_URL: 'https://manualos.com',
@@ -69,18 +72,25 @@ function harness(extra = {}) {
           return { sid: 'SM_test' };
         },
       },
+      calls: {
+        create: async (params) => {
+          calls.push(params);
+          return { sid: 'CA_test' };
+        },
+      },
     },
     supportComplete: async (request) => {
       completions.push(request);
       return completeImpl(request);
     },
-    supportNow: () => Date.parse('2026-10-25T12:00:00Z'),
+    supportNow: now,
   });
   return {
     app,
     env,
     store,
     sent,
+    calls,
     completions,
     setComplete(fn) { completeImpl = fn; },
   };
@@ -205,7 +215,8 @@ test('policy facts, budget math, guardrails, and caps', async () => {
   assert.equal(policy.containsCardNumber('Starter is $39'), false);
   assert.equal(policy.redactCardNumbers('card 4111111111111111 thanks'), 'card [redacted] thanks');
   assert.equal(policy.classify('representative'), 'person');
-  assert.equal(policy.classify('operator manual please'), '');
+  assert.equal(policy.classify('operator manual please'), 'person');
+  assert.equal(policy.classify('a personal note about starter'), '');
   assert.equal(policy.classify('This is an emergency and someone is injured'), 'safety');
   assert.equal(policy.classify('I will call my lawyer'), 'legal');
   assert.equal(policy.classify('I am furious'), 'angry');
@@ -359,6 +370,8 @@ test('policy facts, budget math, guardrails, and caps', async () => {
     complete: async () => { throw new Error('should not call'); },
   });
   assert.match(paused.reply, /paused/i);
+  assert.match(paused.reply, /call you back/i);
+  assert.equal(paused.escalate, true);
   assert.equal(paused.handoff, false);
 
   let seenKey = false;
@@ -606,7 +619,13 @@ test('handoff dials, voicemail texts the owner, and the keypad works', async () 
     });
     const missedXml = await missed.text();
     assert.match(missedXml, /<Say/);
-    assert.match(missedXml, /<Record maxLength="120" playBeep="true" transcribe="true" transcribeCallback="\/api\/twilio\/voice\/transcription"\/>/);
+    assert.match(missedXml, /<Record [^>]*maxLength="120"/);
+    assert.match(missedXml, /playBeep="true"/);
+    assert.match(missedXml, /transcribe="true"/);
+    assert.match(missedXml, /transcribeCallback="\/api\/twilio\/voice\/transcription"/);
+    assert.match(missedXml, /action="\/api\/twilio\/voice\/recording-done"/);
+    assert.match(missedXml, /recordingStatusCallback="\/api\/twilio\/voice\/recording"/);
+    assert.doesNotMatch(missedXml, /<Gather/);
     const busy = await postTwilio(base, h.env, '/api/twilio/voice/dial-status', { DialCallStatus: 'busy' });
     assert.match(await busy.text(), /<Record /);
     const failed = await postTwilio(base, h.env, '/api/twilio/voice/dial-status', { DialCallStatus: 'failed' });
@@ -699,6 +718,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     const start = await postTwilio(base, h.env, '/api/twilio/sms', { From: '+15552000000', Body: 'START', MessageSid: 'SM_START' });
     const startXml = await start.text();
     assert.match(startXml, /opted in/);
+    assert.match(startXml, /Msg frequency varies/);
     assert.match(startXml, /Reply STOP to opt out/);
     assert.equal(h.store.isOptedOut('+15552000000'), false);
     assert.equal(h.store.listConsents().some((row) => row.phone === '+15552000000' && row.source === 'sms-start'), true);
@@ -769,8 +789,19 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
       Body: 'What about Pro?',
       MessageSid: 'SM_BUDGET_2',
     });
-    assert.match(await second.text(), /paused/i);
+    const secondXml = await second.text();
+    assert.match(secondXml, /paused/i);
+    assert.match(secondXml, /call you back/i);
+    assert.doesNotMatch(secondXml, /support@manualos\.com/);
     assert.equal(budget.completions.length, 1);
+    assert.equal(budget.sent.length, 1);
+    const third = await postTwilio(base, budget.env, '/api/twilio/sms', {
+      From: '+15551116666',
+      Body: 'Please call me back about Pro',
+      MessageSid: 'SM_BUDGET_3',
+    });
+    assert.match(await third.text(), /call you back/i);
+    assert.equal(budget.sent.length, 1);
     const call = await postTwilio(base, budget.env, '/api/twilio/voice', { CallSid: 'CA_BUDGET', From: '+15551116666' });
     const xml = await call.text();
     assert.match(xml, /<Gather/);
@@ -810,7 +841,7 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
     assert.equal(record.phone, '+15551212000');
     assert.equal(record.consentTextVersion, 'checkbox-v3');
     assert.equal(record.source, 'pricing-footer');
-    assert.equal(record.ip, '203.0.113.9');
+    assert.equal(record.ip, '10.0.0.4');
     assert.equal(record.timestamp, '2026-10-25T12:00:00.000Z');
 
     const badPhone = await fetch(`${base}/api/support/sms-consent`, {
@@ -825,5 +856,465 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
       body: JSON.stringify({ phone: '+15551212000' }),
     });
     assert.equal(missing.status, 400);
+  });
+});
+
+function spokenCard() {
+  return ['four', ...Array(15).fill('one')].join(' ');
+}
+
+test('review guardrails: cards, handoff words, refunds, brands, and idle threads', async () => {
+  const spoken = spokenCard();
+  assert.equal(policy.containsCardNumber('4111.1111.1111.1111'), true);
+  assert.equal(policy.containsCardNumber('4111,1111/1111.1111'), true);
+  assert.equal(policy.containsCardNumber('4111   1111   1111   1111'), true);
+  assert.equal(policy.containsCardNumber(spoken), true);
+  assert.equal(policy.containsCardNumber('one two three'), false);
+  assert.equal(policy.redactCardNumbers(`pay 4111.1111.1111.1111 now`), 'pay [redacted] now');
+  assert.equal(policy.redactCardNumbers(`card ${spoken} thanks`), 'card [redacted] thanks');
+  assert.equal(policy.redactCardNumbers('4111,,1111//1111  1111'), '[redacted]');
+  assert.doesNotMatch(policy.redactCardNumbers(spoken), /four|one|4111/i);
+
+  for (const word of ['person', 'human', 'agent', 'operator', 'real person', 'talk to someone']) {
+    assert.equal(policy.classify(word), 'person', word);
+  }
+  for (const phrase of ['the panel is smoking', 'I see fire', 'someone is injured', 'the guard broken', 'it is sparking']) {
+    assert.equal(policy.classify(phrase), 'safety', phrase);
+  }
+  assert.equal(policy.classify(`representative ${spoken}`), 'card-person');
+
+  const env = aiEnv();
+  const both = await policy.triageTurn({
+    channel: 'voice',
+    text: `representative, card ${spoken}`,
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async () => { throw new Error('should not call'); },
+  });
+  assert.equal(both.handoff, true);
+  assert.equal(both.escalate, true);
+  assert.match(both.reply, /cannot take card numbers/);
+  assert.match(both.reply, /Connecting you to a person/);
+  assert.doesNotMatch(`${both.reply} ${both.summary}`, /4111|four one/i);
+
+  const smsBoth = await policy.triageTurn({
+    channel: 'sms',
+    text: `human ${spoken}`,
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async () => { throw new Error('should not call'); },
+  });
+  assert.equal(smsBoth.handoff, true);
+  assert.match(smsBoth.reply, /A person will follow up by text/);
+  assert.doesNotMatch(smsBoth.reply, /4111|four one/i);
+
+  for (const phrase of [
+    "I'll refund the charge",
+    'I refunded you yesterday',
+    'Your refund is on its way',
+    'You can get your money back',
+    'We can issue a refund',
+  ]) {
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /I'll refund|refunded you|on its way|money back/i);
+  }
+
+  const branded = policy.applyGuardrails(
+    'Open Studio 5000, RSLogix, ControlLogix, TIA Portal, CODESYS, GX Works, Creo, and CATIA. Ask your PLC vendor TIA Portal.',
+    env,
+  );
+  assert.doesNotMatch(branded, /studio|rslogix|controllogix|tia|portal|codesys|works|creo|catia/i);
+  assert.doesNotMatch(branded, /vendor\s+your/i);
+  assert.match(branded, /your PLC software/);
+
+  const session = state();
+  await policy.triageTurn({
+    channel: 'sms',
+    text: 'How much is Starter?',
+    state: session,
+    env,
+    spentUsd: 0,
+    complete: async () => answer('Noted 4111111111111111 already.'),
+  });
+  let payload = '';
+  await policy.triageTurn({
+    channel: 'sms',
+    text: 'And Pro?',
+    state: session,
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      payload = JSON.stringify(request.messages);
+      return answer('Pro is $79 per month.');
+    },
+  });
+  assert.doesNotMatch(payload, /4111111111111111/);
+  assert.match(payload, /\[redacted\]/);
+  assert.doesNotMatch(JSON.stringify(session.history), /4111111111111111/);
+
+  const clock = () => Date.parse('2026-10-25T12:00:00Z');
+  const stale = state();
+  stale.turns = policy.SMS_TURN_CAP;
+  stale.updatedAt = '2026-10-23T12:00:00.000Z';
+  let called = 0;
+  const resumed = await policy.triageTurn({
+    channel: 'sms',
+    text: 'How much is Starter?',
+    state: stale,
+    env,
+    spentUsd: 0,
+    now: clock,
+    complete: async () => {
+      called += 1;
+      return answer('Starter is $39 one-time for 3 manuals.');
+    },
+  });
+  assert.equal(called, 1);
+  assert.notEqual(resumed.reason, 'turn_cap');
+  assert.match(resumed.reply, /\$39/);
+
+  const recent = state();
+  recent.turns = policy.SMS_TURN_CAP;
+  recent.updatedAt = '2026-10-25T00:00:00.000Z';
+  const stillCapped = await policy.triageTurn({
+    channel: 'sms',
+    text: 'one more question',
+    state: recent,
+    env,
+    spentUsd: 0,
+    now: clock,
+    complete: async () => { throw new Error('should not call'); },
+  });
+  assert.equal(stillCapped.reason, 'turn_cap');
+
+  const noKey = await policy.triageTurn({
+    channel: 'sms',
+    text: 'How much is Pro?',
+    state: state(),
+    env: aiEnv({ LLM_API_KEY: '' }),
+    spentUsd: 0,
+    complete: async () => { throw new Error('should not call'); },
+  });
+  assert.equal(noKey.escalate, true);
+  assert.match(noKey.reply, /call you back/i);
+  assert.doesNotMatch(noKey.reply, /support@manualos\.com/);
+});
+
+test('voicemail goodbye, recording notice, opt-out phrases, and SMS dedupe', async () => {
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const order = await postTwilio(base, h.env, '/api/twilio/voice/menu', {
+      Digits: '1',
+      CallSid: 'CA_REC',
+      From: '+15551110008',
+    });
+    const orderXml = await order.text();
+    assert.match(orderXml, /action="\/api\/twilio\/voice\/recording-done"/);
+    assert.match(orderXml, /recordingStatusCallback="\/api\/twilio\/voice\/recording"/);
+    assert.doesNotMatch(orderXml, /<Gather/);
+
+    const done = await postTwilio(base, h.env, '/api/twilio/voice/recording-done', {
+      CallSid: 'CA_REC',
+      From: '+15551110008',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE9',
+    });
+    const doneXml = await done.text();
+    assert.match(doneXml, /Goodbye/);
+    assert.match(doneXml, /<Hangup\/>/);
+    assert.doesNotMatch(doneXml, /<Gather|<Record |ConversationRelay/);
+
+    const recorded = await postTwilio(base, h.env, '/api/twilio/voice/recording', {
+      CallSid: 'CA_REC',
+      From: '+15551110008',
+      RecordingSid: 'RE9',
+      RecordingStatus: 'completed',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE9',
+    });
+    assert.equal(recorded.status, 200);
+    assert.equal(h.sent.length, 1);
+    assert.match(h.sent[0].body, /Recordings\/RE9/);
+    const again = await postTwilio(base, h.env, '/api/twilio/voice/recording', {
+      CallSid: 'CA_REC',
+      From: '+15551110008',
+      RecordingSid: 'RE9',
+      RecordingStatus: 'completed',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE9',
+    });
+    assert.equal(again.status, 200);
+    assert.equal(h.sent.length, 1);
+
+    const failedTranscript = await postTwilio(base, h.env, '/api/twilio/voice/transcription', {
+      CallSid: 'CA_REC',
+      From: '+15551110008',
+      TranscriptionSid: 'TR_FAIL',
+      TranscriptionStatus: 'failed',
+      TranscriptionText: '',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE9',
+    });
+    assert.equal(failedTranscript.status, 200);
+    assert.equal(h.sent.length, 2);
+
+    const unsigned = await fetch(`${base}/api/twilio/voice/recording-done`, { method: 'POST' });
+    assert.equal(unsigned.status, 403);
+
+    const phrases = [
+      ['+15553000001', 'REVOKE'],
+      ['+15553000002', 'OPTOUT'],
+      ['+15553000003', 'opt-out'],
+      ['+15553000004', 'opt out'],
+      ['+15553000005', 'STOP texting me now'],
+      ['+15553000006', 'please stop messaging me'],
+      ['+15553000007', 'stop the machine'],
+    ];
+    for (const [phone, body] of phrases) {
+      const res = await postTwilio(base, h.env, '/api/twilio/sms', { From: phone, Body: body, MessageSid: `SM_${phone}` });
+      assert.match(await res.text(), /unsubscribed/i, body);
+      assert.equal(h.store.isOptedOut(phone), true, body);
+    }
+    const keep = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15553000008',
+      Body: 'please stop texting',
+      MessageSid: 'SM_KEEP',
+    });
+    assert.doesNotMatch(await keep.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15553000008'), false);
+
+    h.store.saveThread('+15553000020', {
+      turns: policy.SMS_TURN_CAP,
+      lowConfidence: 0,
+      history: [],
+      startedAt: '2026-10-25T12:00:00.000Z',
+    });
+    const before = h.sent.length;
+    await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15553000020',
+      Body: 'another question about starter',
+      MessageSid: 'SM_CAP_A',
+    });
+    await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15553000020',
+      Body: 'and one more question about starter',
+      MessageSid: 'SM_CAP_B',
+    });
+    assert.equal(h.sent.length, before + 1);
+
+    const threadsPath = path.join(h.store.directory, 'threads.json');
+    const threads = JSON.parse(fs.readFileSync(threadsPath, 'utf8'));
+    threads['+15553000021'] = {
+      turns: policy.SMS_TURN_CAP,
+      lowConfidence: 0,
+      history: [],
+      startedAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-23T12:00:00.000Z',
+    };
+    fs.writeFileSync(threadsPath, JSON.stringify(threads));
+    assert.equal(h.store.getThread('+15553000021').turns, 0);
+    const resumed = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15553000021',
+      Body: 'How much is Starter?',
+      MessageSid: 'SM_RESUME',
+    });
+    assert.match(await resumed.text(), /\$39/);
+    assert.equal(h.sent.length, before + 1);
+
+    const quiet = harness({ LLM_API_KEY: '' });
+    await withServer(quiet.app, async ({ base: quietBase }) => {
+      quiet.env.PUBLIC_BASE_URL = quietBase;
+      const first = await postTwilio(quietBase, quiet.env, '/api/twilio/sms', {
+        From: '+15553000030',
+        Body: 'How much is Pro?',
+        MessageSid: 'SM_NOKEY_1',
+      });
+      assert.match(await first.text(), /call you back/i);
+      assert.equal(quiet.sent.length, 1);
+      assert.match(quiet.sent[0].body, /\+15553000030/);
+      const second = await postTwilio(quietBase, quiet.env, '/api/twilio/sms', {
+        From: '+15553000030',
+        Body: 'Are you there?',
+        MessageSid: 'SM_NOKEY_2',
+      });
+      assert.match(await second.text(), /call you back/i);
+      assert.equal(quiet.sent.length, 1);
+    });
+  });
+});
+
+test('consent is rate limited, append-only, and split from the other files', async () => {
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: 'https://manualos.com',
+      'X-Real-IP': '198.51.100.10',
+      'X-Forwarded-For': '203.0.113.9, 10.0.0.8',
+    };
+    for (let i = 0; i < CONSENT_LIMIT; i += 1) {
+      const res = await fetch(`${base}/api/support/sms-consent`, {
+        method: 'POST',
+        headers: { ...headers, 'X-Forwarded-For': `203.0.113.${i}, 10.0.0.8` },
+        body: JSON.stringify({ phone: `+1555400${String(i).padStart(4, '0')}`, consentTextVersion: 'v1', source: 'form' }),
+      });
+      assert.equal(res.status, 201, `consent ${i}`);
+    }
+    const blocked = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { ...headers, 'X-Forwarded-For': '198.51.100.99, 10.0.0.8' },
+      body: JSON.stringify({ phone: '+15554009999', consentTextVersion: 'v1', source: 'form' }),
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(h.store.listConsents().length, CONSENT_LIMIT);
+    assert.equal(h.store.listConsents()[0].ip, '198.51.100.10');
+    const other = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { ...headers, 'X-Real-IP': '198.51.100.11' },
+      body: JSON.stringify({ phone: '+15554008888', consentTextVersion: 'v1', source: 'form' }),
+    });
+    assert.equal(other.status, 201);
+    assert.equal(h.store.listConsents().at(-1).ip, '198.51.100.11');
+  });
+
+  const store = tempStore();
+  store.addUsage('2026-10', { inputTokens: 3, outputTokens: 4, usd: 0.2 });
+  const budgetPath = path.join(store.directory, 'budget.json');
+  const budgetBefore = fs.readFileSync(budgetPath);
+  store.optOut('+15551212001', 'sms');
+  assert.equal(fs.readFileSync(budgetPath).toString(), budgetBefore.toString());
+  assert.equal(fs.existsSync(path.join(store.directory, 'state.json')), false);
+  const optBefore = fs.readFileSync(path.join(store.directory, 'opt-outs.json'));
+  store.addConsent({
+    phone: '+15551212001',
+    consentTextVersion: 'v1',
+    timestamp: '2026-10-25T12:00:00.000Z',
+    ip: '198.51.100.10',
+    source: 'website',
+  });
+  const consentPath = path.join(store.directory, 'consents.jsonl');
+  const firstLine = fs.readFileSync(consentPath, 'utf8').split('\n')[0];
+  for (let i = 0; i < 40; i += 1) {
+    store.addConsent({
+      phone: `+15557${String(i).padStart(6, '0')}`,
+      consentTextVersion: 'v1',
+      timestamp: '2026-10-25T12:00:00.000Z',
+      ip: '',
+      source: 'website',
+    });
+  }
+  const lines = fs.readFileSync(consentPath, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 41);
+  assert.equal(lines[0], firstLine);
+  assert.equal(store.listConsents()[0].phone, '+15551212001');
+  assert.equal(store.listConsents().length, 41);
+  assert.equal(fs.readFileSync(path.join(store.directory, 'opt-outs.json')).toString(), optBefore.toString());
+  assert.equal(fs.readFileSync(budgetPath).toString(), budgetBefore.toString());
+
+  store.saveThread('+15550002222', {
+    turns: 1,
+    lowConfidence: 0,
+    history: [{ role: 'user', content: spokenCard() }],
+  });
+  assert.equal(store.getThread('+15550002222').history[0].content, '[redacted]');
+  assert.doesNotMatch(fs.readFileSync(path.join(store.directory, 'threads.json'), 'utf8'), /four|4111/i);
+
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-support-test-'));
+  dirs.push(legacyDir);
+  fs.writeFileSync(path.join(legacyDir, 'state.json'), JSON.stringify({
+    optOuts: { '+15551219999': { at: '2026-01-01T00:00:00.000Z', source: 'sms' } },
+    consents: [{ phone: '+15551219999', consentTextVersion: 'legacy', timestamp: '2026-01-01T00:00:00.000Z', ip: '', source: 'website' }],
+    budget: { '2026-10': { inputTokens: 1, outputTokens: 2, usd: 0.25 } },
+    threads: { '+15551219999': { turns: 3, lowConfidence: 0, history: [], updatedAt: '2026-10-25T12:00:00.000Z' } },
+    once: { sample: 1 },
+  }));
+  const migrated = createSupportStore({
+    directory: legacyDir,
+    env: { NODE_ENV: 'test' },
+    now: () => Date.parse('2026-10-25T12:00:00.000Z'),
+  });
+  assert.equal(migrated.isOptedOut('+15551219999'), true);
+  assert.equal(migrated.spentUsd('2026-10'), 0.25);
+  assert.equal(migrated.listConsents()[0].consentTextVersion, 'legacy');
+  assert.equal(migrated.getThread('+15551219999').turns, 3);
+  assert.equal(fs.existsSync(path.join(legacyDir, 'state.json')), false);
+  assert.equal(fs.existsSync(path.join(legacyDir, 'state.json.migrated')), true);
+  assert.equal(fs.existsSync(path.join(legacyDir, 'consents.jsonl')), true);
+
+  fs.writeFileSync(path.join(store.directory, 'opt-outs.json'), '{');
+  assert.equal(store.isOptedOut('+15550000000'), true);
+  fs.writeFileSync(path.join(store.directory, 'budget.json'), '{');
+  assert.equal(store.spentUsd('2026-10'), Number.POSITIVE_INFINITY);
+});
+
+test('a failed escalation text calls the owner unless the caller is already being dialed', async () => {
+  const calls = [];
+  const store = tempStore();
+  const env = {
+    NODE_ENV: 'test',
+    FRONTEND_URL: 'https://manualos.com',
+    TWILIO_AUTH_TOKEN: TOKEN,
+    TWILIO_ACCOUNT_SID: 'AC_test_account',
+    TWILIO_FROM_NUMBER: '+15557654321',
+    SUPPORT_PHONE: '+15557654321',
+    ESCALATION_PHONE: '+15550001111',
+    LLM_PROVIDER: 'openai',
+    LLM_API_KEY: 'sk-test-not-real',
+    PUBLIC_BASE_URL: 'http://127.0.0.1',
+  };
+  const app = createApp({
+    env,
+    supportStore: store,
+    twilioClient: {
+      messages: {
+        create: async () => {
+          const err = new Error('toll-free unverified');
+          err.status = 400;
+          throw err;
+        },
+      },
+      calls: {
+        create: async (params) => {
+          calls.push(params);
+          return { sid: 'CA_fallback' };
+        },
+      },
+    },
+    supportComplete: async () => answer('should not call'),
+    supportNow: () => Date.parse('2026-10-25T12:00:00Z'),
+  });
+  await withServer(app, async ({ base }) => {
+    env.PUBLIC_BASE_URL = base;
+    const sms = await postTwilio(base, env, '/api/twilio/sms', {
+      From: '+15553000040',
+      Body: 'I am furious',
+      MessageSid: 'SM_FALLBACK',
+    });
+    assert.match(await sms.text(), /person will follow up/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].to, '+15550001111');
+    assert.equal(calls[0].from, '+15557654321');
+    assert.match(calls[0].twiml, /<Say/);
+    assert.match(calls[0].twiml, /furious/);
+    assert.doesNotMatch(calls[0].twiml, /sk-test|twilio-test-auth-token/);
+
+    const dialing = await postTwilio(base, env, '/api/twilio/voice/handoff', {
+      CallSid: 'CA_DIALING',
+      From: '+15553000040',
+      CallStatus: 'in-progress',
+      HandoffData: JSON.stringify({ handoff: true, reason: 'safety', summary: 'Caller needs help', from: '+15553000040' }),
+    });
+    assert.match(await dialing.text(), /<Dial /);
+    assert.equal(calls.length, 1);
+
+    const finished = await postTwilio(base, env, '/api/twilio/voice/handoff', {
+      CallSid: 'CA_FINISHED',
+      From: '+15553000041',
+      CallStatus: 'completed',
+      HandoffData: JSON.stringify({ handoff: true, reason: 'safety', summary: 'Caller already hung up', from: '+15553000041' }),
+    });
+    assert.match(await finished.text(), /<Response><\/Response>/);
+    assert.equal(calls.length, 2);
+    assert.match(calls[1].twiml, /hung up/);
   });
 });
