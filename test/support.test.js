@@ -278,6 +278,7 @@ test('policy facts, budget math, guardrails, and caps', async () => {
     env: aiEnv({ SUPPORT_INTEGRATOR_ENABLED: 'yes' }),
     spentUsd: 0,
     complete: async (request) => {
+      if (request.maxTokens !== 200) return { choices: [{ message: { content: '{"refund":false,"leak":false}' } }] };
       assert.match(request.messages[0].content, /\$2,490/);
       assert.equal(request.maxTokens, 200);
       assert.equal(request.model, 'gpt-4o-mini');
@@ -531,7 +532,7 @@ test('relay answers, refuses cards, and hands off', async () => {
       assert.equal(reply.type, 'text');
       assert.equal(reply.last, true);
       assert.match(reply.token, /\$39/);
-      assert.equal(h.completions.length, 1);
+      assert.equal(h.completions.length, 2);
       assert.equal(h.completions[0].maxTokens, 200);
       assert.match(h.completions[0].messages[0].content, /Starter is \$39 one-time for 3 manuals/);
 
@@ -540,7 +541,7 @@ test('relay answers, refuses cards, and hands off', async () => {
       assert.equal(refused.type, 'text');
       assert.match(refused.token, /cannot take card numbers/);
       assert.doesNotMatch(refused.token, /4111/);
-      assert.equal(h.completions.length, 1);
+      assert.equal(h.completions.length, 2);
 
       client.send({ type: 'prompt', voicePrompt: 'I want a representative', last: true });
       const spoken = await client.next();
@@ -552,7 +553,7 @@ test('relay answers, refuses cards, and hands off', async () => {
       assert.equal(data.handoff, true);
       assert.equal(data.reason, 'representative');
       assert.equal(data.from, '+15551110000');
-      assert.equal(h.completions.length, 1);
+      assert.equal(h.completions.length, 2);
     } finally {
       client.ws.close();
     }
@@ -748,7 +749,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.match(pricingXml, /ManualOS Support: Starter is \$39/);
     assert.match(pricingXml, /Reply STOP to opt out, HELP for help\. Msg&amp;data rates may apply\./);
     assert.equal(h.store.listConsents().some((row) => row.phone === '+15551112222' && row.source === 'inbound-sms' && row.consentTextVersion === 'inbound-sms-v1'), true);
-    assert.equal(h.completions.length, 1);
+    assert.equal(h.completions.length, 2);
 
     const card = await postTwilio(base, h.env, '/api/twilio/sms', {
       From: '+15551113333',
@@ -759,7 +760,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.match(cardXml, /cannot take card numbers/);
     assert.match(cardXml, /https:\/\/manualos\.com/);
     assert.doesNotMatch(cardXml, /4111/);
-    assert.equal(h.completions.length, 1);
+    assert.equal(h.completions.length, 2);
     assert.equal(h.sent.length, 0);
 
     const angry = await postTwilio(base, h.env, '/api/twilio/sms', {
@@ -770,7 +771,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.match(await angry.text(), /person will follow up/);
     assert.equal(h.sent.length, 1);
     assert.match(h.sent[0].body, /furious/);
-    assert.equal(h.completions.length, 1);
+    assert.equal(h.completions.length, 2);
 
     h.store.saveThread('+15551115555', { turns: policy.SMS_TURN_CAP, lowConfidence: 0, history: [], updatedAt: '2026-10-25T00:00:00.000Z' });
     const capped = await postTwilio(base, h.env, '/api/twilio/sms', {
@@ -779,7 +780,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
       MessageSid: 'SM_CAP',
     });
     assert.match(await capped.text(), /person/);
-    assert.equal(h.completions.length, 1);
+    assert.equal(h.completions.length, 2);
     assert.equal(h.sent.length, 2);
   });
 
@@ -795,7 +796,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
       MessageSid: 'SM_BUDGET_1',
     });
     assert.match(await first.text(), /\$39/);
-    assert.equal(budget.completions.length, 1);
+    assert.equal(budget.completions.length, 2);
     assert.ok(budget.store.spentUsd('2026-10') >= 0.5);
     const second = await postTwilio(base, budget.env, '/api/twilio/sms', {
       From: '+15551116666',
@@ -806,7 +807,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.match(secondXml, /paused/i);
     assert.match(secondXml, /call you back/i);
     assert.doesNotMatch(secondXml, /support@manualos\.com/);
-    assert.equal(budget.completions.length, 1);
+    assert.equal(budget.completions.length, 2);
     assert.equal(budget.sent.length, 1);
     const third = await postTwilio(base, budget.env, '/api/twilio/sms', {
       From: '+15551116666',
@@ -1038,7 +1039,7 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
     env,
     spentUsd: 0,
     complete: async (request) => {
-      payload = JSON.stringify(request.messages);
+      if (request.maxTokens === 200) payload = JSON.stringify(request.messages);
       return answer('Pro is $79 per month.');
     },
   });
@@ -1063,7 +1064,7 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
       return answer('Starter is $39 one-time for 3 manuals.');
     },
   });
-  assert.equal(called, 1);
+  assert.equal(called, 2);
   assert.notEqual(resumed.reason, 'turn_cap');
   assert.match(resumed.reply, /\$39/);
 
@@ -1957,7 +1958,7 @@ test('a toll-free STOP reply failure is logged and does not page', async () => {
 });
 
 test('card windows, opt-out billing, refund promises, and vendor names', async () => {
-  assert.equal(policy.redactCardNumbers('4111 1111 1111 1111 123'), '[redacted]3');
+  assert.equal(policy.redactCardNumbers('4111 1111 1111 1111 123'), '[redacted] 123');
   assert.doesNotMatch(policy.redactCardNumbers('4111 1111 1111 1111 123'), /4111/);
   assert.equal(policy.redactCardNumbers('4111 1111 1111 1111 04 29 cvv 123'), '[redacted] [redacted]');
   assert.equal(policy.containsCardNumber('4111 1111 1111 1111 123'), true);
@@ -2200,7 +2201,7 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
       env,
       spentUsd: 0,
       complete: async (request) => {
-        seen = JSON.stringify(request.messages);
+        if (request.maxTokens === 200) seen = JSON.stringify(request.messages);
         return answer('Email support@manualos.com and the team can look up that order.');
       },
     });
@@ -2222,7 +2223,7 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
     env,
     spentUsd: 0,
     complete: async (request) => {
-      seededPayload = JSON.stringify(request.messages);
+      if (request.maxTokens === 200) seededPayload = JSON.stringify(request.messages);
       return answer('Pro is $79 per month.');
     },
   });
@@ -2253,7 +2254,7 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
 
     let payload = '';
     h.setComplete(async (request) => {
-      payload = JSON.stringify(request.messages);
+      if (request.maxTokens === 200) payload = JSON.stringify(request.messages);
       return answer('Pro is $79 per month.');
     });
     const follow = await postTwilio(base, h.env, '/api/twilio/sms', {
@@ -2291,8 +2292,9 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
       MessageSid: 'SM_ORDER_ID',
     });
     assert.doesNotMatch(await order.text(), /cannot take card numbers/);
-    assert.doesNotMatch(JSON.stringify(h.completions.at(-1).messages), /4111/);
-    assert.match(JSON.stringify(h.completions.at(-1).messages), /order \[redacted\]/);
+    const orderCall = h.completions.filter((request) => request.maxTokens === 200).at(-1);
+    assert.doesNotMatch(JSON.stringify(orderCall.messages), /4111/);
+    assert.match(JSON.stringify(orderCall.messages), /order \[redacted\]/);
     assert.doesNotMatch(fs.readFileSync(threadsPath, 'utf8'), /4111/);
   });
 
@@ -2399,7 +2401,7 @@ test('round 5 redaction, refund allowlist, opt-out, billing, and vendor context'
       env,
       spentUsd: 0,
       complete: async (request) => {
-        seen = JSON.stringify(request.messages);
+        if (request.maxTokens === 200) seen = JSON.stringify(request.messages);
         return answer('Email support@manualos.com and the team can look up that order.');
       },
     });
@@ -2529,7 +2531,7 @@ test('round 5 redaction, refund allowlist, opt-out, billing, and vendor context'
     h.env.PUBLIC_BASE_URL = base;
     let payload = '';
     h.setComplete(async (request) => {
-      payload = JSON.stringify(request.messages);
+      if (request.maxTokens === 200) payload = JSON.stringify(request.messages);
       return answer('Email support@manualos.com and the team can look that up.');
     });
     const order = await postTwilio(base, h.env, '/api/twilio/sms', {
@@ -2587,4 +2589,264 @@ test('round 5 redaction, refund allowlist, opt-out, billing, and vendor context'
     assert.doesNotMatch(cleaned, pattern, phrase);
   }
   assert.doesNotMatch(policy.applyGuardrails('A Google search', env), /the speech service/);
+});
+
+test('round 6 cards, split history, refund promises, opt-out, billing, and identity', async () => {
+  const env = aiEnv();
+  const gaps = [
+    'card 4111 -- 1111 -- 1111 -- 1111',
+    'card 4111 ••• 1111 ••• 1111 ••• 1111',
+    'card 4111    1111    1111    1111',
+    'card 4111 \r\n 1111 \r\n 1111 \r\n 1111',
+    'card 4111\n\n\n\n1111\n\n\n\n1111\n\n\n\n1111',
+    'card 4111 - - 1111 - - 1111 - - 1111',
+    `card 4111${'\u200b'.repeat(4)}1111${'\u200b'.repeat(4)}1111${'\u200b'.repeat(4)}1111`,
+    'card 4111 and 1111 and 1111 and 1111',
+    'card 4111      ,      1111 1111 1111',
+    'card ４１１１ １１１１ １１１１ １１１１',
+    'card ４１１１１１１１１１１１１１１１',
+    'card ٤١١١ ١١١١ ١١١١ ١١١١',
+    'card ४०१२८८८८८८८८१८८१',
+    'card 𝟒𝟐𝟒𝟐𝟒𝟐𝟒𝟐𝟒𝟐𝟒𝟐𝟒𝟐𝟒𝟐',
+    'card 4111 1111 １１１１ 1111',
+  ];
+  for (const raw of gaps) {
+    assert.equal(policy.containsCardNumber(raw), true, raw);
+    assert.doesNotMatch(policy.redactCardNumbers(raw), /4111|４１１１|٤١١١|४०१२|𝟒𝟐𝟒𝟐/);
+    assert.match(policy.redactCardNumbers(raw), /\[redacted\]/, raw);
+  }
+  const echo = policy.applyGuardrails('Your card ４１１１ １１１１ １１１１ １１１１ is on file.', env);
+  assert.doesNotMatch(echo, /４|4111/);
+  assert.match(echo, /\[redacted\]/);
+
+  for (const phrase of [
+    'my order number is 1234 5678 9012 3456',
+    'job id 20261025170000 failed',
+    'serial 1756102520260001 on the PLC',
+    'tracking 9400 1000 0000 0000 0000 00',
+  ]) {
+    assert.equal(policy.containsCardNumber(phrase), false, phrase);
+    const decision = await policy.triageTurn({
+      channel: 'sms',
+      text: phrase,
+      state: state(),
+      env,
+      spentUsd: 0,
+      complete: async () => answer('Email support@manualos.com and the team can look that up.'),
+    });
+    assert.doesNotMatch(decision.reply, /cannot take card numbers/, phrase);
+  }
+  assert.equal(policy.redactCardNumbers('Your job ran at 2026-10-25 17:00:00 and finished.'), 'Your job ran at 2026-10-25 17:00:00 and finished.');
+  assert.equal(policy.redactCardNumbers('Serial 2026-1025-1700-0012 is installed.'), 'Serial 2026-1025-1700-0012 is installed.');
+
+  const split = state();
+  let splitCalls = 0;
+  await policy.triageTurn({
+    channel: 'sms',
+    text: 'first part 4111 1111',
+    state: split,
+    env,
+    spentUsd: 0,
+    complete: async () => {
+      splitCalls += 1;
+      return answer('What is the rest of that number?');
+    },
+  });
+  const rest = await policy.triageTurn({
+    channel: 'sms',
+    text: '1111 1111 is the rest',
+    state: split,
+    env,
+    spentUsd: 0,
+    complete: async () => {
+      splitCalls += 1;
+      return answer('should not run');
+    },
+  });
+  assert.match(rest.reply, /cannot take card numbers/);
+  assert.doesNotMatch(JSON.stringify(split.history), /4111/);
+  assert.equal(splitCalls, 2);
+  const amex = state();
+  await policy.triageTurn({
+    channel: 'sms',
+    text: '3782',
+    state: amex,
+    env,
+    spentUsd: 0,
+    complete: async () => answer('Go on.'),
+  });
+  await policy.triageTurn({
+    channel: 'sms',
+    text: '822463',
+    state: amex,
+    env,
+    spentUsd: 0,
+    complete: async () => answer('Go on.'),
+  });
+  const amexLast = await policy.triageTurn({
+    channel: 'sms',
+    text: '10005',
+    state: amex,
+    env,
+    spentUsd: 0,
+    complete: async () => answer('should not run'),
+  });
+  assert.match(amexLast.reply, /cannot take card numbers/);
+  assert.doesNotMatch(JSON.stringify(amex.history), /3782|822463|10005/);
+
+  const cardStore = tempStore();
+  cardStore.saveThread('+15551119400', {
+    turns: 2,
+    history: [
+      { role: 'user', content: 'first part 4111 1111' },
+      { role: 'user', content: '1111 1111 is the rest' },
+    ],
+  });
+  assert.doesNotMatch(fs.readFileSync(path.join(cardStore.directory, 'threads.json'), 'utf8'), /4111/);
+
+  const indirect = [
+    "We'll make it right.",
+    "You'll get your $39 back.",
+    "I've processed a reversal.",
+    "I've reversed the charge.",
+    "I'll reverse your payment.",
+    'The $79 will be returned to your card within 5 days.',
+    "I'll send you a credit for the full amount.",
+    "I've voided the charge.",
+    "I'll waive this month's charge.",
+    "Consider the charge cancelled; you won't pay a cent.",
+    "We'll return your payment.",
+    "I'll get your money right back to you.",
+    "I've issued a chargeback on your behalf.",
+    "You'll see the $39 back on your statement.",
+    "I'll comp your account for this month.",
+    "No charge. I've zeroed out your invoice.",
+    "We'll make you whole.",
+    'Your money is on its way back.',
+    "I'll pay you back.",
+    "I'll credit $39 to your card.",
+    'I put the $39 back on your Visa.',
+    'Rest assured, the $79 charge has been reversed.',
+    'R-e-f-u-n-d approved.',
+    'Your re\u200bfund is on its way.',
+    'A full rëfund is coming.',
+    'Your reimbursment is on the way.',
+    "I can't issue a refund, but I've already sent your $39 back.",
+    'Only the team can issue a refund, and they already approved yours.',
+    'To request a refund, email support. Actually, done: it is approved.',
+    'Refunds are handled by a person, and that person has approved yours.',
+    'I cannot issue a refund. I have already issued it.',
+    'Your money will be returned to your card.',
+    'I will send the $39 back to your card.',
+  ];
+  for (const phrase of indirect) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /\$39 back|\$79|reversal|chargeback|make it right|make you whole/i, phrase);
+  }
+  const guarded = await policy.triageTurn({
+    channel: 'sms',
+    text: 'Can you help with my manual?',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) return { choices: [{ message: { content: '{"refund":true,"leak":false}' } }] };
+      return answer('Sounds good, the drawing is ready.');
+    },
+  });
+  assert.match(guarded.reply, /cannot approve or issue a refund/i);
+  const leaked = await policy.triageTurn({
+    channel: 'sms',
+    text: 'Who is this?',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) return { choices: [{ message: { content: '{"refund":false,"leak":true}' } }] };
+      return answer('The drawing is ready.');
+    },
+  });
+  assert.match(leaked.reply, /support@manualos\.com/);
+  assert.doesNotMatch(leaked.reply, /drawing is ready/);
+  const failed = await policy.triageTurn({
+    channel: 'sms',
+    text: 'Where is my manual?',
+    state: state(),
+    env: aiEnv({ LLM_GUARD_TIMEOUT_MS: '20' }),
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) return new Promise(() => {});
+      return answer('The manual is in your account.');
+    },
+  });
+  assert.match(failed.reply, /support@manualos\.com/);
+  assert.doesNotMatch(failed.reply, /in your account/);
+
+  for (const phrase of [
+    "don’t text me again",
+    'Please don’t message me anymore',
+    'Please stop',
+    'leave me alone',
+    'lose my number',
+    'unsub',
+    'I want off this list',
+    'Remove my number',
+    'delete my number',
+    "I didn't sign up for this, stop",
+    "I don't want to receive texts from you",
+    'Cancel texts',
+    'pls stop txting me',
+  ]) {
+    assert.equal(isOptOutMessage(phrase), true, phrase);
+  }
+  for (const phrase of [
+    'Stop button on the HMI does not work',
+    'Stop light is flashing red on the PLC',
+    'STOP code F0003 on the drive, what does it mean?',
+    'No more messages show up in the alarm log',
+    'Remove me as the contact on the manual cover and use Bob instead',
+    'please stop texting',
+  ]) {
+    assert.equal(isOptOutMessage(phrase), false, phrase);
+  }
+  assert.equal(policy.classify('take me off the Pro plan'), 'billing');
+  assert.equal(policy.classify('take me off auto-renew'), 'billing');
+  assert.equal(isOptOutMessage('take me off the Pro plan'), true);
+  for (const phrase of [
+    'why did you take $79 from my account',
+    'unauthorized transaction from ManualOS',
+    "I didn't authorize this purchase",
+    "I'm filing a chargeback",
+    'Cancel my order',
+    'Why is there a $79 debit on my statement?',
+    'Can I get a receipt for my purchase?',
+    'Please turn off auto-renew',
+    'Your company stole $39 from me',
+    'My card got hit twice',
+    'I paid but never got my manual',
+    'Downgrade me from Pro to Starter',
+    'how do I cancel',
+    'You took $79 again this month',
+  ]) {
+    assert.equal(policy.classify(phrase), 'billing', phrase);
+  }
+
+  for (const phrase of [
+    'Schneider PLCs are supported.',
+    'Schneider-Electric Modicon exports work.',
+    'Schneider EcoStruxure',
+    'Claude.',
+    'Powered by Claude.',
+    'Claude here!',
+    'I am an Open-AI model.',
+    'I am GPT4o.',
+    "I'm Gemini, by Google.",
+    'I run on Llama from Meta.',
+    'Mistral powers me.',
+  ]) {
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.doesNotMatch(cleaned, /schneider|claude|open-?ai|gpt\s*4|gemini|llama|\bmeta\b|mistral|\bgoogle\b/i, phrase);
+  }
 });
