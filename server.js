@@ -20,6 +20,7 @@ const {
   publicAccess,
   commitStarterCredit,
   recordStarterManual,
+  recoverAbandonedCredit,
   reserveStarterCredit,
   verifyCheckoutSession,
 } = require('./lib/billing');
@@ -40,7 +41,7 @@ const {
 } = require('./lib/access-token');
 const { contentDisposition, downloadFileName, shortJobId, sourceName } = require('./lib/download-name');
 const { assertSessionId, maskSessionId } = require('./lib/session-id');
-const { FILE_LIMIT, overLengthField } = require('./lib/field-limits');
+const { FILE_LIMIT, readTextFields } = require('./lib/field-limits');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
 const { withStripeReadCache } = require('./lib/stripe-read-cache');
@@ -61,6 +62,7 @@ const { requestIp } = require('./lib/client-ip');
 const {
   maybeSendCancellationConfirmation,
   mountBillingPortal,
+  verifyPortalToken,
   warnIfManagedPaymentsWithoutPortal,
   warnIfSmtpUnconfigured,
 } = require('./lib/billing-portal');
@@ -245,12 +247,8 @@ function collectFiles(req) {
 }
 
 function fieldsFrom(req) {
-  const body = req.body || {};
-  const fields = {};
-  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language', 'date']) {
-    if (typeof body[key] === 'string') fields[key] = body[key];
-  }
-  return fields;
+  const read = readTextFields(req && req.body);
+  return read.fields || {};
 }
 
 function logWebhookEvent(event) {
@@ -349,7 +347,7 @@ function createApp({
   const store = jobs || createJobStore({
     env,
     onAbandonedCredit(hold) {
-      return ledger.handBack(stripeClient, hold.paymentIntentId, hold.token);
+      return recoverAbandonedCredit(stripeClient, hold, ledger);
     },
   });
   logPortalTokenStatus(env);
@@ -559,7 +557,7 @@ function createApp({
     for (const value of [bodyId, header]) {
       if (!value) continue;
       if (rawSessionBlocked(value, env)) {
-        throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+        throw exposed(401, 'This sign-in was revoked.', null, 'credential_revoked');
       }
       assertSessionId(value);
     }
@@ -686,7 +684,7 @@ function createApp({
     }
     for (const value of presented) {
       if (rawSessionBlocked(value, env)) {
-        throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+        throw exposed(401, 'This sign-in was revoked.', null, 'credential_revoked');
       }
       assertSessionId(value);
     }
@@ -729,6 +727,18 @@ function createApp({
       if (!gate.ok) {
         return tooMany(res, gate.retryAfter, `Too many token exchanges. Try again in ${gate.retryAfter} seconds.`);
       }
+      // A leaked session_id must not mint another token or clear the block.
+      // The cancel HMAC token proves the buyer. A new Checkout session id was
+      // never revoked, so it exchanges on the path below.
+      const revoked = rawSessionBlocked(sessionId, env);
+      const portalCustomer = verifyPortalToken(
+        req.body && typeof req.body.token === 'string' ? req.body.token.trim() : '',
+        env,
+        clock(),
+      );
+      if (revoked && !portalCustomer) {
+        return res.status(401).json({ error: 'This sign-in was revoked.', code: 'credential_revoked' });
+      }
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
@@ -753,13 +763,18 @@ function createApp({
           code: 'purchase_inactive',
         });
       }
+      if (revoked) {
+        if (!access.customerId || !safeEqual(access.customerId, portalCustomer)) {
+          return res.status(401).json({ error: 'This sign-in was revoked.', code: 'credential_revoked' });
+        }
+        clearRawSessionBlock(sessionId, env);
+      }
       const minted = signAccessToken({
         sessionId,
         customerId: access.plan === 'starter' ? '' : (access.customerId || ''),
         subscriptionId: access.plan === 'starter' ? '' : (access.subscriptionId || ''),
       }, env);
       recordTokenExchange(sessionId, env);
-      clearRawSessionBlock(sessionId, env);
       const sidHash = typeof store.hashCredential === 'function' ? store.hashCredential(sessionId) : '';
       if (sidHash) console.log('access_token_minted', sidHash.slice(0, 12));
       res.set(PRIVATE_RESPONSE);
@@ -856,9 +871,12 @@ function createApp({
     const caller = await generationCaller(req);
     verifyCache.delete(caller.sessionId);
     const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
-    const tooLong = overLengthField(req.body);
-    if (tooLong) {
-      throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
+    const text = readTextFields(req.body);
+    if (text.error && text.error.code === 'field_too_long') {
+      throw exposed(400, `${text.error.field} must be at most ${text.error.max} characters.`, null, 'field_too_long');
+    }
+    if (text.error) {
+      throw exposed(400, `${text.error.field} must be a single text value.`, null, 'invalid_field');
     }
     const files = collectFiles(req);
     if (files.length > FILE_LIMIT) {
@@ -947,6 +965,12 @@ function createApp({
         }
         async function failJob(err, timeout) {
           stopRefresh();
+          // The credit commit already persisted this job as succeeded. A later
+          // throw must not delete that PDF or say the credit was returned.
+          if (job && job.status === 'succeeded') {
+            rememberJob(job);
+            return;
+          }
           if (job && job.status !== 'succeeded') {
             const message = err && err.expose
               ? err.message
@@ -986,6 +1010,9 @@ function createApp({
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
           if (credit && credit.paymentIntentId && credit.token) {
             job.creditHold = { paymentIntentId: credit.paymentIntentId, token: credit.token };
+            if (Number.isInteger(credit.manualsUsed) && credit.manualsUsed >= 0) {
+              job.creditHold.manualsUsed = credit.manualsUsed;
+            }
           }
           rememberJob(job);
           const abort = new AbortController();
@@ -1046,12 +1073,16 @@ function createApp({
                 console.error('Open credit hold was not cleared');
               }
             }
-            job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
-            job.warnings = result.warnings || [];
+            // Record success before coverage bookkeeping. A crash after the
+            // commit then reloads a finished job instead of handing the credit back.
             delete job.creditHold;
             job.status = 'succeeded';
+            job.error = null;
             job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
+            rememberJob(job);
             logOutcome(null);
+            job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
+            job.warnings = result.warnings || [];
           } catch (err) {
             await failJob(err, false);
           }

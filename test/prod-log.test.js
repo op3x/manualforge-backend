@@ -178,7 +178,7 @@ test('session ids are rejected before Stripe and only the last four characters a
   }));
 
   const logged = lines.join('\n');
-  assert.match(logged, /Rejected session id \(\.\.\.e_up\)/);
+  assert.match(logged, /Rejected session id \(\.\.\.deup\)/);
   assert.match(logged, /Rejected session id \(\.\.\.\*\*\*\*\)/);
   assert.match(logged, /Rejected session id \(\.\.\.aaaa\)/);
   assert.equal(logged.includes('cs_made_up'), false);

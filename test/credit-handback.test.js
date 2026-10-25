@@ -834,6 +834,8 @@ test('a failed job is marked failed before the hand-back while Stripe stays down
       const done = await waitJob(base, (await created.json()).id);
       assert.equal(done.status, 'failed');
       assert.equal(done.error, CREDIT_RETURN_MESSAGE);
+      assert.match(done.error, /credit is being returned/);
+      assert.equal(done.error.includes('has been returned'), false);
       assert.equal(done.error.includes('did not use a credit'), false);
       assert.equal(ledger.pending(), 0);
       assert.equal(meta.manuals_used, '1');
@@ -845,6 +847,10 @@ test('a failed job is marked failed before the hand-back while Stripe stays down
       assert.equal(meta.manuals_used, '1');
       assert.equal(decrements.count, 0);
       assert.match(meta.credit_hold, /^[a-f0-9]{16}$/);
+      const queued = await fetch(`${base}/jobs/${done.id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
+      const queuedBody = await queued.json();
+      assert.match(queuedBody.error, /credit is being returned/);
+      assert.equal(queuedBody.error.includes('has been returned'), false);
     });
   } finally {
     releaseGate();
@@ -1091,7 +1097,7 @@ test('a lost hold-clear response followed by failed confirm reads still delivers
     assert.equal(paid.meta.credit_hold, undefined);
     assert.equal(paid.decrements.count, 0);
     assert.equal((await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } })).status, 200);
-    assert.equal(JSON.stringify(done).includes('credit has been returned'), false);
+    assert.equal(JSON.stringify(done).includes('credit is being returned'), false);
   });
 });
 
