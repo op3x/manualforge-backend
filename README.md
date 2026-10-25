@@ -29,7 +29,7 @@ Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mo
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
 
-Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard. Renewal and Terms consent for this API are the request flags above, not that Stripe checkbox.
+Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard. Renewal and Terms consent for this API are the request flags above, not that Stripe checkbox.
 
 ### `POST /access-link`
 

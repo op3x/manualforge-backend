@@ -11,7 +11,7 @@ const {
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 
-const PAYMENT_MESSAGE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable.';
+const PAYMENT_MESSAGE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro. Once a manual is delivered, that purchase is no longer refundable.';
 const SUBSCRIPTION_MESSAGE = `${PAYMENT_MESSAGE} Cancel anytime.`;
 
 const STARTER_DESCRIPTION = 'ManualOS Starter: 3 operator and maintenance manuals from your files';
@@ -94,6 +94,17 @@ function withAttribution(params, raw) {
   }
   return next;
 }
+
+test('live checkout text does not name Integrator', () => {
+  assert.equal(PAYMENT_REFUND_MESSAGE.includes('Integrator'), false);
+  assert.equal(SUBSCRIPTION_REFUND_MESSAGE.includes('Integrator'), false);
+  for (const plan of ['starter', 'pro']) {
+    const result = withCheckoutPolicy(checkoutParams(plan, env), { plan, env });
+    for (const text of customerCopy(result)) {
+      assert.equal(text.includes('Integrator'), false, text);
+    }
+  }
+});
 
 test('submit message is the refund rule and stays within 1200 characters', () => {
   assert.equal(PAYMENT_REFUND_MESSAGE, PAYMENT_MESSAGE);
