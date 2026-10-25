@@ -134,13 +134,15 @@ test('shutdown does not repeat a startup sentence or the control-logic line', as
 test('maintenance wording follows the device, the interval, and steam', async () => {
   const cooker = await load(COOKER, 'cooker.L5X');
   const cookerPm = plain(buildPmSchedule(cooker, {}));
-  assert.match(cookerPm, /cooker gate switch/i);
-  assert.match(cookerPm, /while it is open/i);
+  assert.equal(/cooker gate switch/i.test(cookerPm), false);
+  assert.equal(/while it is open/i.test(cookerPm), false);
+  assert.equal(/\bguards?\b/i.test(cookerPm), false);
   assert.equal(/Releasing an emergency stop/.test(cookerPm), false);
   assert.match(cookerPm, /steam supply in service/i);
   assert.equal(/while the steam supply can be open/i.test(cookerPm), false);
   assert.equal(/not repeated at 500 operating hours/.test(cookerPm), false);
-  assert.match(cookerPm, /steam safety relief valve/i);
+  assert.match(cookerPm, /steam traps, if fitted/i);
+  assert.match(cookerPm, /steam safety relief valve, if fitted/i);
   assert.match(cookerPm, /does not state a set pressure/i);
   assert.equal(/\d+\s*psi\b/i.test(cookerPm), false);
 
@@ -164,15 +166,23 @@ test('maintenance wording follows the device, the interval, and steam', async ()
 test('a normal stop states a result, then lock removal returns the equipment to service', async () => {
   const cooker = await load(COOKER, 'cooker.L5X');
   const shutdown = plain(buildShutdown(cooker, {}));
-  assert.match(shutdown, /Leave the guard closed until motion has stopped/);
-  assert.match(shutdown, /People stay outside the guarded space until motion has finished/);
-  assert.equal(/The guard stays closed until motion has stopped/.test(shutdown), false);
+  assert.equal(/Leave the guard closed/.test(shutdown), false);
+  assert.equal(/guarded space/.test(shutdown), false);
+  assert.equal(/\bguards?\b/i.test(shutdown), false);
   assert.match(shutdown, /remove only the lock and tag you applied/);
   assert.match(shutdown, /return the equipment to service with the startup procedure/);
-  const actionAt = shutdown.search(/Leave the guard closed until motion has stopped/);
-  const resultAt = shutdown.search(/People stay outside the guarded space until motion has finished/);
+  const stillAt = shutdown.search(/moving material are still/);
   const restoreAt = shutdown.search(/remove only the lock and tag you applied/);
-  assert.ok(actionAt > 0 && resultAt > actionAt && restoreAt > resultAt);
+  assert.ok(stillAt > 0 && restoreAt > stillAt);
+
+  const cell = await load(CELL, 'cell.scl');
+  const cellShutdown = plain(buildShutdown(cell, {}));
+  assert.match(cellShutdown, /Leave the guard door closed until motion has stopped/);
+  assert.match(cellShutdown, /People stay outside the guarded space until motion has finished/);
+  const actionAt = cellShutdown.search(/Leave the guard door closed until motion has stopped/);
+  const resultAt = cellShutdown.search(/People stay outside the guarded space until motion has finished/);
+  const cellRestore = cellShutdown.search(/remove only the lock and tag you applied/);
+  assert.ok(actionAt > 0 && resultAt > actionAt && cellRestore > resultAt);
 });
 
 test('cooker startup drains condensate before steam and does not invent homing', async () => {
@@ -294,7 +304,8 @@ test('troubleshooting and spare parts are still delivered when alarm text or par
   assert.equal(guide.skipped, undefined);
   assert.equal(parts.skipped, undefined);
   assert.match(plain(guide), /did not include alarm text/i);
-  assert.match(plain(guide), /does not run as commanded/i);
+  assert.equal(/does not run as commanded/i.test(plain(guide)), false);
+  assert.equal(/does not go to run/i.test(plain(guide)), false);
   assert.match(plain(parts), /Add part numbers/);
   assert.match(plain(parts), /Controller: battery, if fitted/);
   assert.equal(/steam traps/i.test(plain(parts)), false);

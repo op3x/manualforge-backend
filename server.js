@@ -24,6 +24,7 @@ const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { generateManual } = require('./lib/pipeline');
 const { generatePackage } = require('./lib/documents/generate');
 const { resolveDocumentBranding } = require('./lib/documents/branding');
+const { markDeliveredManual } = require('./lib/delivery-hook');
 const {
   selectionFromRequest,
   requestsExtras,
@@ -230,7 +231,9 @@ function createApp({
       credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env);
     }
     try {
-      const result = await respond(access, files, credit, project, selection);
+      // #6 passes branding and #7 passes the document selection. Both travel together.
+      const branding = resolveDocumentBranding(access);
+      const result = await respond(access, files, credit, project, selection, branding);
       return result;
     } catch (err) {
       if (credit) {
@@ -248,7 +251,7 @@ function createApp({
     runPaid(req, res, {
       reserveAtStart: true,
       documents: true,
-      respond: async (access, files, credit, project, selection) => {
+      respond: async (access, files, credit, project, selection, branding) => {
         const job = store.create();
         job.documents = selection.entries.map((entry) => ({
           id: entry.id,
@@ -268,7 +271,7 @@ function createApp({
             anthropic: anthropicClient,
             env,
             renderPdf,
-            branding: resolveDocumentBranding(access),
+            branding: branding || resolveDocumentBranding(access),
             selection,
             onProgress(stage, percent, message) {
               job.status = 'running';
@@ -278,6 +281,8 @@ function createApp({
           for (const output of result.outputs) store.saveArtifact(job.id, output.id, output.pdf);
           if (result.combined) store.saveArtifact(job.id, 'combined', result.combined);
           if (result.zip) store.saveArtifact(job.id, 'zip', result.zip);
+          const manualReady = (result.outputs || []).some((output) => output.kind === 'manual' && output.pdf && output.pdf.length);
+          if (manualReady) await markDeliveredManual(stripeClient, access, readSessionId(req));
           job.documents = result.documents;
           job.coverage = result.coverage
             ? { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent }
@@ -383,7 +388,7 @@ function createApp({
   app.post('/generate-manual', upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
-      respond: async (access, files, credit, project) => {
+      respond: async (access, files, credit, project, selection, branding) => {
         const result = await generateManual({
           files,
           project,
@@ -391,7 +396,7 @@ function createApp({
           anthropic: anthropicClient,
           env,
           renderPdf,
-          branding: resolveDocumentBranding(access),
+          branding: branding || resolveDocumentBranding(access),
         });
         if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
         res.set({

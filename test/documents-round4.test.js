@@ -56,12 +56,13 @@ test('spare parts name the device and mark inferred parts', async () => {
   assert.match(steamParts, /Relief valve, if fitted/);
 });
 
-test('troubleshooting adds interlock rows until at least six are listed', async () => {
+test('troubleshooting rows come from the interlocks in the logic', async () => {
   const cell = await load(CELL, 'cell.scl');
   const html = htmlOf(custom(cell, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
   const text = plain(custom(cell, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
-  assert.ok(bodyRows(html) >= 6, String(bodyRows(html)));
-  assert.match(text, /pneumatic cylinder valve will not extend/i);
+  assert.ok(bodyRows(html) >= 3, String(bodyRows(html)));
+  assert.match(text, /pneumatic cylinder will not extend/i);
+  assert.equal(/pneumatic cylinder valve will not extend/i.test(text), false);
   assert.match(text, /compressed air is off/i);
   assert.match(text, /part sensor is not made/i);
 
@@ -74,13 +75,16 @@ test('troubleshooting adds interlock rows until at least six are listed', async 
     ],
     units: [{ index: 0, text: 'IF Release THEN\n  FeedValve := TRUE;\nEND_IF;', comment: '' }],
   });
+  const releasedHtml = htmlOf(custom(release, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
   const released = plain(custom(release, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
   assert.match(released, /feed valve will not open/i);
   assert.match(released, /Release is not made/);
-  assert.ok(bodyRows(htmlOf(custom(release, 'troubleshooting', 'Alarm and Troubleshooting Guide'))) >= 6);
+  assert.ok(bodyRows(releasedHtml) < 6, String(bodyRows(releasedHtml)));
 
   const valve = await load(VALVE, 'tia_LAD_Valve.xml');
-  assert.match(plain(custom(valve, 'troubleshooting', 'Alarm and Troubleshooting Guide')), /pneumatic valve actuator will not open/i);
+  const valveGuide = plain(custom(valve, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
+  assert.match(valveGuide, /pneumatic valve actuator will not open/i);
+  assert.equal((valveGuide.match(/does not go to run|stays on after a stop|does not run as commanded/gi) || []).length <= 1, true);
 });
 
 test('controller maintenance and manual alarms fill a project with no field devices', async () => {
@@ -96,7 +100,12 @@ test('controller maintenance and manual alarms fill a project with no field devi
   const guide = htmlOf(custom(acd, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
   assert.match(guide, /ALM-1/);
   assert.match(guide, /ALM-2/);
-  assert.ok(bodyRows(guide) >= 6);
+  assert.match(guide, /fault counter does not reach its preset/i);
+  assert.match(guide, /first out fault does not update/i);
+  assert.equal(/does not go to run/i.test(guide), false);
+  assert.equal(/stays on after a stop/i.test(guide), false);
+  assert.equal(/does not run as commanded/i.test(guide), false);
+  assert.equal(/No alarms are defined/i.test(guide), false);
   assert.equal(/Not determinable/i.test(guide), false);
 
   const parts = plain(custom(acd, 'parts', 'Spare Parts List'));

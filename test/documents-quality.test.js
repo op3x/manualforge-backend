@@ -315,8 +315,9 @@ test('control names skip status phrases and function titles', async () => {
   assert.equal(/power or air returns/i.test(startup), false);
   assert.match(startup, /when power returns/);
   const shutdown = htmlOf(buildShutdown(project, {}));
-  assert.match(shutdown, /People stay outside the guarded space until motion has finished/);
+  assert.equal(/People stay outside the guarded space until motion has finished/.test(shutdown), false);
   assert.equal(/The guard stays closed until motion has stopped/.test(shutdown), false);
+  assert.equal(/\bguards?\b/i.test(shutdown), false);
   assert.match(shutdown, /Drain hot fluid/);
 
   const cell = await load(path.join(__dirname, 'fixtures/cell.scl'), 'cell.scl');
@@ -327,6 +328,7 @@ test('control names skip status phrases and function titles', async () => {
   assert.equal(cellPoints.resets.some((label) => /clamping control|meter/i.test(label)), false);
   const cellPm = htmlOf(buildPmSchedule(cell, {}));
   const cellStartup = htmlOf(buildStartup(cell, {}));
+  assert.match(htmlOf(buildShutdown(cell, {})), /People stay outside the guarded space until motion has finished/);
   assert.equal(/clamping control/i.test(cellPm + cellStartup), false);
   assert.equal(/water meter has reset/i.test(cellStartup), false);
   assert.match(cellPm, /conveyor motor/i);

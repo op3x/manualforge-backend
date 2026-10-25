@@ -63,7 +63,8 @@ test('logic troubleshooting follows interlocks instead of a generic controller r
   assert.match(text, /lift will not home/i);
   assert.match(text, /homing request is not made/i);
   assert.match(text, /emergency stop is not healthy/i);
-  assert.match(text, /pneumatic cylinder valve will not extend/i);
+  assert.match(text, /pneumatic cylinder will not extend/i);
+  assert.equal(/pneumatic cylinder valve will not extend/i.test(text), false);
 
   const valve = emptyProject();
   addRoutine(valve, {
@@ -215,7 +216,8 @@ test('custom tables are narrow in the code column and share a page with the scop
   assert.match(guide, /What you see and what to do/);
   assert.equal((guide.match(/<section class="chapter">/g) || []).length, 1);
   const pm = htmlOf(buildPmSchedule(cell, {}));
-  assert.match(pm, /class="toc"/);
+  assert.equal(/class="toc"/.test(pm), false);
+  assert.match(pm, /Quarterly <span class="inf">Inferred<\/span>/);
 
   const scored = plain(buildPmSchedule(cell, {}));
   const at = scored.search(/scored rods/i);

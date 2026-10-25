@@ -94,3 +94,4 @@ ol.steps > li .expect b { font-weight: 700; }
 .brand-footer { bottom: 6mm; }
 .brand-name { font: 8pt Helvetica, Arial, sans-serif; color: #5b6b7b; }
 table.signoff td:last-child { letter-spacing: .4pt; color: #5b6b7b; }
+table.signoff td:first-child .inf { display: block; margin-top: 0.8mm; width: max-content; max-width: 100%; }
