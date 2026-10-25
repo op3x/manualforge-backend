@@ -2,7 +2,7 @@
 builder = "NIXPACKS"
 
 [variables]
-NIXPACKS_PKGS = "chromium liberation_ttf noto-fonts noto-fonts-cjk-sans noto-fonts-color-emoji python3"
+NIXPACKS_PKGS = "chromium liberation_ttf python3"
 
 [deploy]
 startCommand = "node server.js"

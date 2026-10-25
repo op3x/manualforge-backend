@@ -1174,6 +1174,100 @@ test('a Liberation-only running header stays inside the right margin', async () 
   }
 });
 
+test('wide and emoji headers still fit when Chrome has Noto and the measurer does not', async () => {
+  const puppeteer = require('puppeteer-core');
+  const executablePath = findChrome();
+  assert.ok(executablePath, 'Chrome is required to measure the header');
+  const emojiFont = '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf';
+  const wideFont = '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf';
+  assert.equal(fs.existsSync(emojiFont), true, 'Noto Color Emoji is required');
+  assert.equal(fs.existsSync(wideFont), true, 'a CJK fallback face is required');
+  const confDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-noto-mismatch-'));
+  const emojiDir = path.join(confDir, 'emoji');
+  const wideDir = path.join(confDir, 'wide');
+  fs.mkdirSync(emojiDir);
+  fs.mkdirSync(wideDir);
+  fs.symlinkSync(emojiFont, path.join(emojiDir, 'NotoColorEmoji.ttf'));
+  fs.symlinkSync(wideFont, path.join(wideDir, 'DroidSansFallbackFull.ttf'));
+  const cacheDir = path.join(confDir, 'cache');
+  fs.mkdirSync(cacheDir);
+  fs.writeFileSync(path.join(confDir, 'fonts.conf'), `<?xml version="1.0"?>
+<fontconfig>
+  <dir>/usr/share/fonts/truetype/liberation</dir>
+  <dir>${emojiDir}</dir>
+  <dir>${wideDir}</dir>
+  <cachedir>${cacheDir}</cachedir>
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+  </alias>
+  <alias>
+    <family>Helvetica</family>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+  </alias>
+  <alias>
+    <family>Arial</family>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+  </alias>
+  <alias>
+    <family>Helvetica Neue</family>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+  </alias>
+</fontconfig>
+`);
+  const project = await parseUploads([{ originalname: 'line.L5X', buffer: fs.readFileSync(path.join(__dirname, 'fixtures/line.L5X')) }]);
+  for (const routine of project.routines) analyzeRoutine(routine, project, null);
+  const savedName = project.identity.productName;
+  const savedFlag = project.identity.productNameFromUser;
+  project.identity.productNameFromUser = true;
+  project.identity.productName = 'Line';
+  const pages = {
+    emoji80: documentBranding({ companyName: '😀'.repeat(80) }),
+    emojiMix: documentBranding({ companyName: `A${'😀'.repeat(40)}` }),
+    cjk40: documentBranding({ companyName: '中'.repeat(40) }),
+    cjk80: documentBranding({ companyName: '中'.repeat(80) }),
+    kana: documentBranding({ companyName: 'あ'.repeat(80) }),
+    fullwidth: documentBranding({ companyName: 'Ａ'.repeat(80) }),
+  };
+  setHeaderFontMode('liberation');
+  const browser = await puppeteer.launch({
+    ...launchOptions(executablePath),
+    env: { ...process.env, FONTCONFIG_FILE: path.join(confDir, 'fonts.conf') },
+  });
+  try {
+    const page = await browser.newPage();
+    for (const [name, branding] of Object.entries(pages)) {
+      const doc = buildDocument(project, { branding });
+      const header = doc.meta.headerLeft;
+      assert.equal(header.endsWith('…'), true, `${name} header was not shortened`);
+      assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(header), false, `${name} split a surrogate`);
+      await page.setContent(renderHtml(doc), { waitUntil: 'load' });
+      const pdf = Buffer.from(await page.pdf({
+        format: 'Letter',
+        printBackground: true,
+        preferCSSPageSize: true,
+        displayHeaderFooter: false,
+        margin: { top: '0', right: '0', bottom: '0', left: '0' },
+      }));
+      const embedded = pdf.toString('latin1');
+      if (name.startsWith('emoji')) {
+        assert.equal(embedded.includes('NotoColorEmoji'), true, `${name} did not embed Noto Color Emoji`);
+      } else {
+        assert.equal(embedded.includes('DroidSansFallback'), true, `${name} did not embed the wide face`);
+      }
+      const layout = headerLayout(pdfHeaderRuns(pdf));
+      assert.ok(layout.gaps.length > 0, `${name} produced no running header`);
+      for (const gap of layout.gaps) assert.ok(gap >= 8, `${name} header runs into Rev. A (gap ${gap}pt)`);
+      for (const end of layout.ends) assert.ok(end <= 561, `${name} header ends at ${end}pt, past the right margin`);
+    }
+  } finally {
+    setHeaderFontMode('system');
+    project.identity.productName = savedName;
+    project.identity.productNameFromUser = savedFlag;
+    await browser.close();
+  }
+});
+
 test('http checkout, overage offer, webhook grant, and white-label rendering', async () => {
   const priceEnv = env({ MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY: '' });
   const bare = createStripe();
