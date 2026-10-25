@@ -802,7 +802,7 @@ test('each skipped cancel email warns when SMTP is not configured', async () => 
 
 function assertOnlineCancelRendered(text) {
   const body = String(text || '');
-  const online = /https:\/\/link\.com\b/i.test(body)
+  const online = /https:\/\/app\.link\.com\b/i.test(body)
     || /https:\/\/billing\.stripe\.com\b/i.test(body)
     || /\/cancel\?token=/.test(body);
   const emailOnly = /\b(e-mail|email)\b/i.test(body) && !online;
@@ -827,13 +827,16 @@ test('startup warns when Managed Payments is on without a portal configuration',
     if (line === MP_NO_PORTAL_WARNING) warnings.push(line);
   };
   try {
-    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1', STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_manualos' }), false);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ MANUALOS_MANAGED_PAYMENTS: '1', STRIPE_PORTAL_CONFIGURATION_ID: 'bpc_manualos' }), false);
     assert.equal(warnings.length, 0);
     assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_PORTAL_CONFIGURATION_ID: '' }), false);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ MANUALOS_MANAGED_PAYMENTS: ' 1 ' }), false);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ MANUALOS_MANAGED_PAYMENTS: 'true' }), false);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1' }), false);
     assert.equal(warnings.length, 0);
-    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1' }), true);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ MANUALOS_MANAGED_PAYMENTS: '1' }), true);
     assert.equal(warnings.at(-1), MP_NO_PORTAL_WARNING);
-    assert.equal(warnIfManagedPaymentsWithoutPortal({ STRIPE_MANAGED_PAYMENTS: '1', STRIPE_PORTAL_CONFIGURATION_ID: 'not-a-config' }), true);
+    assert.equal(warnIfManagedPaymentsWithoutPortal({ MANUALOS_MANAGED_PAYMENTS: '1', STRIPE_PORTAL_CONFIGURATION_ID: 'not-a-config' }), true);
     assert.equal(MP_NO_PORTAL_WARNING.includes('not-a-config'), false);
   } finally {
     console.warn = original;
@@ -854,7 +857,7 @@ test('customer portal is the cancel path when a configuration can open a session
     },
   };
   const app = createApp({
-    env: baseEnv({ STRIPE_MANAGED_PAYMENTS: '1' }),
+    env: baseEnv({ MANUALOS_MANAGED_PAYMENTS: '1' }),
     stripe,
     anthropic: null,
     now: () => FIXED,
@@ -874,7 +877,7 @@ test('customer portal is the cancel path when a configuration can open a session
   }
 }));
 
-test('Managed Payments shows link.com when the portal session cannot be created', async () => exclusive(async () => {
+test('Managed Payments shows app.link.com when the portal session cannot be created', async () => exclusive(async () => {
   const created = [];
   const sent = [];
   const stripe = {
@@ -895,7 +898,7 @@ test('Managed Payments shows link.com when the portal session cannot be created'
     ...manualosStripeExtras(),
   };
   const app = createApp({
-    env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '', STRIPE_MANAGED_PAYMENTS: '1' }),
+    env: baseEnv({ STRIPE_PORTAL_CONFIGURATION_ID: '', MANUALOS_MANAGED_PAYMENTS: '1' }),
     stripe,
     anthropic: null,
     mailer: { async sendMail(message) { sent.push(message); } },
@@ -930,7 +933,7 @@ test('Managed Payments shows link.com when the portal session cannot be created'
 
   const failedCreate = [];
   const failed = createApp({
-    env: baseEnv({ STRIPE_MANAGED_PAYMENTS: '1' }),
+    env: baseEnv({ MANUALOS_MANAGED_PAYMENTS: '1' }),
     stripe: {
       checkout: { sessions: { retrieve: async () => proSession('cus_link') } },
       billingPortal: {
