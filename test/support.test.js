@@ -8,6 +8,7 @@ const { WebSocket } = require('ws');
 const { createApp } = require('../server');
 const { createSupportStore, removeTestSupportDirectories } = require('../lib/support/store');
 const { CONSENT_LIMIT } = require('../lib/support/http');
+const { createSmtpMailer } = require('../lib/support/mail');
 const policy = require('../lib/support/policy');
 
 const TOKEN = 'twilio-test-auth-token';
@@ -866,6 +867,41 @@ function spokenCard() {
   return ['four', ...Array(15).fill('one')].join(' ');
 }
 
+function escalationEnv(extra = {}) {
+  return {
+    NODE_ENV: 'test',
+    FRONTEND_URL: 'https://manualos.com',
+    TWILIO_AUTH_TOKEN: TOKEN,
+    TWILIO_ACCOUNT_SID: 'AC_test_account',
+    TWILIO_FROM_NUMBER: '+15557654321',
+    SUPPORT_PHONE: '+15557654321',
+    ESCALATION_PHONE: '+15550001111',
+    LLM_PROVIDER: 'openai',
+    LLM_API_KEY: 'sk-test-not-real',
+    PUBLIC_BASE_URL: 'http://127.0.0.1',
+    ...extra,
+  };
+}
+
+function escalationApp({ env, store, calls, mailer, onMessage }) {
+  return createApp({
+    env,
+    supportStore: store,
+    mailer,
+    twilioClient: {
+      messages: { create: onMessage },
+      calls: {
+        create: async (params) => {
+          calls.push(params);
+          return { sid: 'CA_fallback' };
+        },
+      },
+    },
+    supportComplete: async () => answer('should not call'),
+    supportNow: () => Date.parse('2026-10-25T12:00:00Z'),
+  });
+}
+
 test('review guardrails: cards, handoff words, refunds, brands, and idle threads', async () => {
   const spoken = spokenCard();
   assert.equal(policy.containsCardNumber('4111.1111.1111.1111'), true);
@@ -1250,41 +1286,41 @@ test('consent is rate limited, append-only, and split from the other files', asy
   assert.equal(store.spentUsd('2026-10'), Number.POSITIVE_INFINITY);
 });
 
-test('a failed escalation text calls the owner unless the caller is already being dialed', async () => {
+test('smtp mailer stays off until host and from are set', () => {
+  assert.equal(createSmtpMailer({}), null);
+  assert.equal(createSmtpMailer({ SMTP_HOST: 'smtp.example.com', SMTP_PASS: 'smtp-secret' }), null);
+  const mailer = createSmtpMailer({
+    SMTP_HOST: 'smtp.example.com',
+    SMTP_PORT: '587',
+    SMTP_USER: 'alerts',
+    SMTP_PASS: 'smtp-secret',
+    SMTP_FROM: 'alerts@manualos.com',
+  });
+  assert.equal(typeof mailer.sendMail, 'function');
+});
+
+test('a failed escalation text calls and emails the owner once', async () => {
   const calls = [];
+  const emails = [];
+  const sent = [];
   const store = tempStore();
-  const env = {
-    NODE_ENV: 'test',
-    FRONTEND_URL: 'https://manualos.com',
-    TWILIO_AUTH_TOKEN: TOKEN,
-    TWILIO_ACCOUNT_SID: 'AC_test_account',
-    TWILIO_FROM_NUMBER: '+15557654321',
-    SUPPORT_PHONE: '+15557654321',
-    ESCALATION_PHONE: '+15550001111',
-    LLM_PROVIDER: 'openai',
-    LLM_API_KEY: 'sk-test-not-real',
-    PUBLIC_BASE_URL: 'http://127.0.0.1',
-  };
-  const app = createApp({
+  const env = escalationEnv({ ESCALATION_EMAIL: 'ryan@manualos.com' });
+  const app = escalationApp({
     env,
-    supportStore: store,
-    twilioClient: {
-      messages: {
-        create: async () => {
-          const err = new Error('toll-free unverified');
-          err.status = 400;
-          throw err;
-        },
-      },
-      calls: {
-        create: async (params) => {
-          calls.push(params);
-          return { sid: 'CA_fallback' };
-        },
+    store,
+    calls,
+    sent,
+    mailer: {
+      sendMail: async (message) => {
+        emails.push(message);
       },
     },
-    supportComplete: async () => answer('should not call'),
-    supportNow: () => Date.parse('2026-10-25T12:00:00Z'),
+    onMessage: async (params) => {
+      sent.push(params);
+      const err = new Error('toll-free unverified');
+      err.status = 400;
+      throw err;
+    },
   });
   await withServer(app, async ({ base }) => {
     env.PUBLIC_BASE_URL = base;
@@ -1294,32 +1330,282 @@ test('a failed escalation text calls the owner unless the caller is already bein
       MessageSid: 'SM_FALLBACK',
     });
     assert.match(await sms.text(), /person will follow up/);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, '+15550001111');
+    assert.equal(sent[0].from, '+15557654321');
+    assert.match(sent[0].statusCallback, /\/api\/twilio\/sms\/status$/);
+    assert.equal(sent[0].statusCallbackMethod, 'POST');
     assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
     assert.equal(calls[0].to, '+15550001111');
     assert.equal(calls[0].from, '+15557654321');
     assert.match(calls[0].twiml, /<Say/);
+    assert.match(calls[0].twiml, /Category complaint/);
+    assert.match(calls[0].twiml, /\+ 1 5 5 5 3 0 0 0 0 4 0/);
     assert.match(calls[0].twiml, /furious/);
-    assert.doesNotMatch(calls[0].twiml, /sk-test|twilio-test-auth-token/);
+    assert.doesNotMatch(calls[0].twiml, /4111|https?:|sk-test|twilio-test-auth-token/);
+    assert.equal(emails[0].to, 'ryan@manualos.com');
+    assert.match(emails[0].subject, /complaint/);
+    assert.match(emails[0].text, /Category: complaint/);
+    assert.match(emails[0].text, /Caller: \+15553000040/);
+    assert.match(emails[0].text, /furious/);
+    assert.doesNotMatch(emails[0].text, /4111|sk-test|twilio-test-auth-token/);
+
+    const again = await postTwilio(base, env, '/api/twilio/sms', {
+      From: '+15553000040',
+      Body: 'I am still furious',
+      MessageSid: 'SM_FALLBACK_2',
+    });
+    assert.match(await again.text(), /person will follow up/);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+
+    const thread = store.getThread('+15553000040');
+    store.saveSmsNotice('SM_LATE', {
+      key: `sms:+15553000040:${thread.startedAt}:complaint`,
+      category: 'complaint',
+      from: '+15553000040',
+      line: 'complaint: card 4111111111111111',
+      detail: 'ManualOS Support: card 4111111111111111',
+    });
+    const late = await postTwilio(base, env, '/api/twilio/sms/status', {
+      MessageSid: 'SM_LATE',
+      MessageStatus: 'failed',
+      ErrorCode: '30032',
+    });
+    assert.equal(late.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+    const saved = fs.readFileSync(path.join(store.directory, 'sms-notices.json'), 'utf8');
+    assert.doesNotMatch(saved, /4111/);
+    assert.match(saved, /\[redacted\]/);
 
     const dialing = await postTwilio(base, env, '/api/twilio/voice/handoff', {
       CallSid: 'CA_DIALING',
       From: '+15553000040',
       CallStatus: 'in-progress',
-      HandoffData: JSON.stringify({ handoff: true, reason: 'safety', summary: 'Caller needs help', from: '+15553000040' }),
+      HandoffData: JSON.stringify({
+        handoff: true,
+        reason: 'safety',
+        summary: 'Caller needs help. Card 4111111111111111',
+        from: '+15553000040',
+      }),
     });
     assert.match(await dialing.text(), /<Dial /);
+    assert.equal(calls.length, 2);
+    assert.equal(emails.length, 2);
+    assert.match(calls[1].twiml, /Category safety/);
+    assert.match(calls[1].twiml, /Caller needs help/);
+    assert.doesNotMatch(calls[1].twiml, /4111|https?:/);
+    assert.match(emails[1].text, /Caller needs help/);
+    assert.doesNotMatch(emails[1].text, /4111/);
+  });
+});
+
+test('an undelivered escalation text falls back once from the status callback', async () => {
+  const calls = [];
+  const emails = [];
+  const sent = [];
+  let n = 0;
+  const store = tempStore();
+  const env = escalationEnv({ ESCALATION_EMAIL: 'ryan@manualos.com' });
+  const app = escalationApp({
+    env,
+    store,
+    calls,
+    sent,
+    mailer: {
+      sendMail: async (message) => {
+        emails.push(message);
+      },
+    },
+    onMessage: async (params) => {
+      sent.push(params);
+      n += 1;
+      return { sid: `SM_STATUS_${n}` };
+    },
+  });
+  await withServer(app, async ({ base }) => {
+    env.PUBLIC_BASE_URL = base;
+    const sms = await postTwilio(base, env, '/api/twilio/sms', {
+      From: '+15553000050',
+      Body: 'I want to file a complaint about the manual',
+      MessageSid: 'SM_IN_1',
+    });
+    assert.match(await sms.text(), /person will follow up/);
+    assert.equal(calls.length, 0);
+    assert.equal(emails.length, 0);
+    assert.equal(sent[0].statusCallback, `${base}/api/twilio/sms/status`);
+
+    const delivered = await postTwilio(base, env, '/api/twilio/sms/status', {
+      MessageSid: 'SM_STATUS_1',
+      MessageStatus: 'delivered',
+    });
+    assert.equal(delivered.status, 200);
+    assert.equal(calls.length, 0);
+    assert.equal(emails.length, 0);
+
+    const failed = await postTwilio(base, env, '/api/twilio/sms/status', {
+      MessageSid: 'SM_STATUS_1',
+      MessageStatus: 'failed',
+      ErrorCode: '30032',
+    });
+    assert.equal(failed.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+    assert.equal(calls[0].to, '+15550001111');
+    assert.equal(calls[0].from, '+15557654321');
+    assert.match(calls[0].twiml, /Category complaint/);
+    assert.match(calls[0].twiml, /\+ 1 5 5 5 3 0 0 0 0 5 0/);
+    assert.match(calls[0].twiml, /complaint/);
+    assert.doesNotMatch(calls[0].twiml, /https?:/);
+    assert.match(emails[0].text, /Caller: \+15553000050/);
+    assert.match(emails[0].subject, /complaint/);
+
+    const again = await postTwilio(base, env, '/api/twilio/sms/status', {
+      MessageSid: 'SM_STATUS_1',
+      MessageStatus: 'undelivered',
+      ErrorCode: '30034',
+    });
+    assert.equal(again.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+
+    const unknown = await postTwilio(base, env, '/api/twilio/sms/status', {
+      MessageSid: 'SM_UNKNOWN',
+      MessageStatus: 'failed',
+      ErrorCode: '30032',
+    });
+    assert.equal(unknown.status, 200);
     assert.equal(calls.length, 1);
 
-    const finished = await postTwilio(base, env, '/api/twilio/voice/handoff', {
-      CallSid: 'CA_FINISHED',
-      From: '+15553000041',
-      CallStatus: 'completed',
-      HandoffData: JSON.stringify({ handoff: true, reason: 'safety', summary: 'Caller already hung up', from: '+15553000041' }),
+    const other = await postTwilio(base, env, '/api/twilio/sms', {
+      From: '+15553000051',
+      Body: 'This charge is wrong',
+      MessageSid: 'SM_IN_2',
     });
-    assert.match(await finished.text(), /<Response><\/Response>/);
+    assert.match(await other.text(), /cannot approve or issue a refund/i);
+    assert.equal(calls.length, 1);
+    const noCode = await postTwilio(base, env, '/api/twilio/sms/status', {
+      MessageSid: 'SM_STATUS_2',
+      MessageStatus: 'undelivered',
+    });
+    assert.equal(noCode.status, 200);
     assert.equal(calls.length, 2);
-    assert.match(calls[1].twiml, /hung up/);
+    assert.equal(emails.length, 2);
+    assert.match(calls[1].twiml, /Category billing/);
+    assert.match(emails[1].text, /Caller: \+15553000051/);
   });
+});
+
+test('a failed voicemail text emails the recording link and speaks only the summary', async () => {
+  const calls = [];
+  const emails = [];
+  const store = tempStore();
+  const env = escalationEnv({ ESCALATION_EMAIL: 'ryan@manualos.com' });
+  const app = escalationApp({
+    env,
+    store,
+    calls,
+    mailer: {
+      sendMail: async (message) => {
+        emails.push(message);
+      },
+    },
+    onMessage: async () => {
+      const err = new Error('toll-free unverified');
+      err.status = 400;
+      throw err;
+    },
+  });
+  await withServer(app, async ({ base }) => {
+    env.PUBLIC_BASE_URL = base;
+    const transcript = await postTwilio(base, env, '/api/twilio/voice/transcription', {
+      CallSid: 'CA_VM',
+      From: '+15553000060',
+      TranscriptionSid: 'TR_VM',
+      TranscriptionStatus: 'completed',
+      TranscriptionText: 'Please call me. My card is 4111111111111111.',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE1',
+    });
+    assert.equal(transcript.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(emails.length, 1);
+    assert.match(calls[0].twiml, /Category voicemail/);
+    assert.match(calls[0].twiml, /\+ 1 5 5 5 3 0 0 0 0 6 0/);
+    assert.match(calls[0].twiml, /Please call me/);
+    assert.doesNotMatch(calls[0].twiml, /4111|https?:/);
+    assert.match(emails[0].text, /Recordings\/RE1/);
+    assert.match(emails[0].text, /Category: voicemail/);
+    assert.doesNotMatch(emails[0].text, /4111/);
+  });
+});
+
+test('missing SMTP skips the escalation email and still calls', async () => {
+  const calls = [];
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  const store = tempStore();
+  const env = escalationEnv({
+    ESCALATION_EMAIL: 'ryan@manualos.com',
+    SMTP_PASS: 'smtp-secret-should-not-log',
+  });
+  const app = escalationApp({
+    env,
+    store,
+    calls,
+    mailer: null,
+    onMessage: async () => {
+      const err = new Error('toll-free unverified');
+      err.status = 400;
+      throw err;
+    },
+  });
+  try {
+    await withServer(app, async ({ base }) => {
+      env.PUBLIC_BASE_URL = base;
+      const sms = await postTwilio(base, env, '/api/twilio/sms', {
+        From: '+15553000070',
+        Body: 'I am furious',
+        MessageSid: 'SM_NO_SMTP',
+      });
+      assert.match(await sms.text(), /person will follow up/);
+      assert.equal(calls.length, 1);
+      assert.match(calls[0].twiml, /Category complaint/);
+      assert.doesNotMatch(calls[0].twiml, /smtp-secret-should-not-log/);
+      const thread = store.getThread('+15553000070');
+      store.saveSmsNotice('SM_NO_SMTP_LATE', {
+        key: `sms:+15553000070:${thread.startedAt}:complaint`,
+        category: 'complaint',
+        from: '+15553000070',
+        line: 'still furious',
+      });
+      const late = await postTwilio(base, env, '/api/twilio/sms/status', {
+        MessageSid: 'SM_NO_SMTP_LATE',
+        MessageStatus: 'undelivered',
+        ErrorCode: '30034',
+      });
+      assert.equal(late.status, 200);
+      assert.equal(calls.length, 1);
+
+      env.ESCALATION_EMAIL = '';
+      const noAddress = await postTwilio(base, env, '/api/twilio/sms', {
+        From: '+15553000071',
+        Body: 'I am furious',
+        MessageSid: 'SM_NO_EMAIL',
+      });
+      assert.match(await noAddress.text(), /person will follow up/);
+      assert.equal(calls.length, 2);
+    });
+  } finally {
+    console.warn = original;
+  }
+  const logged = warnings.join('\n');
+  assert.match(logged, /Escalation email skipped: SMTP is not configured/);
+  assert.match(logged, /Escalation email skipped: ESCALATION_EMAIL is not set/);
+  assert.equal(logged.split('SMTP is not configured').length - 1, 1);
+  assert.doesNotMatch(logged, /smtp-secret-should-not-log/);
 });
 
 test('after-hours billing calls and complaint texts escalate', async () => {

@@ -82,7 +82,13 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `TWILIO_AUTH_TOKEN` | To accept Twilio webhooks | Validates `X-Twilio-Signature`. Voice, SMS, and relay stay **503** until this is set. |
 | `TWILIO_FROM_NUMBER` | To send SMS | E.164 sender for escalation texts. |
 | `SUPPORT_PHONE` | No | E.164 number customers call. Mentioned in HELP and the model prompt. |
-| `ESCALATION_PHONE` | To reach a person | Owner cell, E.164. Dial target and escalation SMS recipient. |
+| `ESCALATION_PHONE` | To reach a person | Owner cell, E.164. Dial target, escalation SMS recipient, and fallback call recipient. |
+| `ESCALATION_EMAIL` | For escalation email | Inbox used when an escalation text to `ESCALATION_PHONE` fails. |
+| `SMTP_HOST` | For escalation email | SMTP server. Unset skips the email and logs a warning. |
+| `SMTP_PORT` | No | Default `587`. Port `465` uses implicit TLS. |
+| `SMTP_USER` | No | SMTP username. Leave unset for a relay that does not authenticate. |
+| `SMTP_PASS` | No | SMTP password. Never logged. |
+| `SMTP_FROM` | For escalation email | From address. Required together with `SMTP_HOST`. |
 | `LLM_PROVIDER` | No | `openai`. Any other value keeps the keypad / canned-text fallback. |
 | `LLM_API_KEY` | For live AI answers | OpenAI API key. Missing → `<Gather>` on calls and a canned SMS. |
 | `LLM_MODEL` | No | Default `gpt-4o-mini`. |
@@ -109,7 +115,7 @@ Configure the Twilio number (HTTP POST):
 - Voice status, call status changes: `https://manualforge-backend-production.up.railway.app/api/twilio/voice/status`
 - Messaging, a message comes in: `https://manualforge-backend-production.up.railway.app/api/twilio/sms`
 
-`PUBLIC_BASE_URL` must be that same origin. The relay URL in the call TwiML is `wss://<that host>/api/twilio/relay`. Handoff, dial result, keypad, voicemail, and recording URLs are returned inside TwiML (`/api/twilio/voice/handoff`, `/api/twilio/voice/dial-status`, `/api/twilio/voice/menu`, `/api/twilio/voice/transcription`, `/api/twilio/voice/recording-done`, `/api/twilio/voice/recording`).
+`PUBLIC_BASE_URL` must be that same origin. The relay URL in the call TwiML is `wss://<that host>/api/twilio/relay`. Handoff, dial result, keypad, voicemail, and recording URLs are returned inside TwiML (`/api/twilio/voice/handoff`, `/api/twilio/voice/dial-status`, `/api/twilio/voice/menu`, `/api/twilio/voice/transcription`, `/api/twilio/voice/recording-done`, `/api/twilio/voice/recording`). Outbound escalation texts set their own status callback to `/api/twilio/sms/status` on that origin. There is no number-level status webhook to configure.
 
 In the Twilio console, accept the ConversationRelay predictive/generative AI addendum before the live voice path will connect. Leave Messaging Service Advanced Opt-Out off, or STOP may never reach this app. The webhook treats STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, REVOKE, OPTOUT, OPT-OUT, and OPT OUT as opt-outs, plus any message that starts with STOP or asks to stop texting or messaging (FCC reasonable-means). HELP, INFO, START, and UNSTOP are handled too. START confirms with `Msg frequency varies.` Customer texts are prefixed `ManualOS Support:` and include `Reply STOP to opt out, HELP for help. Msg&data rates may apply.` Inbound texts are stored as opt-in. The website checkbox posts `{ "phone", "consentTextVersion", "source" }` to `POST /api/support/sms-consent` (10 requests per IP per hour). The client IP is `X-Real-IP` when Railway sets it, otherwise the last `X-Forwarded-For` hop. The first forwarded hop is ignored because the client can spoof it.
 
@@ -117,9 +123,14 @@ Live answers use OpenAI with a 12-turn cap per call, an 8-turn cap per SMS threa
 
 Turn on **Enforce HTTP Auth** for media in the Twilio console so a recording URL is not public. Opening that URL takes the Account SID as the username and the Auth Token as the password (or a logged-in console session). The token is never put in the SMS.
 
-Escalation texts are sent from `TWILIO_FROM_NUMBER`. A toll-free number cannot send those texts until Twilio toll-free verification is approved, so they fail until then. When a notification text fails and the customer is not already being dialed, the app places a voice call to `ESCALATION_PHONE` with the same summary. This app does not send email. A local number avoids the toll-free messaging block.
+Escalation texts are sent from `TWILIO_FROM_NUMBER` to `ESCALATION_PHONE`. Toll-free verification can take about two weeks. Until Twilio approves it, those texts fail. A failure is a Twilio API error, or a status callback of `failed` or `undelivered` (for example error 30032 or 30034). The app then does both of these, once each:
 
-`SUPPORT_DATA_DIR` holds separate files: `opt-outs.json`, append-only `consents.jsonl` (never trimmed), `budget.json`, `threads.json`, and `once.json`. A legacy `state.json` is split once and renamed `state.json.migrated`. Without a Railway volume those files disappear on redeploy, and the counter is only safe on one replica.
+- It places a short voice call from `TWILIO_FROM_NUMBER` to `ESCALATION_PHONE`. The call speaks the category, the caller's number, and a one-line reason.
+- It emails `ESCALATION_EMAIL` through SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`). The message has the same three fields. A voicemail notice also includes the recording link.
+
+The spoken script, the email, and the saved status record never include a customer card number. If `ESCALATION_EMAIL` or `SMTP_HOST` / `SMTP_FROM` is unset, the email is skipped and a warning is logged. One escalation produces at most one fallback call and one email, including when the API error and a later status callback both fire. The fallback call is placed even while a customer is already being dialed. `PUBLIC_BASE_URL` has to be set or the status callback is omitted and only the API error can fall back. A local number avoids the toll-free messaging block.
+
+`SUPPORT_DATA_DIR` holds separate files: `opt-outs.json`, append-only `consents.jsonl` (never trimmed), `budget.json`, `threads.json`, `once.json`, and `sms-notices.json` (the status-callback payload, with card numbers redacted). A legacy `state.json` is split once and renamed `state.json.migrated`. Without a Railway volume those files disappear on redeploy, and the counter is only safe on one replica.
 
 ## Stripe setup
 

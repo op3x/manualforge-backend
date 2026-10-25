@@ -109,6 +109,7 @@ function createApp({
   twilioClient,
   supportComplete,
   supportNow,
+  mailer,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
@@ -314,6 +315,7 @@ function createApp({
     twilioClient,
     complete: supportComplete,
     now: supportNow,
+    mailer,
   });
   const listen = app.listen.bind(app);
   app.listen = function listenWithRelay(...args) {
