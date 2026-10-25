@@ -194,7 +194,7 @@ test('a short device list keeps the controller maintenance baseline', async () =
   assert.ok(inspectEquipment(valve).present.length <= 2);
   const schedule = plain(buildPmSchedule(valve, {}));
   assert.match(schedule, /opens on command/i);
-  assert.match(schedule, /Test the emergency stop/);
+  assert.equal(/Test the emergency stop/.test(schedule), false);
   assert.match(schedule, /Back up the controller program/);
   assert.match(schedule, /cabinet fan, if one is fitted/);
   assert.match(schedule, /controller battery/);

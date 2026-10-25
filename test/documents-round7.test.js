@@ -70,6 +70,7 @@ test('scl shutdown classifies the home request as startup and omits it', async (
   assert.equal(/stop button is not pressed/i.test(shutdown), false);
   assert.equal(/return the lift to its home position/i.test(shutdown), false);
   assert.equal((shutdown.match(/Press the stop button to stop the cycle/g) || []).length, 1);
+  assert.match(shutdown, /Press the stop button to stop the cycle\./);
   assert.match(shutdown, /Stop the agitator/);
   assert.equal(/let a shutdown occur/i.test(shutdown), false);
 
@@ -77,6 +78,29 @@ test('scl shutdown classifies the home request as startup and omits it', async (
   const dropped = plain(buildShutdown(cell, {}));
   assert.equal(dropped.includes('press the home request'), false);
   assert.equal(/stop button is not pressed/i.test(dropped), false);
+
+  const cooker = await load(COOKER, 'cooker.L5X');
+  const cookerRoutine = cooker.routines.find((item) => (item.units || []).some((unit) => unit && unit.text)) || cooker.routines[0];
+  cookerRoutine.analysis = {
+    operatorSteps: [
+      { action: 'Confirm the emergency stop conditions are satisfied before starting Stop the sequence with the normal stop.' },
+      { action: 'Stop the sequence.' },
+    ],
+  };
+  const cookerShutdown = plain(buildShutdown(cooker, {}));
+  assert.equal(/conditions are satisfied before starting/i.test(cookerShutdown), false);
+  assert.match(cookerShutdown, /Stop the sequence\./);
+
+  const acd = await load(ACD, 'CuteLogix.ACD');
+  const acdRoutine = acd.routines.find((item) => (item.units || []).length) || acd.routines[0];
+  acdRoutine.analysis = {
+    operatorSteps: [
+      { action: 'Confirm run conditions are satisfied before starting Stop the program and leave the controller in program mode.' },
+    ],
+  };
+  const acdShutdown = plain(buildShutdown(acd, {}));
+  assert.equal(/conditions are satisfied before starting/i.test(acdShutdown), false);
+  assert.equal(/leave the controller in program mode/i.test(acdShutdown), false);
 });
 
 test('cooker guide alarm codes use the manual message for that code', async () => {
@@ -104,6 +128,9 @@ test('cooker guide alarm codes use the manual message for that code', async () =
   const joined = rows.map((cells) => cells.join(' ')).join('\n');
   assert.equal(/high high process alarm/i.test(joined), false);
   assert.equal(/low low process alarm/i.test(joined), false);
+  assert.equal(rows.some((cells) => /^ALM-(\d+)$/.test(cells[0]) && Number(cells[0].slice(4)) > 40), false);
+  assert.equal(/Configure Whether|FSC control for Fault Code|Drive Last Fault Code|LastFaultCode|Description of Drive Fault/i.test(joined), false);
+  assert.equal(/LastFaultCode|Description of Drive Fault/i.test([...byCode.values()].join('\n')), false);
 
   const swapped = emptyProject();
   addRoutine(swapped, {
@@ -130,6 +157,48 @@ test('cooker guide alarm codes use the manual message for that code', async () =
   assert.equal(swappedManual.get('ALM-4'), 'Equipment low-low');
   assert.equal(coded.filter((cells) => /level instrument alarm conditions/i.test(cells[1])).length, 0);
   assert.equal(coded.find((cells) => cells[1] === swappedManual.get('ALM-5'))[0], 'ALM-5');
+
+  const kept = emptyProject();
+  const messages = [
+    'Cooker 1 level high-high',
+    'Cooker 2 level high',
+    'Cooker 3 level low',
+    'Tank 4 level low-low',
+    'Cooker 5 temperature high',
+    'Cooker 6 temperature low',
+    'Low Low process alarm',
+  ];
+  addRoutine(kept, {
+    name: 'Main',
+    units: [],
+    analysis: {
+      alarms: messages.map((text) => ({ text, cause: 'Not determinable', remedy: 'Correct the condition, then press reset.' })),
+      groups: [],
+      housekeeping: [],
+    },
+  });
+  kept.alarms = [{ text: 'Cooker 1 level is high', cause: 'The level is above the alarm point.', remedy: 'Stop the inflow.' }];
+  const keptManual = alarmRows(kept);
+  assert.equal(keptManual[6][0], 'ALM-7');
+  const keptGuide = troubleCells(kept);
+  const alm7 = keptGuide.find((cells) => cells[0] === 'ALM-7');
+  assert.ok(alm7, keptGuide.map((cells) => cells[0]).join(' '));
+  assert.equal(alm7[1], keptManual[6][1]);
+  assert.equal(keptGuide.some((cells) => cells[0] === '—' && /cooker 1 level is high/i.test(cells[1])), false);
+
+  const many = emptyProject();
+  addRoutine(many, {
+    name: 'Main',
+    units: [],
+    analysis: {
+      alarms: Array.from({ length: 45 }, (_, index) => ({ text: `Alarm code ${String(index + 1).padStart(2, '0')} on the north vessel`, cause: 'The condition is still true.', remedy: 'Correct it.' })),
+      groups: [],
+      housekeeping: [],
+    },
+  });
+  const manyGuide = troubleCells(many).map((cells) => cells[0]);
+  assert.ok(manyGuide.includes('ALM-40'));
+  assert.equal(manyGuide.includes('ALM-41'), false);
 });
 
 test('a routine that declares no alarms does not invent an alarm code', async () => {
@@ -165,9 +234,13 @@ test('a CAD upload with no controller does not get controller maintenance', { sk
   const shutdown = plain(buildShutdown(step, {}));
   assert.match(shutdown, /uploaded files/);
   assert.equal(/uploaded program/.test(shutdown), false);
+  const startup = plain(buildStartup(step, {}));
+  assert.equal(/controller receives power/i.test(startup), false);
+  assert.equal(/fault indicator is clear/i.test(startup), false);
   const guide = plain(custom(step, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
   assert.equal(/does not go to run/i.test(guide), false);
   assert.equal(/\bcouplings?\b/i.test(guide), false);
+  assert.equal(/from the controller/i.test(guide), false);
   assert.match(guide, /stalls or loses steps/i);
 });
 
@@ -193,13 +266,19 @@ test('tia and acd troubleshooting lead with their logic', async () => {
   const valveRows = troubleCells(valve).map((cells) => cells[1]);
   assert.ok(valveRows.some((row) => /pneumatic valve actuator will not open/i.test(row)));
   assert.ok(valveRows.some((row) => /did not leave the closed position/i.test(row)));
-  const genericAt = valveRows.findIndex((row) => /does not go to run|stays on after a stop|does not run as commanded/i.test(row));
-  assert.ok(genericAt === -1 || genericAt === valveRows.length - 1);
+  assert.equal(valveRows.some((row) => /^The actuator will not open$/i.test(row)), false);
+  assert.equal(valveRows.some((row) => /valve does not reach the commanded position/i.test(row)), false);
+  assert.equal(/does not go to run|stays on after a stop|does not run as commanded/i.test(valveRows.join(' ')), false);
+  const valvePm = plain(buildPmSchedule(valve, {}));
+  assert.equal(/Test the emergency stop/.test(valvePm), false);
+  assert.match(valvePm, /Back up the controller program/);
 
   const acd = await load(ACD, 'CuteLogix.ACD');
   const acdText = troubleCells(acd).map((cells) => cells.join(' ')).join('\n');
+  const acdManual = alarmRows(acd).map((row) => `${row[0]} ${row[1]}`).join('\n');
   assert.match(acdText, /ALM-1/);
-  assert.match(acdText, /ALM-2/);
+  assert.match(acdText, /First Out Fault/);
+  assert.equal(/I count stuff/i.test(`${acdText}\n${acdManual}`), false);
   assert.match(acdText, /fault counter does not reach its preset/i);
   assert.match(acdText, /first out fault does not update/i);
   assert.equal(/No alarms are defined/i.test(acdText), false);
@@ -218,19 +297,34 @@ test('a one-chapter schedule has no contents page and quarterly rows are inferre
 
 test('extra-document headers use the long-header limit', () => {
   assert.equal(fitHeaderLeft('Acme · Cell · Shutdown Procedure'), 'Acme · Cell · Shutdown Procedure');
-  const fitted = fitHeaderLeft(`${'North Line Controls '.repeat(12)} · Cell · Shutdown Procedure`);
-  assert.match(fitted, /\u2026$/);
-  assert.ok(fitted.length <= 110);
+  const fitted = fitHeaderLeft(`${'North Line Controls '.repeat(12)} · Cell · Alarm and Troubleshooting Guide`);
+  assert.match(fitted, /Alarm and Troubleshooting Guide$/);
+  assert.match(fitted, /\u2026/);
+  assert.equal(/Gui…$/.test(fitted), false);
+  assert.ok(Array.from(fitted).length <= 110);
   const doc = buildShutdown(emptyProject(), { branding: { whiteLabel: true, companyName: 'Very Long Integrator Name '.repeat(8) } });
-  assert.match(doc.meta.headerLeft, /\u2026$/);
-  assert.ok(doc.meta.headerLeft.length <= 110);
+  assert.match(doc.meta.headerLeft, /Shutdown Procedure$/);
+  assert.match(doc.meta.headerLeft, /\u2026/);
+  assert.ok(Array.from(doc.meta.headerLeft).length <= 110);
 });
 
 test('the extras job marks the manual delivered and keeps branding with the selection', async () => {
   assert.equal(await markDeliveredManual({}, { plan: 'pro' }, 'sess'), null);
-  const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
-  assert.match(source, /respond\(access, files, credit, project, selection, branding\)/);
-  assert.match(source, /branding: branding \|\| resolveDocumentBranding\(access\)/);
-  assert.match(source, /selection,/);
-  assert.match(source, /await markDeliveredManual\(stripeClient, access, readSessionId\(req\)\)/);
+  const calls = [];
+  const locked = await markDeliveredManual({ id: 'stripe' }, { plan: 'pro' }, 'sess', () => ({
+    markFirstManualDelivered: async (...args) => {
+      calls.push(args);
+      return { delivered: true };
+    },
+  }));
+  assert.deepEqual(locked, { delivered: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1].plan, 'pro');
+  assert.equal(calls[0][2], 'sess');
+  const missingOther = new Error("Cannot find module 'other-package'");
+  missingOther.code = 'MODULE_NOT_FOUND';
+  await assert.rejects(() => markDeliveredManual({}, { plan: 'pro' }, 'sess', () => { throw missingOther; }));
+  const missingDelivery = new Error("Cannot find module './delivery'");
+  missingDelivery.code = 'MODULE_NOT_FOUND';
+  assert.equal(await markDeliveredManual({}, { plan: 'pro' }, 'sess', () => { throw missingDelivery; }), null);
 });

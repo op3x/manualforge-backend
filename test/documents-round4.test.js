@@ -99,7 +99,8 @@ test('controller maintenance and manual alarms fill a project with no field devi
 
   const guide = htmlOf(custom(acd, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
   assert.match(guide, /ALM-1/);
-  assert.match(guide, /ALM-2/);
+  assert.match(guide, /First Out Fault/);
+  assert.equal(/I count stuff/.test(guide), false);
   assert.match(guide, /fault counter does not reach its preset/i);
   assert.match(guide, /first out fault does not update/i);
   assert.equal(/does not go to run/i.test(guide), false);

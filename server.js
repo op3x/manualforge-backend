@@ -194,6 +194,18 @@ function createApp({
     }
   });
 
+  async function publishManual(access, sessionId) {
+    try {
+      return await markDeliveredManual(stripeClient, access, sessionId);
+    } catch (err) {
+      console.error('First manual delivery stamp failed', access && access.plan ? access.plan : 'unknown');
+      const wrapped = new Error('Manual generation failed. Please try again.');
+      wrapped.status = 500;
+      wrapped.expose = true;
+      throw wrapped;
+    }
+  }
+
   async function runPaid(req, res, { reserveAtStart, respond, documents }) {
     const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
     const files = collectFiles(req);
@@ -282,7 +294,7 @@ function createApp({
           if (result.combined) store.saveArtifact(job.id, 'combined', result.combined);
           if (result.zip) store.saveArtifact(job.id, 'zip', result.zip);
           const manualReady = (result.outputs || []).some((output) => output.kind === 'manual' && output.pdf && output.pdf.length);
-          if (manualReady) await markDeliveredManual(stripeClient, access, readSessionId(req));
+          if (manualReady) await publishManual(access, readSessionId(req));
           job.documents = result.documents;
           job.coverage = result.coverage
             ? { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent }
