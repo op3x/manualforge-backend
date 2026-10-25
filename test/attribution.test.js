@@ -340,6 +340,51 @@ test('latest touch is stored as attr_latest_* and copied onto Pro subscription m
   assert.equal(packed.value.subscription_data.metadata.attr_latest_utm_source, undefined);
 });
 
+test('utm_source, utm_medium, and utm_campaign are trimmed and lowercased before metadata is written', () => {
+  const gclid = 'Cj0KCQjw_AbC';
+  const msclkid = 'AbC123def';
+  const { value, lines } = captureLog(() => withAttribution(checkoutParams('pro', env), {
+    utm_source: '  Google  Ads  ',
+    utm_medium: ' CPC ',
+    utm_campaign: ' Q3-Launch ',
+    utm_term: ' PLC Manual ',
+    utm_content: 'AdVariant',
+    gclid,
+    msclkid,
+    latest: {
+      utm_source: 'FaceBook',
+      utm_medium: 'Email',
+      utm_campaign: 'Fall_Sale',
+      utm_term: 'Operator Manual',
+      utm_content: 'Hero',
+      gclid,
+      msclkid,
+    },
+  }));
+  assert.deepEqual(lines, ['attribution fields kept: 14']);
+  const expected = {
+    plan: 'pro',
+    attr_utm_source: 'google  ads',
+    attr_utm_medium: 'cpc',
+    attr_utm_campaign: 'q3-launch',
+    attr_utm_term: 'PLC Manual',
+    attr_utm_content: 'AdVariant',
+    attr_gclid: gclid,
+    attr_msclkid: msclkid,
+    attr_latest_utm_source: 'facebook',
+    attr_latest_utm_medium: 'email',
+    attr_latest_utm_campaign: 'fall_sale',
+    attr_latest_utm_term: 'Operator Manual',
+    attr_latest_utm_content: 'Hero',
+    attr_latest_gclid: gclid,
+    attr_latest_msclkid: msclkid,
+  };
+  assert.deepEqual(value.metadata, expected);
+  assert.deepEqual(value.subscription_data.metadata, expected);
+  assert.equal(value.metadata.attr_gclid, gclid);
+  assert.equal(value.metadata.attr_msclkid, msclkid);
+});
+
 test('subscription checkout copies attribution onto subscription_data.metadata', () => {
   const { value, lines } = captureLog(() => withAttribution(checkoutParams('pro', env), {
     utm_source: 'partner',
