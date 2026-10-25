@@ -126,7 +126,7 @@ async function withServer(app, fn) {
 
 async function waitJob(base, id) {
   for (let i = 0; i < 150; i += 1) {
-    const body = await (await fetch(`${base}/jobs/${id}`)).json();
+    const body = await (await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } })).json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
