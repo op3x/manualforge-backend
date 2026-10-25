@@ -569,6 +569,7 @@ test('health reports only the pending hand-back count', async () => {
       assert.equal(health.status, 200);
       assert.equal(body.creditHandbacksPending, 1);
       assert.equal(typeof body.creditHandbacksPending, 'number');
+      assert.equal(body.supportDataDirOk, true);
       const text = JSON.stringify(body);
       assert.equal(text.includes('pi_'), false);
       assert.equal(text.includes(TOKEN), false);

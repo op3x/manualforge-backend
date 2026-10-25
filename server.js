@@ -45,7 +45,7 @@ const {
   warnIfSmtpUnconfigured,
 } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
-const { createCreditLedger, redactCreditLog } = require('./lib/credit-ledger');
+const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
 const { JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -170,6 +170,7 @@ function createApp({
   const clock = typeof now === 'function' ? now : () => Date.now();
   const ledger = creditLedger || createCreditLedger({ env });
   jobTimeoutMs(env);
+  warnSupportDataDir(env);
   ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
   const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
   const uploadLimit = limits(env).uploadBytes;
@@ -199,12 +200,19 @@ function createApp({
     } catch {
       console.error('Credit hand-back count failed');
     }
+    let dataDirOk = false;
+    try {
+      dataDirOk = supportDataDirOk(env);
+    } catch {
+      console.error('Support data directory check failed');
+    }
     res.json({
       status: 'ok',
       service: 'manualos-backend',
       aiEnabled: Boolean(anthropicClient),
       unknownEvents,
       creditHandbacksPending,
+      supportDataDirOk: dataDirOk,
     });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -588,7 +596,12 @@ function createApp({
     }
   });
 
-  app.post('/generate-manual', upload.single('file'), (req, res, next) => {
+  app.post('/generate-manual', (req, res, next) => {
+    if (String(env.MANUALOS_LEGACY_GENERATE || '').trim() !== '1') {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    return next();
+  }, upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
       respond: async (access, files, credit, project) => {
