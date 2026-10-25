@@ -3,6 +3,11 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { createApp } = require('../server');
+const { removeTestJobDirectories } = require('../lib/jobs/store');
+
+test.after(() => {
+  removeTestJobDirectories();
+});
 
 const L5X = fs.readFileSync(path.join(__dirname, 'fixtures/line.L5X'));
 

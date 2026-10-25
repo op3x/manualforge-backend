@@ -1,6 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp, prepareListen } = require('../server');
+const { removeTestJobDirectories } = require('../lib/jobs/store');
+
+test.after(() => {
+  removeTestJobDirectories();
+});
 
 const L5X = `<?xml version="1.0" encoding="UTF-8"?>
 <RSLogix5000Content>

@@ -3,6 +3,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { createApp } = require('../server');
 const { renderPdf } = require('../lib/manual/pdf');
+const { redactCustomerLog } = require('../lib/redact-log');
 
 const ROOT = '/cursor/stores/bot/manualos-test-corpus/';
 const OUT = '/opt/cursor/artifacts';
@@ -88,7 +89,7 @@ async function runJob(base, files) {
   for (const file of files) form.append('files', new Blob([file.buffer]), file.name);
   const created = await fetch(`${base}/jobs`, { method: 'POST', body: form });
   if (created.status !== 202) {
-    throw new Error(`${files.map((file) => file.name).join('+')} -> ${created.status} ${await created.text()}`);
+    throw new Error(`upload failed with status ${created.status}: ${redactCustomerLog(await created.text())}`);
   }
   const job = await created.json();
   for (let i = 0; i < 120; i += 1) {
