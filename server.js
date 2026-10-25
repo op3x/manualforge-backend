@@ -24,6 +24,7 @@ const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
+const { closeBrowser } = require('./lib/manual/pdf');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
@@ -323,15 +324,41 @@ function prepareListen(env = process.env, exit = process.exit) {
   return true;
 }
 
+function installShutdown(server, {
+  closeBrowser: close = closeBrowser,
+  exit = process.exit,
+  on = (signal, listener) => process.on(signal, listener),
+} = {}) {
+  let shuttingDown = false;
+  const handler = () => new Promise((resolve) => {
+    if (shuttingDown) return resolve();
+    shuttingDown = true;
+    const finish = () => {
+      Promise.resolve()
+        .then(() => close())
+        .then(() => exit(0), () => exit(0))
+        .then(resolve, resolve);
+    };
+    if (server && typeof server.close === 'function') server.close(finish);
+    else finish();
+  });
+  on('SIGTERM', handler);
+  on('SIGINT', handler);
+  on('SIGHUP', handler);
+  return handler;
+}
+
 function start() {
   if (!prepareListen(process.env)) return null;
   const port = process.env.PORT || 3001;
   const app = createApp();
-  return app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`ManualOS backend running on port ${port}`);
   });
+  installShutdown(server);
+  return server;
 }
 
 if (require.main === module) start();
 
-module.exports = { createApp, prepareListen, start };
+module.exports = { createApp, prepareListen, start, installShutdown };

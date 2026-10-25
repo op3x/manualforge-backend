@@ -3,11 +3,16 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createJobStore, CLEANUP_INTERVAL_MS } = require('../lib/jobs/store');
+const { createJobStore, CLEANUP_INTERVAL_MS, ORPHAN_GRACE_MS, removeTestJobDirectories } = require('../lib/jobs/store');
 const { redactCustomerLog } = require('../lib/redact-log');
 const { emptyProject } = require('../lib/project');
 const { buildDocument } = require('../lib/manual/assemble');
-const { createApp } = require('../server');
+const { launchOptions, closeBrowser } = require('../lib/manual/pdf');
+const { createApp, installShutdown } = require('../server');
+
+test.after(() => {
+  removeTestJobDirectories();
+});
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TAG = 'ZephyrValveTag_42';
@@ -159,37 +164,52 @@ test('cleanup interval is ten minutes, unrefd, and deletes aged pdfs by mtime', 
   }
 });
 
-test('startup sweep deletes aged files and files no live job references', () => {
+test('startup sweep keeps recent orphan pdfs for one hour and still drops files older than 24 hours', () => {
+  assert.equal(ORPHAN_GRACE_MS, 60 * 60 * 1000);
   const clock = fakeClock(Date.UTC(2026, 3, 2));
   const dir = tempDir();
   const first = openStore(clock, dir);
   const job = first.create();
   first.savePdf(job.id, Buffer.from('%PDF-1.4 restart'));
-  const young = path.join(dir, `${job.id}.pdf`);
+  const recent = path.join(dir, `${job.id}.pdf`);
+  const pastGrace = path.join(dir, 'job_past_grace.pdf');
   const old = path.join(dir, 'job_leftover.pdf');
   const note = path.join(dir, 'customer-notes.txt');
+  const oldNote = path.join(dir, 'old-notes.txt');
+  fs.writeFileSync(pastGrace, 'past-grace');
   fs.writeFileSync(old, 'old');
   fs.writeFileSync(note, PHRASE);
+  fs.writeFileSync(oldNote, 'old-note');
+  touch(recent, clock.time - 30 * 60 * 1000);
+  touch(pastGrace, clock.time - ORPHAN_GRACE_MS - 5000);
   touch(old, clock.time - DAY_MS - 5000);
   touch(note, clock.time - 1000);
-  assert.equal(fs.existsSync(young), true);
+  touch(oldNote, clock.time - DAY_MS - 5000);
   first.close();
 
   const restarted = openStore(clock, dir);
   try {
-    assert.equal(fs.existsSync(young), false);
+    assert.equal(fs.existsSync(recent), true);
+    assert.equal(fs.existsSync(pastGrace), false);
     assert.equal(fs.existsSync(old), false);
-    assert.equal(fs.existsSync(note), false);
+    assert.equal(fs.existsSync(note), true);
+    assert.equal(fs.existsSync(oldNote), false);
 
     const live = restarted.create();
     restarted.savePdf(live.id, Buffer.from('%PDF-1.4 kept'));
     const livePdf = path.join(dir, `${live.id}.pdf`);
+    touch(livePdf, clock.time - ORPHAN_GRACE_MS - 5000);
     const orphan = path.join(dir, 'job_unreferenced.pdf');
     fs.writeFileSync(orphan, 'orphan');
-    touch(orphan, clock.time - 1000);
+    touch(orphan, clock.time - 30 * 60 * 1000);
     restarted.sweepStartup();
     assert.equal(fs.existsSync(livePdf), true);
+    assert.equal(fs.existsSync(orphan), true);
+
+    touch(orphan, clock.time - ORPHAN_GRACE_MS - 5000);
+    restarted.sweepStartup();
     assert.equal(fs.existsSync(orphan), false);
+    assert.equal(fs.existsSync(livePdf), true);
 
     touch(livePdf, clock.time - DAY_MS - 5000);
     restarted.sweepStartup();
@@ -227,6 +247,19 @@ test('logs record an identifier count and never the customer text or file name',
   assert.equal(redacted.includes(TAG), false);
   assert.match(redacted, /\[file\]/);
   assert.match(redacted, /Program block \[redacted\]/);
+  const unicodeName = 'Förderband_Geheim.L5X';
+  const unicodeLog = redactCustomerLog(`opened ${unicodeName} and Program block: Förderband_Geheim next`);
+  assert.equal(unicodeLog.includes('Fö'), false);
+  assert.equal(unicodeLog.includes('örder'), false);
+  assert.equal(unicodeLog.includes('Geheim'), false);
+  assert.match(unicodeLog, /opened \[file\]/);
+  assert.match(unicodeLog, /Program block \[redacted\]/);
+  assert.equal(redactCustomerLog('schema 32.00.xml shipped'), 'schema 32.00.xml shipped');
+  for (const name of ['cell.awl', 'tags.db', 'part.stl', 'prog.ap', 'prog.ap17', 'pack.zap', 'pack.zap16', 'draw.dwg', 'draw.dxf', 'body.sldprt', 'body.sldasm', 'body.slddrw', 'proj.acd', 'model.step', 'model.stp', 'model.iges', 'model.igs']) {
+    const line = redactCustomerLog(`got ${name} here`);
+    assert.equal(line, 'got [file] here', name);
+    assert.equal(line.includes(name), false);
+  }
 
   const project = emptyProject();
   project.identity.productName = 'Example line';
@@ -309,4 +342,113 @@ test('logs record an identifier count and never the customer text or file name',
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('savePdf recreates a missing directory and startup survives EACCES', () => {
+  const clock = fakeClock(Date.UTC(2026, 8, 1));
+  const dir = tempDir();
+  const store = openStore(clock, dir);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    store.savePdf('job_restored', Buffer.from('%PDF-1.4'));
+    assert.equal(fs.readFileSync(path.join(dir, 'job_restored.pdf')).toString(), '%PDF-1.4');
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-readonly-'));
+  const blocked = path.join(parent, 'jobs');
+  fs.chmodSync(parent, 0o500);
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.join(' '));
+  let blockedStore;
+  try {
+    blockedStore = createJobStore({
+      directory: blocked,
+      now: () => clock.now(),
+      setInterval: (fn, ms) => clock.setInterval(fn, ms),
+      clearInterval: (timer) => clock.clearInterval(timer),
+    });
+  } finally {
+    console.error = original;
+    if (blockedStore) blockedStore.close();
+    fs.chmodSync(parent, 0o700);
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+  const logged = logs.join('\n');
+  assert.match(logged, /EACCES/);
+  assert.equal(logged.includes(blocked), false);
+  assert.equal(logged.includes(parent), false);
+});
+
+test('cleanup failures log the error code and not the path', () => {
+  const clock = fakeClock(Date.UTC(2026, 9, 1));
+  const dir = tempDir();
+  const store = openStore(clock, dir);
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.join(' '));
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.writeFileSync(dir, 'not-a-directory');
+    clock.advance(CLEANUP_INTERVAL_MS);
+    const logged = logs.join('\n');
+    assert.match(logged, /Job PDF cleanup failed \(ENOTDIR\)/);
+    assert.equal(logged.includes(dir), false);
+  } finally {
+    console.error = original;
+    store.close();
+    fs.rmSync(dir, { force: true });
+  }
+});
+
+test('test job directories and their pdfs are removed on teardown', () => {
+  const clock = fakeClock(Date.UTC(2026, 10, 1));
+  const store = createJobStore({
+    env: { NODE_ENV: 'test' },
+    now: () => clock.now(),
+    setInterval: (fn, ms) => clock.setInterval(fn, ms),
+    clearInterval: (timer) => clock.clearInterval(timer),
+  });
+  store.savePdf('job_left', Buffer.from('%PDF-1.4'));
+  const dir = store.dir;
+  try {
+    assert.match(path.basename(dir), /^t-/);
+    assert.equal(fs.existsSync(path.join(dir, 'job_left.pdf')), true);
+  } finally {
+    store.close();
+  }
+  removeTestJobDirectories();
+  assert.equal(fs.existsSync(dir), false);
+});
+
+test('shutdown closes the browser without letting puppeteer handle process signals', async () => {
+  const options = launchOptions('/usr/bin/chromium');
+  assert.equal(options.handleSIGTERM, false);
+  assert.equal(options.handleSIGINT, false);
+  assert.equal(options.handleSIGHUP, false);
+  await closeBrowser();
+
+  const signals = [];
+  let serverClosed = false;
+  let browserClosed = 0;
+  let exited = null;
+  const handler = installShutdown({
+    close(callback) {
+      serverClosed = true;
+      callback();
+    },
+  }, {
+    closeBrowser: async () => { browserClosed += 1; },
+    exit: (code) => { exited = code; },
+    on: (signal, listener) => signals.push([signal, listener]),
+  });
+  assert.deepEqual(signals.map((item) => item[0]), ['SIGTERM', 'SIGINT', 'SIGHUP']);
+  await handler();
+  await handler();
+  assert.equal(serverClosed, true);
+  assert.equal(browserClosed, 1);
+  assert.equal(exited, 0);
 });
