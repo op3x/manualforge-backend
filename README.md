@@ -84,6 +84,12 @@ ACD conversion needs `python3` on PATH. Nixpacks installs it next to Node. The P
 
 One failed model chunk does not fail the job. The manual is still built from the parsed project, and coverage must account for every rung or statement.
 
+A job still running after `MANUALOS_JOB_TIMEOUT_MS` fails. The default is 15 minutes. Values outside 1 minute to 30 minutes are brought inside that range, and the process logs one warning that does not include the configured value. The job error is `This run took too long and was stopped. It did not use a credit. Please try again.` A reserved Starter credit is handed back once. A PDF that arrives after the stop is not saved. The model request and the PDF render are given an abort signal.
+
+If that hand-back throws, it is tried three times over about 30 seconds. If it still fails, the PaymentIntent id and the hold token are stored in `SUPPORT_DATA_DIR/credit-handbacks.json`, or only in memory when `SUPPORT_DATA_DIR` is unset. Startup and a pass every 5 minutes try the queue again. `GET /health` reports how many are waiting as `creditHandbacksPending` and does not include ids.
+
+Reserving a Starter credit writes `credit_hold` and `credit_hold_at` on the PaymentIntent in one update, and writes the same id, token, and time to `SUPPORT_DATA_DIR/open-holds.json` (memory when the directory is unset). A succeeded job clears that hold without lowering `manuals_used`, then removes the open-hold record. A failed job hands the credit back and removes the record. Jobs themselves are not saved. After a restart, startup and the same 5-minute pass hand back a hold this process does not have in memory when `credit_hold_at` is older than the job timeout plus one minute. A newer hold is left alone. The hand-back decrements `manuals_used` only while `credit_hold` is still that token, and it bumps `credit_generation` on that write, so a second pass cannot return another credit. Without `SUPPORT_DATA_DIR`, a restart cannot see the hold. The 15-minute cancellation-claim reclaim does not read credits.
+
 ### `POST /generate-manual`
 
 Kept for the current site. Same body as before (`file`, or JSON `plcContent`, plus `session_id`). Success is `application/pdf` with `Deprecation: true` and `Link: </jobs>; rel="successor-version"`. The Starter counter increments only after the PDF is sent. A missing model key returns **503** and does not spend a credit.
@@ -98,7 +104,7 @@ Each generate call re-reads the Checkout Session, PaymentIntent, and Subscriptio
 
 ### `GET /health`
 
-`{ "status": "ok", "service": "manualos-backend", "aiEnabled": boolean, "unknownEvents": number }`. `unknownEvents` is the number of lines in `DATA_DIR/unknown-events.jsonl`. It is `0` when `DATA_DIR` is unset or the file is missing.
+`{ "status": "ok", "service": "manualos-backend", "aiEnabled": boolean, "unknownEvents": number, "creditHandbacksPending": number }`. `unknownEvents` is the number of lines in `DATA_DIR/unknown-events.jsonl`. It is `0` when `DATA_DIR` is unset or the file is missing. `creditHandbacksPending` is how many failed Starter hand-backs are still waiting. It is a count only.
 
 Errors returned to browsers are short JSON messages. Stack traces stay in the server log.
 
@@ -115,6 +121,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_PRICE_STARTER` | Yes | Price id for the $39 one-time Starter price |
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
+| `MANUALOS_JOB_TIMEOUT_MS` | No | Wall-clock limit for one `POST /jobs` run. Default `900000` (15 minutes). Values below 1 minute or above 30 minutes are brought inside that range. The process logs one warning and does not print the value. |
 | `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. Renewal consent does not use this flag. |
 | `CHECKOUT_REQUIRE_CONSENT` | No | Set to `1` after the frontend sends Terms and auto-renew checkboxes. Until then a missing checkbox is allowed, and a present checkbox is still stored. |
 | `PORTAL_TOKEN_SECRET` | For cancel links | HMAC key for `/access-link` tokens. A token can be used more than once during the hour after it was created. If the secret is unset, `/access-link` and token redemption return 503. There is no fallback to `STRIPE_WEBHOOK_SECRET`. Never logged. |
@@ -141,7 +148,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `LLM_USD_PER_1M_INPUT` | No | Default `0.15`, the gpt-4o-mini input rate. Change this if `LLM_MODEL` changes. |
 | `LLM_USD_PER_1M_OUTPUT` | No | Default `0.60`, the gpt-4o-mini output rate. |
 | `PUBLIC_BASE_URL` | Recommended on Railway | Public origin only, for example `https://manualforge-backend-production.up.railway.app`. Signature checks and the `wss://` relay URL use it. |
-| `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, the budget counter, and cancellation-confirmation claims. Railway's disk is ephemeral; mount a volume. |
+| `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, the budget counter, cancellation-confirmation claims, open Starter holds, and failed Starter hand-backs. Railway's disk is ephemeral; mount a volume. Without it, a restart cannot hand back a credit left held by a crashed job. |
 | `DATA_DIR` | Recommended | Directory for `unknown-events.jsonl`. Mount the same volume. Each unknown money event appends its event id, type, object id, and timestamp so it can be replayed from the Stripe Dashboard. |
 | `SUPPORT_INTEGRATOR_ENABLED` | No | `true` mentions Integrator pricing. Default off, because that plan is not launched. |
 
@@ -176,7 +183,7 @@ Escalation texts are sent from `TWILIO_FROM_NUMBER` to `ESCALATION_PHONE`. Toll-
 
 The spoken script, the email, and the saved status record never include a customer card number. If `ESCALATION_EMAIL` or `SMTP_HOST` / `SMTP_FROM` is unset, the email is skipped and a warning is logged. One customer call, or one SMS thread, produces at most one fallback call and one fallback email no matter how many alerts that interaction creates. While a live transfer to `ESCALATION_PHONE` is in progress, the fallback is email only so that phone is not rung twice. Until toll-free verification passes, every escalation text fails and uses this call-plus-email fallback. `PUBLIC_BASE_URL` has to be set or the status callback is omitted and only the API error can fall back. A local number avoids the toll-free messaging block. A text Twilio accepts without a message id is treated as unconfirmed and uses the same fallback.
 
-`SUPPORT_DATA_DIR` holds separate files: `opt-outs.json`, append-only `consents.jsonl` (never trimmed), `budget.json`, `threads.json`, `once.json`, `sms-notices.json` (the status-callback payload, with card numbers redacted), and `cancel-confirmations/` (one file per cancellation confirmation, created before the email is sent). A legacy `state.json` is split once and renamed `state.json.migrated`. Without a Railway volume those files disappear on redeploy, the counter is only safe on one replica, and a restart can send the cancellation confirmation again.
+`SUPPORT_DATA_DIR` holds separate files: `opt-outs.json`, append-only `consents.jsonl` (never trimmed), `budget.json`, `threads.json`, `once.json`, `sms-notices.json` (the status-callback payload, with card numbers redacted), `cancel-confirmations/` (one file per cancellation confirmation, created before the email is sent), `open-holds.json` (Starter credits reserved by a job and not yet succeeded or handed back), and `credit-handbacks.json` (hand-backs that failed and are waiting to be tried again). The hold files store a PaymentIntent id and a hold token, and the open-hold file also stores the time. They do not store an email. A legacy `state.json` is split once and renamed `state.json.migrated`. Without a Railway volume those files disappear on redeploy, the counter is only safe on one replica, and a restart can send the cancellation confirmation again.
 
 ## Stripe setup
 

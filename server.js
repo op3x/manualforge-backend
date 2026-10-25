@@ -16,8 +16,8 @@ const {
   checkoutParams,
   isStripeNotFound,
   publicAccess,
+  commitStarterCredit,
   recordStarterManual,
-  refundStarterCredit,
   reserveStarterCredit,
   verifyCheckoutSession,
 } = require('./lib/billing');
@@ -45,6 +45,8 @@ const {
   warnIfSmtpUnconfigured,
 } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
+const { createCreditLedger, redactCreditLog } = require('./lib/credit-ledger');
+const { JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -159,10 +161,16 @@ function createApp({
   mailer,
   now,
   onStripeEvent,
+  creditLedger,
+  scheduleTimeout = setTimeout,
+  cancelTimeout = clearTimeout,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const clock = typeof now === 'function' ? now : () => Date.now();
+  const ledger = creditLedger || createCreditLedger({ env });
+  jobTimeoutMs(env);
+  ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
   const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
@@ -185,11 +193,18 @@ function createApp({
     } catch {
       console.error('Unknown event count failed');
     }
+    let creditHandbacksPending = 0;
+    try {
+      creditHandbacksPending = ledger.pending();
+    } catch {
+      console.error('Credit hand-back count failed');
+    }
     res.json({
       status: 'ok',
       service: 'manualos-backend',
       aiEnabled: Boolean(anthropicClient),
       unknownEvents,
+      creditHandbacksPending,
     });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -402,7 +417,10 @@ function createApp({
     }
     let credit = null;
     if (reserveAtStart && access.plan === 'starter') {
-      credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env);
+      credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env, {
+        holds: ledger,
+        now: clock,
+      });
     }
     try {
       const result = await respond(access, files, credit, project);
@@ -410,9 +428,9 @@ function createApp({
     } catch (err) {
       if (credit) {
         try {
-          await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+          await ledger.handBack(stripeClient, credit.paymentIntentId, credit.token);
         } catch (refundErr) {
-          console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
+          console.error('Starter credit hand-back failed', redactCreditLog(refundErr && refundErr.message ? refundErr.message : refundErr));
         }
       }
       throw err;
@@ -426,52 +444,113 @@ function createApp({
         const sessionId = readSessionId(req);
         const runKey = await beginGeneration(access, sessionId);
         const refresh = watchGeneration(access, sessionId);
+        let job = null;
+        let stamp = null;
+        let stopped = false;
+        let timer = null;
+        let returned = false;
+        function stopRefresh() {
+          clearInterval(refresh);
+        }
+        async function returnCredit() {
+          if (!credit || returned) return;
+          returned = true;
+          try {
+            await ledger.handBack(stripeClient, credit.paymentIntentId, credit.token);
+          } catch (refundErr) {
+            console.error('Starter credit hand-back failed', redactCreditLog(refundErr && refundErr.message ? refundErr.message : refundErr));
+          }
+        }
+        async function failJob(err, timeout) {
+          stopRefresh();
+          if (stamp && stamp.created) {
+            await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
+          }
+          await clearGenerationStarted(stripeClient, access, sessionId);
+          await returnCredit();
+          if (!job) return;
+          const message = timeout
+            ? JOB_TIMEOUT_MESSAGE
+            : (err && err.expose ? err.message : 'Manual generation failed. Please try again.');
+          job.status = 'failed';
+          job.error = message;
+          job.progress = { stage: 'failed', percent: (job.progress && job.progress.percent) || 0, message };
+          if (!timeout) {
+            console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
+          }
+        }
         try {
-          const job = store.create({ sessionId });
+          job = store.create({ sessionId });
           res.status(202).json(publicJob(job));
           job.status = 'running';
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
-          let stamp = null;
+          const abort = new AbortController();
+          const timeoutMs = jobTimeoutMs(env);
+          timer = scheduleTimeout(() => {
+            if (stopped) return;
+            stopped = true;
+            stopRefresh();
+            abort.abort();
+            failJob(null, true).catch((err) => {
+              console.error('Starter credit hand-back failed', redactCreditLog(err && err.message ? err.message : err));
+            });
+          }, timeoutMs);
+          if (timer && typeof timer.unref === 'function') timer.unref();
+          let result;
           try {
-            const result = await generateManual({
+            result = await generateManual({
               files,
               project,
               fields: fieldsFrom(req),
               anthropic: anthropicClient,
               env,
               renderPdf,
+              signal: abort.signal,
               onProgress(stage, percent, message) {
+                if (stopped || !job) return;
                 job.status = 'running';
                 job.progress = { stage, percent, message };
               },
             });
+          } catch (err) {
+            if (stopped) return null;
+            stopped = true;
+            if (timer) cancelTimeout(timer);
+            await failJob(err, false);
+            return null;
+          }
+          if (stopped) return null;
+          stopped = true;
+          if (timer) cancelTimeout(timer);
+          stopRefresh();
+          try {
             const block = await accessBlock(stripeClient, sessionId, env);
             if (block) throw blockedError(block);
             store.savePdf(job.id, result.pdf);
             if (result.pdf && result.pdf.length) stamp = await publishManual(access, sessionId);
+            if (credit) {
+              const committed = await commitStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+              if (!committed) {
+                const err = new Error('Manual generation failed. Please try again.');
+                err.expose = true;
+                throw err;
+              }
+              try {
+                ledger.drop({ paymentIntentId: credit.paymentIntentId, token: credit.token });
+              } catch {
+                console.error('Open credit hold was not cleared');
+              }
+            }
             job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
             job.warnings = result.warnings || [];
             job.status = 'succeeded';
             job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
           } catch (err) {
-            if (stamp && stamp.created) {
-              await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
-            }
-            await clearGenerationStarted(stripeClient, access, sessionId);
-            if (credit) {
-              try {
-                await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
-              } catch (refundErr) {
-                console.error('Starter credit refund failed', redactSecrets(refundErr && refundErr.message ? refundErr.message : refundErr));
-              }
-            }
-            console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
-            job.status = 'failed';
-            job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
-            job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
+            await failJob(err, false);
           }
         } finally {
-          clearInterval(refresh);
+          if (timer) cancelTimeout(timer);
+          stopRefresh();
           releaseGenerationRun(runKey);
         }
         return null;
