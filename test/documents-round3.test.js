@@ -103,13 +103,18 @@ test('shutdown does not repeat a startup sentence or the control-logic line', as
     },
   });
   const shutdown = plain(buildShutdown(project, {}));
-  assert.equal((shutdown.match(/From the control logic/g) || []).length, 1);
+  assert.equal((shutdown.match(/From the control logic/g) || []).length, 0);
   assert.equal((shutdown.match(/Press the stop button to stop the cycle/g) || []).length, 1);
   assert.equal(/equipment starts/i.test(shutdown), false);
 
   const acd = await load(ACD, 'CuteLogix.ACD');
   const schedule = plain(buildPmSchedule(acd, {}));
-  assert.match(schedule, /did not identify maintainable devices/i);
+  assert.match(schedule, /did not identify a motor, valve, sensor, or other maintainable device/i);
+  assert.match(schedule, /Test the emergency stop/i);
+  assert.match(schedule, /Back up the controller program/i);
+  assert.match(schedule, /cabinet fan, if one is fitted/i);
+  assert.match(schedule, /controller battery/i);
+  assert.equal(/did not identify maintainable devices/i.test(schedule), false);
   assert.equal(/qualified electrician/i.test(schedule), false);
   assert.equal(/cabinet connections/i.test(schedule), false);
   acd.routines[0].analysis = {
@@ -121,7 +126,7 @@ test('shutdown does not repeat a startup sentence or the control-logic line', as
     ],
   };
   const acdShutdown = plain(buildShutdown(acd, {}));
-  assert.equal((acdShutdown.match(/From the control logic/g) || []).length, 1);
+  assert.equal((acdShutdown.match(/From the control logic/g) || []).length, 0);
   assert.equal(/starts when power returns/i.test(acdShutdown), false);
   assert.equal(/starts when the start command/i.test(acdShutdown), false);
 });
@@ -177,11 +182,13 @@ test('cooker startup drains condensate before steam and does not invent homing',
   assert.equal(titles.some((title) => /Homing/i.test(title)), false);
   assert.equal(/Motion matches the devices found in the upload/.test(html), false);
   const text = plain(buildStartup(cooker, {}));
-  const drainAt = text.search(/Drain condensate from the steam line and warm the equipment slowly/);
-  const steamAt = text.search(/Open the steam supply only after that warm-up/);
-  assert.ok(drainAt > 0 && steamAt > drainAt);
-  assert.match(text, /does not state a warm-up time or a temperature/);
+  assert.match(text, /Crack the steam valve to warm the line, then open fully/);
+  assert.match(text, /The line is warm and the valve is open/);
+  assert.match(text, /does not state a pressure or a temperature/);
+  assert.equal(/Drain condensate from the steam line/.test(text), false);
+  assert.equal(/Open the steam supply only after that warm-up/.test(text), false);
   assert.equal(/Homing/.test(text), false);
+  assert.equal(/homing/i.test(text), false);
 
   const cell = await load(CELL, 'cell.scl');
   const cellText = plain(buildStartup(cell, {}));
@@ -232,13 +239,13 @@ test('spare parts list wear parts, US spelling, and specified fasteners', async 
   const parts = htmlOf(custom(project, 'parts', 'Spare Parts List'));
   assert.match(parts, /Aluminum pin/);
   assert.equal(/Aluminium/.test(parts), false);
-  assert.match(parts, /M2\.5x25-Screw<\/td><td>M2\.5x25<\/td>/);
-  assert.equal(/Cooker Agitator/.test(parts), false);
+  assert.match(parts, /M2\.5x25-Screw<\/td><td>Assembly<\/td><td>M2\.5x25<\/td>/);
+  assert.match(parts, /Cooker Agitator: shaft seal/);
   assert.equal(/Emergency stop circuit/.test(parts), false);
   assert.equal(/Suction Drain/.test(parts), false);
-  assert.match(parts, /Shaft seal/);
-  assert.match(parts, /Steam trap/);
-  assert.match(parts, /Pump seal/);
+  assert.match(parts, /shaft seal/i);
+  assert.match(parts, /Steam trap, if fitted/);
+  assert.match(parts, /Relief valve, if fitted/);
 });
 
 test('a rotor is not treated as the motor', { skip: fs.existsSync(STEP) ? false : 'private CAD corpus is not in this checkout' }, async () => {
@@ -275,7 +282,10 @@ test('troubleshooting and spare parts are still delivered when alarm text or par
     assert.match(guideHtml, /What you see/);
     assert.match(partsHtml, /Parts in this upload/);
     assert.match(partsHtml, /Add part numbers/);
-    if (name !== 'tia') assert.match(guideHtml, /did not include alarm text/i);
+    if (name === 'acd') {
+      assert.match(guideHtml, /ALM-[12]/);
+      assert.equal(/did not include alarm text/i.test(guideHtml), false);
+    } else if (name !== 'tia') assert.match(guideHtml, /did not include alarm text/i);
   }
 
   const empty = emptyProject();
@@ -286,5 +296,7 @@ test('troubleshooting and spare parts are still delivered when alarm text or par
   assert.match(plain(guide), /did not include alarm text/i);
   assert.match(plain(guide), /does not run as commanded/i);
   assert.match(plain(parts), /Add part numbers/);
-  assert.match(plain(parts), /did not name a wear part/i);
+  assert.match(plain(parts), /Controller: battery, if fitted/);
+  assert.equal(/steam traps/i.test(plain(parts)), false);
+  assert.equal(/did not name a wear part/i.test(plain(parts)), false);
 });

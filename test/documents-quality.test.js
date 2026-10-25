@@ -92,8 +92,12 @@ test('cooker maintenance, alarms, and parts stay specific', async () => {
 
   const points = controlPoints(project);
   assert.equal(points.stops.length <= 1, true);
-  assert.equal(points.resets.length <= 1, true);
-  assert.equal(points.starts.length <= 1, true);
+  assert.ok(points.resets.includes('Cooker 1 Sequence master reset'));
+  assert.ok(points.resets.includes('Cooker2 Sequence master reset'));
+  assert.equal(points.resets.some((label) => /\b(counts?|counters?|totalizers?|alarms?)\b/i.test(label)), false);
+  assert.ok(points.starts.includes('Cooker #1 Steaming Start PB'));
+  assert.ok(points.starts.includes('Cooker #2 Steaming Start PB'));
+  assert.equal(points.starts.some((label) => /^start pushbutton$/i.test(label)), false);
   assert.equal(points.estops.some((label) => label === 'EStop'), false);
   assert.equal(points.resets.some((label) => /alarm/i.test(label)), false);
 
@@ -150,7 +154,10 @@ test('a valve actuator is pneumatic, and empty logic is skipped', async () => {
   }, {});
   assert.equal(skipped.skipped, undefined);
   assert.notEqual(skipped.skipped, TROUBLE_SKIP);
-  assert.match(htmlOf(skipped), /did not include alarm text/i);
+  const acdGuide = htmlOf(skipped);
+  assert.match(acdGuide, /ALM-[12]/);
+  assert.equal(/did not include alarm text/i.test(acdGuide), false);
+  assert.equal(/Not determinable/i.test(acdGuide), false);
 });
 
 test('STEP parts merge instance suffixes and requested names split on commas', { skip: fs.existsSync(STEP) ? false : 'private CAD corpus is not in this checkout' }, async () => {
@@ -167,7 +174,7 @@ test('STEP parts merge instance suffixes and requested names split on commas', {
   assert.equal(/rear001/i.test(parts), false);
   assert.equal(/solid body/i.test(parts), false);
   assert.match(parts, /Screw/);
-  const screw = parts.match(/Screw<\/td><td>[^<]*<\/td><td>(\d+)/);
+  const screw = parts.match(/Screw<\/td><td>[^<]*<\/td><td>[^<]*<\/td><td>(\d+)/);
   assert.ok(screw && Number(screw[1]) > 1, parts);
   const trouble = buildCustomDocument(project, {
     id: 'custom_2',
@@ -347,9 +354,9 @@ test('parts drop utilities and skip an empty list', async () => {
     customKind: 'parts',
   }, {}));
   assert.equal(/DISCHARGE DROP TUB/.test(parts), false);
-  assert.equal(/Drop Tub Discharge pump/.test(parts), false);
-  assert.match(parts, /Pump seal/);
-  assert.match(parts, /Steam trap/);
+  assert.match(parts, /Drop Tub Discharge pump: mechanical seal/);
+  assert.match(parts, /Steam trap, if fitted/);
+  assert.match(parts, /Used on/);
   assert.equal(/<h2[^>]*>[^<]*Spare Parts List/.test(parts), false);
   assert.match(parts, /Parts in this upload/);
 
@@ -362,8 +369,8 @@ test('parts drop utilities and skip an empty list', async () => {
     kind: 'parts',
     customKind: 'parts',
   }, {}));
-  assert.equal((merged.match(/Mash Water pump/g) || []).length, 0);
-  assert.match(merged, /Pump seal<\/td><td>Read the nameplate<\/td><td>1/);
+  assert.match(merged, /Mash Water pump: mechanical seal<\/td><td>Mash Water pump<\/td><td>Read the nameplate<\/td><td>1/);
+  assert.equal((merged.match(/mechanical seal/g) || []).length, 1);
 
   const bare = emptyProject();
   upsertTag(bare, { name: 'CloseGate', description: 'Close the gate' });
@@ -380,7 +387,7 @@ test('parts drop utilities and skip an empty list', async () => {
   assert.notEqual(skipped.skipped, PARTS_SKIP);
   const skippedHtml = htmlOf(skipped);
   assert.match(skippedHtml, /Add part numbers/);
-  assert.match(skippedHtml, /Seal/);
+  assert.match(skippedHtml, /seal/i);
   assert.equal(/Close the gate/.test(skippedHtml), false);
   assert.equal(/Sequence Control/.test(skippedHtml), false);
   assert.equal(/lubrication point/.test(skippedHtml), false);
