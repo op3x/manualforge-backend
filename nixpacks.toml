@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["nodejs_24", "python3", "chromium", "liberation_ttf"]
+nixPkgs = ["nodejs_24", "python3", "chromium", "liberation_ttf", "noto-fonts", "noto-fonts-cjk-sans", "noto-fonts-color-emoji"]
 
 [start]
 cmd = "node server.js"

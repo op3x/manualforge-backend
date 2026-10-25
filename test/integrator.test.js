@@ -20,7 +20,8 @@ const { buildDocument } = require('../lib/manual/assemble');
 const { renderHtml } = require('../lib/manual/html');
 const { createApp } = require('../server');
 const { closeBrowser, findChrome, launchOptions, renderPdf } = require('../lib/manual/pdf');
-const { fitHeaderLeft } = require('../lib/documents/stamp');
+const { fitHeaderLeft, setHeaderFontMode } = require('../lib/documents/stamp');
+const { cssString, graphemeClusters } = require('../lib/text');
 
 const SECRET = 'sk_test_SUPER_SECRET_KEY';
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
@@ -680,8 +681,36 @@ test('logos are PNG or SVG, size-capped, and program files are not stored', () =
   assert.equal(normalizeCompanyName('👨‍👩‍👧‍👦'.repeat(80)), '👨‍👩‍👧‍👦'.repeat(80));
   assert.throws(() => normalizeCompanyName('😀'.repeat(81)), (err) => err.status === 400 && err.message === 'Company name is too long.');
   assert.throws(() => normalizeCompanyName('👨‍👩‍👧‍👦'.repeat(81)), (err) => err.status === 400 && err.message === 'Company name is too long.');
+
+  const names = [
+    `A${'😀'.repeat(40)}`,
+    '😀'.repeat(80),
+    '👨‍👩‍👧‍👦'.repeat(80),
+    '👨‍👩‍👧‍👦'.repeat(81),
+    '🇺🇸'.repeat(80),
+    '🇺🇸'.repeat(81),
+    '👍🏻'.repeat(80),
+    'e\u0301\u0327'.repeat(80),
+    'e\u0301\u0327'.repeat(81),
+  ];
+  for (const name of names) {
+    const expected = graphemeClusters(name.trim()).slice(0, 80).join('');
+    const stored = accounts.writeBranding('cus_test123', { companyName: name });
+    assert.equal(stored.companyName, expected, `stored ${name.slice(0, 12)}`);
+    assert.equal(accounts.readBranding('cus_test123').companyName, expected);
+    assert.equal(graphemeClusters(stored.companyName).length <= 80, true);
+    assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(stored.companyName), false);
+  }
   assert.throws(() => accounts.writeBranding('../cus_test123', {}), (err) => err.status === 400);
   assert.equal(fs.existsSync(path.join(dir, '..', 'cus_test123', 'branding.json')), false);
+});
+
+test('css strings are not cut on a UTF-16 boundary', () => {
+  const family = '👨‍👩‍👧‍👦'.repeat(40);
+  assert.ok(family.length > 180);
+  assert.equal(cssString(family), family);
+  assert.equal(cssString('A'.repeat(200)), 'A'.repeat(200));
+  assert.equal(cssString('quote " slash \\ line\nbreak'), 'quote \\" slash \\\\ line break');
 });
 
 test('white-label manuals replace the product name on the cover, header, and footer', async () => {
@@ -1069,6 +1098,76 @@ test('a long running header stays clear of Rev. A', async () => {
       for (const end of layout.ends) assert.ok(end <= 561, `${name} header ends at ${end}pt, past the right margin`);
     }
   } finally {
+    project.identity.productName = savedName;
+    project.identity.productNameFromUser = savedFlag;
+    await browser.close();
+  }
+});
+
+test('a Liberation-only running header stays inside the right margin', async () => {
+  const puppeteer = require('puppeteer-core');
+  const executablePath = findChrome();
+  assert.ok(executablePath, 'Chrome is required to measure the header');
+  const confDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-liberation-fonts-'));
+  const cacheDir = path.join(confDir, 'cache');
+  fs.mkdirSync(cacheDir);
+  fs.writeFileSync(path.join(confDir, 'fonts.conf'), `<?xml version="1.0"?>
+<fontconfig>
+  <dir>/usr/share/fonts/truetype/liberation</dir>
+  <cachedir>${cacheDir}</cachedir>
+  <alias><family>sans-serif</family><prefer><family>Liberation Sans</family></prefer></alias>
+  <alias><family>Helvetica</family><prefer><family>Liberation Sans</family></prefer></alias>
+  <alias><family>Arial</family><prefer><family>Liberation Sans</family></prefer></alias>
+  <alias><family>Helvetica Neue</family><prefer><family>Liberation Sans</family></prefer></alias>
+</fontconfig>
+`);
+  const project = await parseUploads([{ originalname: 'line.L5X', buffer: fs.readFileSync(path.join(__dirname, 'fixtures/line.L5X')) }]);
+  for (const routine of project.routines) analyzeRoutine(routine, project, null);
+  const savedName = project.identity.productName;
+  const savedFlag = project.identity.productNameFromUser;
+  project.identity.productNameFromUser = true;
+  project.identity.productName = 'Line';
+  const pages = {
+    flags: documentBranding({ companyName: '🇺🇸'.repeat(80) }),
+    skin: documentBranding({ companyName: '👍🏻'.repeat(80) }),
+    family: documentBranding({ companyName: '👨‍👩‍👧‍👦'.repeat(80) }),
+    devanagari: documentBranding({ companyName: 'क्ष'.repeat(40) + 'कि'.repeat(40) }),
+  };
+  setHeaderFontMode('liberation');
+  const browser = await puppeteer.launch({
+    ...launchOptions(executablePath),
+    env: { ...process.env, FONTCONFIG_FILE: path.join(confDir, 'fonts.conf') },
+  });
+  try {
+    const page = await browser.newPage();
+    for (const [name, branding] of Object.entries(pages)) {
+      const doc = buildDocument(project, { branding });
+      const header = doc.meta.headerLeft;
+      assert.equal(header.endsWith('…'), true, `${name} header was not shortened`);
+      assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(header), false, `${name} split a surrogate`);
+      const clusters = graphemeClusters(header);
+      assert.equal(clusters.at(-1), '…');
+      assert.ok(clusters.slice(0, -1).every((cluster) => cluster !== '\u200d'), `${name} left a bare ZWJ`);
+      await page.setContent(renderHtml(doc), { waitUntil: 'load' });
+      const pdf = Buffer.from(await page.pdf({
+        format: 'Letter',
+        printBackground: true,
+        preferCSSPageSize: true,
+        displayHeaderFooter: false,
+        margin: { top: '0', right: '0', bottom: '0', left: '0' },
+      }));
+      const fonts = [...pdf.toString('latin1').matchAll(/\/BaseFont\s*\/([^\s[\]<>/]+)/g)].map((match) => match[1]);
+      assert.ok(fonts.some((font) => font.includes('LiberationSans')), `${name} did not embed Liberation Sans (${fonts.join(', ')})`);
+      for (const font of fonts) {
+        assert.equal(/Noto|Droid|DejaVu|WenQuanYi/i.test(font), false, `${name} embedded ${font}`);
+      }
+      const layout = headerLayout(pdfHeaderRuns(pdf));
+      assert.ok(layout.gaps.length > 0, `${name} produced no running header`);
+      for (const gap of layout.gaps) assert.ok(gap >= 8, `${name} header runs into Rev. A (gap ${gap}pt)`);
+      for (const end of layout.ends) assert.ok(end <= 561, `${name} header ends at ${end}pt, past the right margin`);
+    }
+  } finally {
+    setHeaderFontMode('system');
     project.identity.productName = savedName;
     project.identity.productNameFromUser = savedFlag;
     await browser.close();

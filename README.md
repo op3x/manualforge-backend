@@ -193,7 +193,7 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 4. Create a separate Product named **ManualOS Integrator extra manual** with one one-time Price of **$9.00 USD**. Copy that price id into `MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE`. This is its own product so the Checkout line item is not labeled with the subscription name. The server does not add this price to an invoice by itself. The customer starts Checkout after the included manuals are used.
 5. Add a webhook endpoint:
    `https://manualforge-backend-production.up.railway.app/webhook`
-   Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and `radar.early_fraud_warning.created`.
+   Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
 6. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, read and update Subscriptions, and Customers read. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. This repository does not create the products, prices, webhook endpoint, or API key.
 
