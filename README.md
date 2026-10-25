@@ -6,8 +6,10 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 
 ## Pricing
 
-- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced.
-- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`, and while it is `past_due` for up to 7 days after the failed invoice's `period_start`. `unpaid`, `canceled`, and `incomplete_expired` stay blocked.
+- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit per job when the job starts and refunds that job's credit if generation fails. Two jobs in flight hold two credits. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced.
+- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`, and while it is `past_due` for up to 7 days after the failed invoice's `period_start`. `unpaid`, `canceled`, and `incomplete_expired` stay blocked. A Pro subscription that is `past_due` or `canceled` can still open the Billing Portal.
+
+Plan detection lives in `lib/plans.js`. A later plan such as Integrator is one entry in that map (`kind`, `portal`, `returnLink`, and, when it is sold from `POST /create-checkout-session`, `mode` and `priceEnv`) plus an `INTEGRATION_IDS` key. Request handlers should not grow another `starter` / `pro` string compare.
 
 ## API
 
@@ -24,19 +26,19 @@ Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mo
 
 ### `GET /verify-session?session_id=cs_...`
 
-Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | null, "remaining": number | null }`.
+Response JSON: `{ "valid": boolean, "access": boolean, "plan": "starter" | "pro" | null, "remaining": number | null, "portal": boolean }`. `access` is the same boolean as `valid`. `portal` is true when this session can open the Billing Portal.
 
 Starter is valid when the Checkout Session `payment_status` is `paid`. `remaining` is `STARTER_CREDITS` minus `manuals_used`. Pro is valid when the session's subscription status is `active` or `trialing`, and `remaining` is `null` (unlimited). A paid Starter session with zero manuals left is still `valid: true` with `remaining: 0`; generation then returns 402.
 
-`past_due` is also valid until 7 days after the failed invoice's `period_start` (Unix seconds on `latest_invoice`). The response then includes `payment_issue: true`, which the upload page uses for an "Update your card" banner. When `period_start` is missing, the invoice line's `period.start` is used, then `current_period_start`. If none of those is present, access is blocked. At exactly 7 days, access is blocked. `payment_issue: true` is still added whenever the status is `past_due`, including after the grace window. Other statuses omit `payment_issue`.
+`past_due` is also valid until 7 days after the failed invoice's `period_start` (Unix seconds on `latest_invoice`). The response then includes `payment_issue: true` and `reason: "payment_failed"`. When `period_start` is missing, the invoice line's `period.start` is used, then `current_period_start`. If none of those is present, access is blocked. At exactly 7 days, access is blocked. `payment_issue: true` and `reason: "payment_failed"` stay on every `past_due` subscription, including after the grace window, and `portal` stays true so the page can offer "Fix your payment" instead of "Choose a plan". A `canceled` subscription is `valid: false`, `access: false`, `reason: "canceled"`, `portal: true`. `unpaid`, `incomplete`, and `incomplete_expired` omit `reason` and set `portal: false`. Other statuses omit `payment_issue`. Generation of a manual is still 402 whenever `valid` is false.
 
 ### `POST /access-link`
 
 Request JSON: `{ "email": "buyer@example.com" }`.
 
-Response is always `202` `{ "ok": true }` when the address is valid and the rate limit allows it, whether or not that email has a Checkout Session. Invalid or oversized addresses (more than 254 characters) get `400` `{ "error": "A valid email is required." }`. More than 3 requests for one email per hour, or more than 10 requests from one IP per hour, get `429` `{ "error": "Too many requests. Try again later." }`. The limit uses `req.ip` with `trust proxy` set to 1, so the client address is the one added by the single proxy in front of the app.
+Response is always `202` `{ "ok": true }` when the address is valid and the rate limit allows it, whether or not that email has a Checkout Session. The `202` is sent before the Stripe lookup and the email, so the timing does not reveal whether the address has bought. Invalid or oversized addresses (more than 254 characters) get `400` `{ "error": "A valid email is required." }`. More than 3 requests for one email per hour, or more than 10 requests from one IP per hour, get `429` `{ "error": "Too many requests. Try again later." }`. The limit uses `req.ip`. `X-Forwarded-For` is trusted only for `TRUST_PROXY_HOPS` hops (see Environment). On Railway that default is 1, so the client address is the one added by the proxy. Anywhere else the default is 0 and a forwarded header is ignored.
 
-The lookup is Checkout Sessions with `status: "complete"`, `customer_details.email` set to the normalized address, `created` within the last 12 months, and `limit: 10`. Sessions that are `paid` and still active (Starter with a PaymentIntent, or Pro `active`, `trialing`, or `past_due` inside the grace window) are emailed as upload links. The response does not say how many were sent.
+The lookup is Checkout Sessions with `status: "complete"`, `customer_details.email` set to the normalized address, `created` within the last 12 months, and `limit: 10`. Paid sessions that can still generate, and paid Pro sessions that can still open the Billing Portal (`past_due` after the grace window, or `canceled`), are emailed as upload links. Unpaid sessions are not. The response does not say how many were sent.
 
 ### `POST /billing-portal`
 
@@ -58,7 +60,7 @@ Poll `GET /jobs/:id` with header `X-Session-Id` set to the checkout session that
 
 `GET /jobs?mine` with `X-Session-Id` returns `{ "jobs": [ { "id", "status", "created_at", "filename", "pdf_available" } ] }` for that session's jobs from the last 24 hours. `pdf_available` is true only when the job succeeded and the PDF is still on disk. A missing header is `404`.
 
-Job records are written atomically to `jobs.json` under `DATA_DIR` (or the temporary job directory when `DATA_DIR` is unset). PDFs in that directory are still deleted 24 hours after they were written. On startup, a job left `running` is marked `failed`. If it had reserved a Starter credit, that credit is refunded so a redeploy does not keep it. Set `DATA_DIR` to a disk that survives restarts, or the refund cannot see the interrupted job.
+Job records are written atomically to `jobs.json` under `DATA_DIR` (or the temporary job directory when `DATA_DIR` is unset). PDFs in that directory are still deleted 24 hours after they were written. On startup, a job left `running` or `queued` is marked `failed`. Each reserved Starter credit is a hold keyed by that job id, so two interrupted jobs refund two credits. A refund that fails is retried and the job record is kept past the 24-hour cleanup until the refund commits. Set `DATA_DIR` to a disk that survives restarts, or the refund cannot see the interrupted job.
 
 Accepted content, detected from the bytes rather than the extension: Rockwell L5X and L5K, Rockwell ACD (converted to L5X with the vendored Apache-2.0 `acd-tools` package; a routine the converter cannot read is named in the manual), Siemens SIMATIC ML block XML (LAD, FBD, SCL, GRAPH, and statement list), Siemens SCL/ST and DATA_BLOCK source, Siemens STL/AWL (S7-300/400 and S7-200), PLCopen XML, TwinCAT TcPOU, CSV and XLSX tag lists, STEP, IGES, ASCII or binary DXF, and ASCII or binary STL (size and approximate shape only). A Zip may contain those files. `.zap` / `.ap` / `.s7p`, `.dwg`, and SolidWorks `.sldprt` / `.sldasm` / `.slddrw` are rejected with the export to use instead (SCL or SIMATIC ML XML, DXF, or STEP). Unknown or mismatched content returns **415**. A file that parses but contains no equipment data returns **422**. Neither spends a credit. Executable uploads are rejected. Zip entries are checked for path traversal, nesting, file count, and uncompressed size.
 
@@ -74,7 +76,7 @@ Kept for the current site. Same body as before (`file`, or JSON `plcContent`, pl
 
 Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` and logs the event. Requests with a bad or missing signature get `400`.
 
-When `checkout.session.completed` arrives for Starter or Pro, the buyer is emailed their upload link: `${FRONTEND_URL}/upload.html?session_id=<cs_id>`. The message is plain text and simple HTML, From `support@manualos.com` (or `SMTP_FROM` when that is set), subject `Your ManualOS upload link`. The body does not name a vendor or a product. The send is idempotent per Checkout Session and is recorded in `return-link-sent.json` under `MANUALOS_ACCOUNT_DIR` when that is set, otherwise under `DATA_DIR`, otherwise in the job directory. A webhook retry does not send a second copy. If `SMTP_HOST` is unset, the server logs `return-link email skipped: SMTP not configured` and still returns `200`. A mail failure is logged and does not fail the webhook.
+When `checkout.session.completed` arrives for a plan with `returnLink` (Starter and Pro), the buyer is emailed their upload link: `${FRONTEND_URL}/upload.html?session_id=<cs_id>`. The message is plain text and simple HTML, From `support@manualos.com` (or `SMTP_FROM` when that is set), subject `Your ManualOS upload link`. The body does not name a vendor or a product. The handler returns `200` before the SMTP send. The send is still idempotent per Checkout Session and is recorded in `return-link-sent.json` under `MANUALOS_ACCOUNT_DIR` when that is set, otherwise under `DATA_DIR`, otherwise in the job directory. A webhook retry does not send a second copy. If `SMTP_HOST` is unset, the server logs `return-link email skipped: SMTP not configured` and still returns `200`. A mail failure is logged and does not fail the webhook.
 
 Each generate call re-reads the Checkout Session, PaymentIntent, and Subscription, so access stays correct even if a webhook is delayed. The endpoint is still required: subscription renewals, cancellations, and delayed payment methods are asynchronous, and the signature is what shows the call came from Stripe.
 
@@ -82,7 +84,7 @@ Each generate call re-reads the Checkout Session, PaymentIntent, and Subscriptio
 
 `{ "status": "ok", "service": "manualos-backend", "aiEnabled": boolean }`.
 
-Errors returned to browsers are short JSON messages. Stack traces stay in the server log.
+API responses set `Referrer-Policy: no-referrer`. Errors returned to browsers are short JSON messages. Stack traces stay in the server log.
 
 ## Environment
 
@@ -105,6 +107,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `SMTP_USER` | No | SMTP username. Leave unset for a relay that does not authenticate. |
 | `SMTP_PASS` | No | SMTP password. Never logged. |
 | `SMTP_FROM` | No | From address. Defaults to `support@manualos.com`. |
+| `TRUST_PROXY_HOPS` | No | How many reverse-proxy hops may set `X-Forwarded-For`. Unset on Railway (`RAILWAY_ENVIRONMENT`, `RAILWAY_PROJECT_ID`, or `RAILWAY_SERVICE_ID`) means `1`. Unset anywhere else means `0`, so a direct client cannot spoof the access-link IP limit. An integer from `0` to `5` overrides the default. |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
 

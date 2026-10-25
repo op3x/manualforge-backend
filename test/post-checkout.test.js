@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createApp } = require('../server');
+const { createApp, trustProxyHops } = require('../server');
+const { createRateLimiter } = require('../lib/rate-limit');
 const { createJobStore, INDEX_NAME, removeTestJobDirectories } = require('../lib/jobs/store');
 const { createSmtpMailer } = require('../lib/mail');
 const {
@@ -205,6 +206,8 @@ test('past_due grace follows the failed invoice period start', () => {
     );
     assert.equal(access.valid, false, status);
     assert.equal(access.paymentIssue, false, status);
+    assert.equal(access.portal, status === 'canceled', status);
+    assert.equal(access.reason, status === 'canceled' ? 'canceled' : null, status);
     assert.equal(Object.hasOwn(publicAccess(access), 'payment_issue'), false);
   }
 
@@ -216,7 +219,15 @@ test('past_due grace follows the failed invoice period start', () => {
     START_MS + GRACE_MS - 1
   );
   assert.equal(open.valid, true);
-  assert.deepEqual(publicAccess(open), { valid: true, plan: 'pro', remaining: null, payment_issue: true });
+  assert.deepEqual(publicAccess(open), {
+    valid: true,
+    access: true,
+    plan: 'pro',
+    remaining: null,
+    portal: true,
+    payment_issue: true,
+    reason: 'payment_failed',
+  });
 
   const closed = accessFromSession(
     { metadata: { plan: 'pro' }, payment_status: 'paid' },
@@ -226,7 +237,15 @@ test('past_due grace follows the failed invoice period start', () => {
     START_MS + GRACE_MS
   );
   assert.equal(closed.valid, false);
-  assert.deepEqual(publicAccess(closed), { valid: false, plan: 'pro', remaining: null, payment_issue: true });
+  assert.deepEqual(publicAccess(closed), {
+    valid: false,
+    access: false,
+    plan: 'pro',
+    remaining: null,
+    portal: true,
+    payment_issue: true,
+    reason: 'payment_failed',
+  });
 
   const active = accessFromSession(
     { metadata: { plan: 'pro' } },
@@ -235,7 +254,7 @@ test('past_due grace follows the failed invoice period start', () => {
     envNow,
     START_MS
   );
-  assert.deepEqual(publicAccess(active), { valid: true, plan: 'pro', remaining: null });
+  assert.deepEqual(publicAccess(active), { valid: true, access: true, plan: 'pro', remaining: null, portal: true });
 });
 
 test('past_due inside the grace window can generate and verify-session reports payment_issue', async () => {
@@ -300,15 +319,54 @@ test('past_due inside the grace window can generate and verify-session reports p
   const app = createApp({ env: env(), stripe: httpStripe, anthropic: null, now: clock, mailer: null });
   await withServer(app, async (base) => {
     const inside = await fetch(`${base}/verify-session?session_id=cs_sub_inside`);
-    assert.deepEqual(await inside.json(), { valid: true, plan: 'pro', remaining: null, payment_issue: true });
+    assert.deepEqual(await inside.json(), {
+      valid: true,
+      access: true,
+      plan: 'pro',
+      remaining: null,
+      portal: true,
+      payment_issue: true,
+      reason: 'payment_failed',
+    });
     const outside = await fetch(`${base}/verify-session?session_id=cs_sub_outside`);
-    assert.deepEqual(await outside.json(), { valid: false, plan: 'pro', remaining: null, payment_issue: true });
-    for (const id of ['cs_sub_unpaid', 'cs_sub_canceled', 'cs_sub_expired']) {
+    assert.deepEqual(await outside.json(), {
+      valid: false,
+      access: false,
+      plan: 'pro',
+      remaining: null,
+      portal: true,
+      payment_issue: true,
+      reason: 'payment_failed',
+    });
+    const canceled = await fetch(`${base}/verify-session?session_id=cs_sub_canceled`);
+    assert.deepEqual(await canceled.json(), {
+      valid: false,
+      access: false,
+      plan: 'pro',
+      remaining: null,
+      portal: true,
+      reason: 'canceled',
+    });
+    for (const id of ['cs_sub_unpaid', 'cs_sub_expired']) {
       const res = await fetch(`${base}/verify-session?session_id=${id}`);
-      assert.deepEqual(await res.json(), { valid: false, plan: 'pro', remaining: null });
+      assert.deepEqual(await res.json(), { valid: false, access: false, plan: 'pro', remaining: null, portal: false });
     }
     const active = await fetch(`${base}/verify-session?session_id=cs_sub_active`);
-    assert.deepEqual(await active.json(), { valid: true, plan: 'pro', remaining: null });
+    assert.deepEqual(await active.json(), { valid: true, access: true, plan: 'pro', remaining: null, portal: true });
+
+    const stillBlocked = await fetch(`${base}/generate-manual`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 'cs_sub_outside', plcContent: 'x' }),
+    });
+    assert.equal(stillBlocked.status, 402);
+    const canceledBlocked = await fetch(`${base}/generate-manual`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 'cs_sub_canceled', plcContent: 'x' }),
+    });
+    assert.equal(canceledBlocked.status, 402);
+    assert.equal(inside.headers.get('referrer-policy'), 'no-referrer');
   });
 });
 
@@ -338,9 +396,11 @@ test('checkout completion emails the upload link once and never fails the webhoo
       ]);
       assert.equal(first.status, 200);
       assert.deepEqual(await first.json(), { received: true });
+      assert.equal(first.headers.get('referrer-policy'), 'no-referrer');
       assert.equal(second.status, 200);
       assert.equal(parallel[0].status, 200);
       assert.equal(parallel[1].status, 200);
+      await app.settle();
       assert.equal(sent.length, 1);
       assert.equal(sent[0].to, 'buyer@example.com');
       assert.equal(sent[0].text.includes('https://manualos.com/upload.html?session_id=cs_link_1'), true);
@@ -349,6 +409,7 @@ test('checkout completion emails the upload link once and never fails the webhoo
 
       const pro = await postWebhook(base, completedEvent(proSession('cs_link_2', 'owner@example.com'), 'evt_pro'));
       assert.equal(pro.status, 200);
+      await app.settle();
       assert.equal(sent.length, 2);
       assert.equal(sent[1].to, 'owner@example.com');
       assertCleanMail(sent[1]);
@@ -370,16 +431,18 @@ test('checkout completion emails the upload link once and never fails the webhoo
         assert.equal(res.status, 200);
         const retry = await postWebhook(failBase, completedEvent(starterSession('cs_fail', 'buyer@example.com'), 'evt_fail_2'));
         assert.equal(retry.status, 200);
+        await failing.settle();
         return true;
       }));
       assert.equal(captured.lines.some((line) => line.includes('return-link email failed')), true);
       assertNoSecrets(captured.lines.join('\n'));
 
-      const quiet = await captureConsole(() => withServer(createApp({
+      const quietApp = createApp({
         env: env(),
         stripe: signedStripe(),
         anthropic: null,
-      }), async (quietBase) => {
+      });
+      const quiet = await captureConsole(() => withServer(quietApp, async (quietBase) => {
         const res = await postWebhook(quietBase, completedEvent(starterSession('cs_skip', 'buyer@example.com')));
         assert.equal(res.status, 200);
         const nameless = await postWebhook(quietBase, completedEvent({
@@ -388,6 +451,7 @@ test('checkout completion emails the upload link once and never fails the webhoo
           metadata: { plan: 'pro' },
         }, 'evt_nameless'));
         assert.equal(nameless.status, 200);
+        await quietApp.settle();
       }));
       assert.equal(quiet.lines.includes('return-link email skipped: SMTP not configured'), true);
       assert.equal(quiet.lines.includes('return-link email skipped: checkout session has no email'), true);
@@ -404,7 +468,7 @@ test('checkout completion emails the upload link once and never fails the webhoo
   }
 });
 
-test('access-link is enumeration-safe, rate limited, and only emails active sessions', async () => {
+test('access-link is enumeration-safe, rate limited, and emails sessions that can open the portal', async () => {
   const fixed = Date.UTC(2026, 9, 25, 15, 0, 0);
   const recent = Math.floor((fixed - HOUR_MS) / 1000);
   const sessions = [
@@ -436,6 +500,16 @@ test('access-link is enumeration-safe, rate limited, and only emails active sess
       customer_details: { email: 'buyer@example.com' },
       payment_intent: null,
       subscription: 'sub_canceled',
+    },
+    {
+      id: 'cs_late_1',
+      metadata: { plan: 'pro' },
+      payment_status: 'paid',
+      status: 'complete',
+      customer: 'cus_late',
+      customer_details: { email: 'buyer@example.com' },
+      payment_intent: null,
+      subscription: 'sub_late',
     },
     {
       id: 'cs_unpaid',
@@ -473,13 +547,16 @@ test('access-link is enumeration-safe, rate limited, and only emails active sess
         if (id === 'sub_grace') {
           return { id, status: 'past_due', latest_invoice: { period_start: recent } };
         }
+        if (id === 'sub_late') {
+          return { id, status: 'past_due', latest_invoice: { period_start: recent - (8 * 24 * 60 * 60) } };
+        }
         return { id, status: 'canceled', latest_invoice: { period_start: recent } };
       },
     },
   };
   const sent = [];
   const app = createApp({
-    env: env({ SMTP_FROM: 'support@manualos.com' }),
+    env: env({ SMTP_FROM: 'support@manualos.com', TRUST_PROXY_HOPS: '1' }),
     stripe,
     anthropic: null,
     now: () => fixed,
@@ -492,14 +569,17 @@ test('access-link is enumeration-safe, rate limited, and only emails active sess
     assert.equal(unknown.status, 202);
     assert.deepEqual(await known.json(), { ok: true });
     assert.deepEqual(await unknown.json(), { ok: true });
+    assert.equal(known.headers.get('referrer-policy'), 'no-referrer');
+    await app.settle();
     assert.equal(sent.length, 1);
     assert.equal(sent[0].to, 'buyer@example.com');
     assert.equal(sent[0].from, 'support@manualos.com');
     assert.equal(sent[0].text.includes('https://manualos.com/upload.html?session_id=cs_live_1'), true);
     assert.equal(sent[0].text.includes('https://manualos.com/upload.html?session_id=cs_grace_1'), true);
-    assert.equal(sent[0].text.includes('cs_old_1'), false);
+    assert.equal(sent[0].text.includes('https://manualos.com/upload.html?session_id=cs_old_1'), true);
+    assert.equal(sent[0].text.includes('https://manualos.com/upload.html?session_id=cs_late_1'), true);
     assert.equal(sent[0].text.includes('cs_unpaid'), false);
-    assert.equal(sent[0].html.includes('cs_old_1'), false);
+    assert.equal(sent[0].html.includes('cs_old_1'), true);
     assertCleanMail({ ...sent[0], text: sent[0].text.replace('links', 'link') });
     assert.match(sent[0].text, /Your upload links:/);
     assert.deepEqual(calls.list[0], {
@@ -526,6 +606,7 @@ test('access-link is enumeration-safe, rate limited, and only emails active sess
     assert.equal(max.length, 254);
     const accepted = await postJson(base, '/access-link', { email: max }, { 'X-Forwarded-For': '203.0.113.11' });
     assert.equal(accepted.status, 202);
+    await app.settle();
     assert.equal(calls.list.some((params) => params.customer_details.email === max), true);
   });
 
@@ -540,7 +621,7 @@ test('access-link is enumeration-safe, rate limited, and only emails active sess
     },
   };
   const limitApp = createApp({
-    env: env(),
+    env: env({ TRUST_PROXY_HOPS: '1' }),
     stripe: limitStripe,
     anthropic: null,
     now: () => time,
@@ -618,6 +699,7 @@ test('access-link is enumeration-safe, rate limited, and only emails active sess
     const res = await postJson(base, '/access-link', { email: 'buyer@example.com' }, { 'X-Forwarded-For': '203.0.113.77' });
     assert.equal(res.status, 202);
     assert.deepEqual(await res.json(), { ok: true });
+    await boom.settle();
   }));
   assertNoSecrets(captured.lines.join('\n'));
   assert.equal(captured.lines.some((line) => line.includes('return-link email failed')), true);
@@ -775,19 +857,20 @@ test('jobs require the owning session, survive restart, and refund a running Sta
   try {
     assert.equal(store.get('job_running').status, 'failed');
     assert.equal(store.get('job_running').credit, null);
-    assert.equal(store.get('job_queued').status, 'queued');
+    assert.equal(store.get('job_queued').status, 'failed');
+    assert.equal(store.get('job_queued').credit, null);
     assert.equal(store.get('job_pro').status, 'failed');
-    assert.deepEqual(updates, ['pi_restart']);
+    assert.deepEqual(updates, ['pi_restart', 'pi_queued']);
     assert.equal(intents.pi_restart.manuals_used, '0');
     assert.equal(intents.pi_restart.credit_hold, undefined);
-    assert.equal(intents.pi_queued.manuals_used, '1');
-    assert.equal(intents.pi_queued.credit_hold, 'hold_queue');
+    assert.equal(intents.pi_queued.manuals_used, '0');
+    assert.equal(intents.pi_queued.credit_hold, undefined);
 
     const again = createJobStore({ directory: dir, env: env() });
     const second = createApp({ env: env(), stripe, anthropic: null, jobs: again, mailer: null });
     await second.ready;
     again.close();
-    assert.deepEqual(updates, ['pi_restart']);
+    assert.deepEqual(updates, ['pi_restart', 'pi_queued']);
 
     const recent = store.create({
       sessionId: 'cs_owner',
@@ -883,4 +966,259 @@ test('DATA_DIR is the job store and SMTP is skipped until SMTP_HOST is set', () 
   assert.equal(createSmtpMailer({ SMTP_PASS: SECRET, SMTP_FROM: 'support@manualos.com' }), null);
   const mailer = createSmtpMailer({ SMTP_HOST: '127.0.0.1', SMTP_PORT: '25', SMTP_PASS: SECRET });
   assert.equal(typeof mailer.sendMail, 'function');
+});
+
+test('access-link responds before the Stripe lookup', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let listed = 0;
+  const app = createApp({
+    env: env({ TRUST_PROXY_HOPS: '1' }),
+    stripe: {
+      checkout: {
+        sessions: {
+          list: async () => {
+            listed += 1;
+            await gate;
+            return { data: [] };
+          },
+        },
+      },
+    },
+    anthropic: null,
+    mailer: { async sendMail() { throw new Error('should not send'); } },
+  });
+  await withServer(app, async (base) => {
+    const pending = postJson(base, '/access-link', { email: 'buyer@example.com' }, { 'X-Forwarded-For': '203.0.113.80' });
+    const winner = await Promise.race([
+      pending.then((res) => ({ res })),
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 300)),
+    ]);
+    assert.equal(winner.timeout, undefined);
+    assert.equal(winner.res.status, 202);
+    assert.deepEqual(await winner.res.json(), { ok: true });
+    assert.equal(listed, 1);
+    release();
+    await app.settle();
+  });
+});
+
+test('the webhook acks before SMTP and still sends once', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const sent = [];
+  const app = createApp({
+    env: env(),
+    stripe: signedStripe(),
+    anthropic: null,
+    mailer: {
+      async sendMail(message) {
+        await gate;
+        sent.push(message);
+      },
+    },
+  });
+  await withServer(app, async (base) => {
+    const pending = postWebhook(base, completedEvent(starterSession('cs_async', 'buyer@example.com'), 'evt_async'));
+    const winner = await Promise.race([
+      pending.then((res) => ({ res })),
+      new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 300)),
+    ]);
+    assert.equal(winner.timeout, undefined);
+    assert.equal(winner.res.status, 200);
+    assert.equal(sent.length, 0);
+    release();
+    await app.settle();
+    assert.equal(sent.length, 1);
+    const again = await postWebhook(base, completedEvent(starterSession('cs_async', 'buyer@example.com'), 'evt_async_2'));
+    assert.equal(again.status, 200);
+    await app.settle();
+    assert.equal(sent.length, 1);
+  });
+});
+
+test('two in-flight Starter jobs each refund once after a restart', async () => {
+  const dir = tempDir();
+  const store = createJobStore({ directory: dir, env: env() });
+  const meta = { manuals_used: '0', plan: 'starter', credit_generation: '0' };
+  const stripe = {
+    checkout: {
+      sessions: {
+        retrieve: async () => ({
+          id: 'cs_test_starter',
+          metadata: { plan: 'starter' },
+          payment_status: 'paid',
+          payment_intent: 'pi_two',
+          subscription: null,
+        }),
+      },
+    },
+    paymentIntents: {
+      retrieve: async () => ({ id: 'pi_two', metadata: { ...meta } }),
+      update: async (id, params) => {
+        for (const [key, value] of Object.entries(params.metadata)) {
+          if (value === '') delete meta[key];
+          else meta[key] = value;
+        }
+        return { id, metadata: { ...meta } };
+      },
+    },
+  };
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const l5x = fs.readFileSync(path.join(__dirname, 'fixtures/line.L5X'));
+  const app = createApp({
+    env: env(),
+    stripe,
+    jobs: store,
+    mailer: null,
+    anthropic: { messages: { create: async () => { await gate; throw new Error('stopped'); } } },
+    renderPdf: async () => Buffer.from('%PDF-1.4\n'),
+  });
+  try {
+    await withServer(app, async (base) => {
+      async function startJob() {
+        const form = new FormData();
+        form.set('session_id', 'cs_test_starter');
+        form.set('file', new Blob([l5x]), 'line.L5X');
+        const created = await fetch(`${base}/jobs`, { method: 'POST', body: form });
+        assert.equal(created.status, 202);
+        return created.json();
+      }
+      const first = await startJob();
+      const second = await startJob();
+      assert.equal(meta.manuals_used, '2');
+      assert.equal(String(meta.credit_holds).split(',').length, 2);
+      assert.equal(String(meta.credit_holds).includes(first.id), true);
+      assert.equal(String(meta.credit_holds).includes(second.id), true);
+
+      const restarted = createJobStore({ directory: dir, env: env() });
+      const next = createApp({ env: env(), stripe, anthropic: null, jobs: restarted, mailer: null });
+      await next.ready;
+      assert.equal(meta.manuals_used, '0');
+      assert.equal(meta.credit_holds, undefined);
+      assert.equal(restarted.get(first.id).status, 'failed');
+      assert.equal(restarted.get(second.id).status, 'failed');
+      assert.equal(restarted.get(first.id).needsCreditRefund, false);
+      restarted.close();
+
+      release();
+      for (const id of [first.id, second.id]) {
+        let body;
+        for (let i = 0; i < 50; i += 1) {
+          const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
+          body = await res.json();
+          if (body.status === 'failed' || body.status === 'succeeded') break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        assert.equal(body.status === 'failed' || body.status === 'succeeded', true);
+      }
+      assert.equal(meta.manuals_used, '0');
+    });
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed startup refund is retried and the job survives the 24h sweep', async () => {
+  const dir = tempDir();
+  const record = {
+    id: 'job_hold',
+    status: 'running',
+    progress: { stage: 'analyzing', percent: 10, message: 'Working' },
+    error: null,
+    warnings: [],
+    coverage: null,
+    createdAt: new Date(Date.now() - 2 * DAY_MS).toISOString(),
+    expiresAt: new Date(Date.now() - 1000).toISOString(),
+    sessionId: 'cs_owner',
+    filename: 'line.L5X',
+    credit: { paymentIntentId: 'pi_hold', token: 'tok_hold' },
+  };
+  fs.writeFileSync(path.join(dir, INDEX_NAME), JSON.stringify({ jobs: [record] }));
+  const meta = { manuals_used: '1', credit_generation: '0', credit_hold: 'tok_hold', plan: 'starter' };
+  let down = true;
+  const stripe = {
+    paymentIntents: {
+      retrieve: async () => ({ id: 'pi_hold', metadata: { ...meta } }),
+      update: async (id, params) => {
+        if (down) {
+          const err = new Error('down');
+          err.code = 'stripe_down';
+          throw err;
+        }
+        for (const [key, value] of Object.entries(params.metadata)) {
+          if (value === '') delete meta[key];
+          else meta[key] = value;
+        }
+        return { id, metadata: { ...meta } };
+      },
+    },
+  };
+  const store = createJobStore({ directory: dir, env: env() });
+  const app = createApp({ env: env(), stripe, anthropic: null, jobs: store, mailer: null });
+  try {
+    await app.ready;
+    assert.equal(store.get('job_hold').needsCreditRefund, true);
+    assert.equal(store.get('job_hold').status, 'failed');
+    store.sweep();
+    assert.equal(store.get('job_hold').id, 'job_hold');
+    assert.equal(meta.manuals_used, '1');
+    down = false;
+    await app.retryRefunds();
+    assert.equal(meta.manuals_used, '0');
+    assert.equal(meta.credit_hold, undefined);
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, INDEX_NAME), 'utf8'));
+    assert.equal(saved.jobs[0].needsCreditRefund, false);
+    store.sweep();
+    assert.equal(store.get('job_hold'), null);
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rate limiter drops expired keys and proxy hops follow TRUST_PROXY_HOPS', async () => {
+  let t = 1_000_000;
+  const limiter = createRateLimiter({ limit: 2, windowMs: 1000, now: () => t });
+  assert.equal(limiter.allow('a'), true);
+  assert.equal(limiter.size(), 1);
+  t += 1001;
+  assert.equal(limiter.allow('b'), true);
+  assert.equal(limiter.size(), 1);
+
+  assert.equal(trustProxyHops({}), 0);
+  assert.equal(trustProxyHops({ RAILWAY_ENVIRONMENT: 'production' }), 1);
+  assert.equal(trustProxyHops({ RAILWAY_PROJECT_ID: 'proj' }), 1);
+  assert.equal(trustProxyHops({ TRUST_PROXY_HOPS: '2', RAILWAY_ENVIRONMENT: 'production' }), 2);
+  assert.equal(trustProxyHops({ TRUST_PROXY_HOPS: '0', RAILWAY_ENVIRONMENT: 'production' }), 0);
+  assert.equal(trustProxyHops({ TRUST_PROXY_HOPS: 'nope' }), 0);
+  assert.equal(trustProxyHops({ TRUST_PROXY_HOPS: '9' }), 0);
+
+  const app = createApp({
+    env: env(),
+    stripe: { checkout: { sessions: { list: async () => ({ data: [] }) } } },
+    anthropic: null,
+    mailer: { async sendMail() {} },
+  });
+  await withServer(app, async (base) => {
+    for (let i = 0; i < 10; i += 1) {
+      const res = await postJson(
+        base,
+        '/access-link',
+        { email: `direct${i}@example.com` },
+        { 'X-Forwarded-For': `198.51.100.${i}` }
+      );
+      assert.equal(res.status, 202);
+    }
+    const eleventh = await postJson(
+      base,
+      '/access-link',
+      { email: 'direct10@example.com' },
+      { 'X-Forwarded-For': '203.0.113.200' }
+    );
+    assert.equal(eleventh.status, 429);
+    await app.settle();
+  });
 });

@@ -147,6 +147,7 @@ test('health, checkout, verify, and webhook', async () => {
   await withServer(app, async (base) => {
     const health = await fetch(base + '/health');
     assert.equal(health.status, 200);
+    assert.equal(health.headers.get('referrer-policy'), 'no-referrer');
     assert.equal((await health.json()).aiEnabled, true);
 
     const badPlan = await fetch(base + '/create-checkout-session', {
@@ -176,13 +177,13 @@ test('health, checkout, verify, and webhook', async () => {
     assert.equal(missingId.status, 400);
 
     const pro = await fetch(base + '/verify-session?session_id=cs_test_pro');
-    assert.deepEqual(await pro.json(), { valid: true, plan: 'pro', remaining: null });
+    assert.deepEqual(await pro.json(), { valid: true, access: true, plan: 'pro', remaining: null, portal: true });
 
     const unpaid = await fetch(base + '/verify-session?session_id=cs_test_unpaid');
-    assert.deepEqual(await unpaid.json(), { valid: false, plan: 'starter', remaining: null });
+    assert.deepEqual(await unpaid.json(), { valid: false, access: false, plan: 'starter', remaining: null, portal: false });
 
     const missing = await fetch(base + '/verify-session?session_id=missing');
-    assert.deepEqual(await missing.json(), { valid: false, plan: null, remaining: null });
+    assert.deepEqual(await missing.json(), { valid: false, access: false, plan: null, remaining: null, portal: false });
 
     const www = await fetch(base + '/health', { headers: { Origin: 'https://www.manualos.com' } });
     assert.equal(www.headers.get('access-control-allow-origin'), 'https://www.manualos.com');
@@ -229,7 +230,7 @@ test('generate requires payment, spends one starter credit after success, and hi
     assert.equal(harness.calls.updates.length, 0);
 
     const headerOnly = await fetch(base + '/verify-session?session_id=cs_test_starter');
-    assert.deepEqual(await headerOnly.json(), { valid: true, plan: 'starter', remaining: 3 });
+    assert.deepEqual(await headerOnly.json(), { valid: true, access: true, plan: 'starter', remaining: 3, portal: false });
 
     const form = new FormData();
     form.set('session_id', 'cs_test_starter');
@@ -248,7 +249,7 @@ test('generate requires payment, spends one starter credit after success, and hi
     assert.equal(harness.used, 1);
 
     const after = await fetch(base + '/verify-session?session_id=cs_test_starter');
-    assert.deepEqual(await after.json(), { valid: true, plan: 'starter', remaining: 2 });
+    assert.deepEqual(await after.json(), { valid: true, access: true, plan: 'starter', remaining: 2, portal: false });
 
     harness.calls.failSecond = true;
     const viaHeader = await fetch(base + '/generate-manual', {

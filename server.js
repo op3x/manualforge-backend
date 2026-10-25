@@ -34,7 +34,7 @@ const {
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
-const { createJobStore, publicJob } = require('./lib/jobs/store');
+const { createJobStore, newJobId, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
 function createStripe(env) {
@@ -97,9 +97,22 @@ function ownsJob(job, sessionId) {
   return Boolean(job && sessionId && job.sessionId === sessionId);
 }
 
+const REFUND_RETRY_MS = 60 * 1000;
+
+function trustProxyHops(env) {
+  const raw = env && env.TRUST_PROXY_HOPS;
+  if (raw != null && String(raw).trim() !== '') {
+    const n = Number(String(raw).trim());
+    if (Number.isInteger(n) && n >= 0 && n <= 5) return n;
+    return 0;
+  }
+  if (env && (env.RAILWAY_ENVIRONMENT || env.RAILWAY_PROJECT_ID || env.RAILWAY_SERVICE_ID)) return 1;
+  return 0;
+}
+
 function settleStartupRefunds(stripe, store) {
-  const due = store && typeof store.takeStartupRefunds === 'function' ? store.takeStartupRefunds() : [];
-  return (async () => {
+  return async function retryRefunds() {
+    const due = store && typeof store.refundsDue === 'function' ? store.refundsDue() : [];
     for (const job of due) {
       const credit = job && job.credit;
       if (!credit || !credit.paymentIntentId || !credit.token) continue;
@@ -109,13 +122,13 @@ function settleStartupRefunds(stripe, store) {
           err.code = 'stripe_missing';
           throw err;
         }
-        await refundStarterCredit(stripe, credit.paymentIntentId, credit.token);
+        await refundStarterCredit(stripe, credit.paymentIntentId, credit.token, credit.jobId || job.id);
         if (typeof store.markCreditRefunded === 'function') store.markCreditRefunded(job);
       } catch (err) {
         console.error('Starter credit refund failed', err && err.code ? String(err.code) : 'error');
       }
     }
-  })();
+  };
 }
 
 function fieldsFrom(req) {
@@ -166,11 +179,31 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
   });
   const ipLimiter = createRateLimiter({ limit: 10, windowMs: HOUR_MS, now: clock });
   const emailLimiter = createRateLimiter({ limit: 3, windowMs: HOUR_MS, now: clock });
-  const ready = settleStartupRefunds(stripeClient, store);
+  const retryRefunds = settleStartupRefunds(stripeClient, store);
+  const ready = retryRefunds();
+  const pending = new Set();
+  function track(promise) {
+    const run = Promise.resolve(promise).catch((err) => {
+      console.error('return-link email failed', err && err.code ? String(err.code) : 'error');
+    });
+    pending.add(run);
+    run.finally(() => pending.delete(run));
+    return run;
+  }
   const app = express();
   app.ready = ready;
+  app.retryRefunds = retryRefunds;
+  app.settle = () => Promise.all(Array.from(pending));
   app.disable('x-powered-by');
-  app.set('trust proxy', 1);
+  app.set('trust proxy', trustProxyHops(env));
+  app.use((req, res, next) => {
+    res.set('Referrer-Policy', 'no-referrer');
+    next();
+  });
+  const refundTimer = setInterval(() => {
+    retryRefunds().catch(() => {});
+  }, REFUND_RETRY_MS);
+  if (refundTimer && typeof refundTimer.unref === 'function') refundTimer.unref();
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
@@ -195,19 +228,16 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
       return res.status(400).send('Webhook signature verification failed');
     }
     logWebhookEvent(event);
-    try {
-      if (event.type === 'checkout.session.completed') {
-        await deliverSessionLink({
-          session: event.data && event.data.object,
-          env,
-          mailer: mailerClient,
-          sentSet,
-        });
-      }
-    } catch (err) {
-      console.error('return-link email failed', err && err.code ? String(err.code) : 'error');
+    res.json({ received: true });
+    if (event.type === 'checkout.session.completed') {
+      track(deliverSessionLink({
+        session: event.data && event.data.object,
+        env,
+        mailer: mailerClient,
+        sentSet,
+      }));
     }
-    return res.json({ received: true });
+    return;
   });
   app.use(express.json({ limit: '1mb' }));
 
@@ -241,7 +271,9 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
       const access = await verifyCheckoutSession(stripeClient, sessionId, env, clock());
       return res.json(publicAccess(access));
     } catch (err) {
-      if (isStripeNotFound(err)) return res.json({ valid: false, plan: null, remaining: null });
+      if (isStripeNotFound(err)) {
+        return res.json(publicAccess({ valid: false, plan: null, remaining: null, portal: false }));
+      }
       return sendError(res, err);
     }
   });
@@ -256,19 +288,22 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
     if (!emailLimiter.allow(email)) {
       return res.status(429).json({ error: 'Too many requests. Try again later.' });
     }
-    try {
-      if (!mailerClient) {
-        console.log('return-link email skipped: SMTP not configured');
-      } else if (!stripeClient) {
-        console.error('return-link email skipped: STRIPE_SECRET_KEY is not set');
-      } else {
-        const links = await activeUploadLinks({ stripe: stripeClient, env, email, now: clock });
-        if (links.length) await sendLinks({ mailer: mailerClient, env, to: email, links });
+    res.status(202).json({ ok: true });
+    track((async () => {
+      try {
+        if (!mailerClient) {
+          console.log('return-link email skipped: SMTP not configured');
+        } else if (!stripeClient) {
+          console.error('return-link email skipped: STRIPE_SECRET_KEY is not set');
+        } else {
+          const links = await activeUploadLinks({ stripe: stripeClient, env, email, now: clock });
+          if (links.length) await sendLinks({ mailer: mailerClient, env, to: email, links });
+        }
+      } catch (err) {
+        console.error('return-link email failed', err && err.code ? String(err.code) : 'error');
       }
-    } catch (err) {
-      console.error('return-link email failed', err && err.code ? String(err.code) : 'error');
-    }
-    return res.status(202).json({ ok: true });
+    })());
+    return;
   });
 
   app.post('/billing-portal', async (req, res) => {
@@ -319,7 +354,7 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
     }
     let credit = null;
     if (reserveAtStart && access.plan === 'starter') {
-      credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env);
+      credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env, newJobId());
     }
     try {
       const result = await respond(access, files, credit, project);
@@ -327,9 +362,9 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
     } catch (err) {
       if (credit) {
         try {
-          await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+          await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token, credit.jobId);
         } catch (refundErr) {
-          console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
+          console.error('Starter credit refund failed', refundErr && refundErr.code ? String(refundErr.code) : 'error');
         }
       }
       throw err;
@@ -341,9 +376,10 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
       reserveAtStart: true,
       respond: async (access, files, credit, project) => {
         const job = store.create({
+          id: credit ? credit.jobId : undefined,
           sessionId: readSessionId(req),
           filename: filenameOf(files),
-          credit: credit ? { paymentIntentId: credit.paymentIntentId, token: credit.token } : null,
+          credit: credit ? { paymentIntentId: credit.paymentIntentId, token: credit.token, jobId: credit.jobId } : null,
         });
         const queued = publicJob(job);
         job.status = 'running';
@@ -373,7 +409,7 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs, now,
         } catch (err) {
           if (credit) {
             try {
-              await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+              await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token, credit.jobId);
               job.credit = null;
               job.needsCreditRefund = false;
             } catch (refundErr) {
@@ -531,4 +567,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { createApp, prepareListen, start, installShutdown, fieldsFrom };
+module.exports = { createApp, prepareListen, start, installShutdown, fieldsFrom, trustProxyHops };
