@@ -66,6 +66,13 @@ const {
 } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
+const {
+  caGateEnabled,
+  parseCaCheckoutFields,
+  ensureBillingAddressCollection,
+  createCaAttestationStore,
+  applyCaBusinessBackstop,
+} = require('./lib/ca-business');
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -99,6 +106,7 @@ function sendError(res, err, env) {
     if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
     const body = { error: err.message };
     if (err.publicCode) body.code = err.publicCode;
+    else if (err.code === 'ca_business_required') body.code = err.code;
     return res.status(err.status || 500).json(body);
   }
   logUnexpected(err, env);
@@ -340,6 +348,7 @@ function createApp({
     verifyCache.set(sessionId, { at: clock(), body: { ...body } });
   }
   const ledger = creditLedger || createCreditLedger({ env });
+  const caAttestations = createCaAttestationStore({ env });
   jobTimeoutMs(env);
   warnSupportDataDir(env);
   ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
@@ -406,6 +415,13 @@ function createApp({
     } catch {
       console.error('Support data directory check failed');
     }
+    let caBackstopRefunds = 0;
+    try {
+      caBackstopRefunds = caAttestations.refundCount();
+    } catch {
+      caBackstopRefunds = null;
+      console.error('Canadian business refund count could not be read');
+    }
     res.json({
       status: 'ok',
       service: 'manualos-backend',
@@ -417,6 +433,7 @@ function createApp({
       creditLedgerOk,
       supportDataDirOk: dataDirOk,
       portalTokens: portalTokensEnabled(env),
+      caBackstopRefunds,
     });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -464,7 +481,16 @@ function createApp({
       return res.json({ received: true });
     }
     try {
-      if (typeof onStripeEvent === 'function') {
+      const backstop = await applyCaBusinessBackstop({
+        stripe: stripeForEvent,
+        event,
+        env,
+        store: caAttestations,
+        now: clock,
+      });
+      if (backstop.blocked) {
+        logWebhookEvent(event);
+      } else if (typeof onStripeEvent === 'function') {
         await onStripeEvent(event);
       } else {
         const starterResult = await applyStarterChargeEvent(stripeForEvent, event);
@@ -498,6 +524,8 @@ function createApp({
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       const plan = req.body && req.body.plan;
+      const gate = caGateEnabled(env);
+      if (gate) parseCaCheckoutFields(req.body);
       // #13 order is withCheckoutPolicy around checkout params. #10's withAttribution
       // wraps that result (either order). #16 applyManualosCheckout may replace the
       // price. Consent metadata is applied after that and only writes metadata, so it
@@ -505,7 +533,8 @@ function createApp({
       // the 400; present consent is stored either way. withManualosBrand stamps brand.
       // #17 rebuilds these params from checkoutParams when a product has no tax code.
       // applyCheckoutConsent and withManualosBrand have to run after that rebuild.
-      const params = withManualosBrand(applyCheckoutConsent(
+      // The Canadian attestation is not written onto these params.
+      let params = withManualosBrand(applyCheckoutConsent(
         await applyManualosCheckout(
           stripeClient,
           withCheckoutPolicy(checkoutParams(plan, env), { plan, env }),
@@ -514,10 +543,28 @@ function createApp({
         req.body,
         { ip: requestIp(req), now: clock(), env },
       ));
+      if (gate) params = ensureBillingAddressCollection(params);
       const session = await stripeClient.checkout.sessions.create(params);
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      }
+      if (gate) {
+        const fields = parseCaCheckoutFields(req.body);
+        if (fields.caBusinessAttestation === true) {
+          const customerId = typeof session.customer === 'string'
+            ? session.customer
+            : (session.customer && session.customer.id) || params.customer;
+          await caAttestations.record({
+            sessionId: session.id,
+            customerId,
+            userId: session.client_reference_id,
+            at: new Date(clock()).toISOString(),
+            billingCountry: fields.billingCountry,
+            caBusinessAttestation: true,
+            attestationVersion: fields.attestationVersion,
+          });
+        }
       }
       return res.json({ url: session.url });
     } catch (err) {
