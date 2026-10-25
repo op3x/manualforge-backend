@@ -9,7 +9,8 @@ const { buildDocument } = require('../lib/manual/assemble');
 const { renderHtml } = require('../lib/manual/html');
 const { parseUploads } = require('../lib/parsers');
 const { generateManual } = require('../lib/pipeline');
-const { noMachineContent } = require('../lib/machine-content');
+const { noMachineContent, lowContent } = require('../lib/machine-content');
+const { applyEquipment } = require('../lib/ai');
 const { corpusHas, corpusRoot } = require('./corpus-env');
 
 function htmlOf(project) {
@@ -214,6 +215,66 @@ test('a 2D drawing with no machine content is flagged before any model call', as
   const machine = withLogic([{ name: 'Motor_Run', description: 'Feeder motor', dataType: 'BOOL' }]);
   machine.sources = [{ name: 'line.L5X', format: 'l5x' }];
   assert.equal(noMachineContent(machine), false);
+});
+
+test('a geometry-only mesh is low content with no named parts', async () => {
+  const stl = [
+    'solid mesh',
+    'facet normal 0 0 1',
+    'outer loop',
+    'vertex 0 0 0',
+    'vertex 1 0 0',
+    'vertex 0 1 0',
+    'endloop',
+    'endfacet',
+    'endsolid mesh',
+    '',
+  ].join('\n');
+  const project = await parseUploads([{ name: 'vessel.stl', buffer: Buffer.from(stl) }]);
+  assert.equal(project.cad.meshOnly, true);
+  assert.equal(project.cad.bom.length, 0);
+  assert.equal(noMachineContent(project), true);
+  assert.equal(lowContent(project), true);
+  const calls = [];
+  const result = await generateManual({
+    project,
+    anthropic: { messages: { create: async () => { calls.push(1); return { content: [{ type: 'text', text: '{}' }] }; } } },
+    env: process.env,
+    renderPdf: async () => Buffer.from('%PDF-1.4\n'),
+  });
+  assert.equal(result.noMachineContent, true);
+  assert.equal(result.lowContent, true);
+  assert.equal(calls.length, 0);
+  const machine = withLogic([{ name: 'Motor_Run', description: 'Feeder motor', dataType: 'BOOL' }]);
+  machine.sources = [{ name: 'line.L5X', format: 'l5x' }];
+  assert.equal(lowContent(machine), false);
+});
+
+test('a pressurised chemical process is not labelled a calculation and its hazards are not repeated', async () => {
+  const file = path.join(corpusRoot(), 'plc/grfics_simplified_te_plcopen.xml');
+  if (!fs.existsSync(file)) return;
+  const project = await parseUploads([{ name: 'grfics_simplified_te_plcopen.xml', buffer: fs.readFileSync(file) }]);
+  for (const routine of project.routines) analyzeRoutine(routine, project, null);
+  applyEquipment(project, {
+    equipment_kind: 'calculation',
+    overview: 'This calculation writes a pressure result from the measured inputs of the blending unit and does not move a product.',
+    cycle: 'Read the inputs, run the calculation, and write the valve command.',
+    subsystems: [
+      { name: 'Reactor vessel', role: 'process', function: 'The vessel holds the blend under pressure.', motion: 'Nothing moves.', components: ['Vessel'] },
+      { name: 'Purge line', role: 'process', function: 'The purge line carries process chemical.', motion: 'The valve opens.', components: ['Valve'] },
+    ],
+  });
+  assert.equal(project.narrative.kind, 'process');
+  const html = htmlOf(project);
+  assert.equal(/no guarded motion in this calculation/i.test(html), false);
+  assert.equal(/this calculation/i.test(html), false);
+  assert.match(html, /pressurised process vessel/);
+  assert.match(html, /Depressurise the vessel and lines, and drain them/);
+  assert.equal((html.match(/Crushing points/g) || []).length, 0);
+  const cylinder = emptyProject();
+  cylinder.cad.assemblies = [{ name: 'Press cylinder', kind: 'cylinder', role: 'process', leaf: false, description: 'clamp cylinder' }];
+  const cylinderHtml = htmlOf(cylinder);
+  assert.equal((cylinderHtml.match(/Crushing points/g) || []).length, 1);
 });
 
 test('gear drawings in the corpus are not machine content', { skip: !corpusHas('cad/cadzinho_gears.dxf') }, async () => {

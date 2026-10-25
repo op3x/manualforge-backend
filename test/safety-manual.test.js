@@ -290,8 +290,21 @@ test('brewery, transfer chamber, grfics, and SWaT manuals follow the energy evid
       assert.equal(/no guarded motion/i.test(html), false);
     }
     if (label === 'grfics') {
-      assert.match(html, /pressure|chemical/i);
-      assert.equal(/Crushing points/.test(html), false);
+      assert.equal(/no guarded motion|this calculation/i.test(html), false);
+      assert.match(html, /pressurised process vessel/);
+      assert.match(html, /Isolate the supplies, depressurise the vessel, and drain the lines/);
+      const loto = between(html, 'Energy isolation and lockout/tagout</h2>', 'Residual risks</h2>');
+      const table = loto.slice(loto.indexOf('<table'), loto.indexOf('Generic lockout sequence'));
+      assert.match(table, /Process chemical/);
+      assert.match(table, /Process pressure/);
+      assert.match(table, /Electrical supply/);
+      assert.equal(/<td>Pneumatic<\/td>|<td>Gravity or stored mechanical energy<\/td>|<td>Compressed air<\/td>/.test(table), false);
+      assert.match(loto, /Isolate each energy source/);
+      assert.match(loto, /Depressurise the vessel and lines, and drain them/);
+      assert.equal((html.match(/Crushing points/g) || []).length, 0);
+      project.narrative = { ...(project.narrative || {}), kind: 'calculation' };
+      const relabelled = htmlOf(project);
+      assert.equal(/no guarded motion|this calculation/i.test(relabelled), false);
     }
     if (label === 'transfer') {
       assert.equal(/no guarded motion/i.test(html), false);
