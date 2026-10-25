@@ -53,33 +53,45 @@ function runUnzip(archive, entryName) {
   const archivePath = path.join(dir, 'crafted.acd');
   const scriptPath = path.join(dir, 'check.py');
   fs.writeFileSync(archivePath, archive);
-  fs.writeFileSync(scriptPath, `import json, sys, tempfile
+  fs.writeFileSync(scriptPath, `import json, shutil, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from acd.zip.unzip import Unzip
 archive, marker = sys.argv[2], Path(sys.argv[3])
 if marker.exists():
     marker.unlink()
-dest = Path(tempfile.mkdtemp())
-result = {"raised": False, "escaped": False, "inside": False, "error": ""}
+result = {"raised": False, "escaped": False, "inside": False, "error": "", "dest": ""}
+dest = None
 try:
+    dest = Path(tempfile.mkdtemp())
+    result["dest"] = str(dest)
     Unzip(archive).write_files(dest)
     result["inside"] = any(path.is_file() for path in dest.rglob("*"))
 except Exception as exc:
     result["raised"] = True
     result["error"] = str(exc)
-result["escaped"] = marker.exists()
-print(json.dumps(result))
+finally:
+    result["escaped"] = marker.exists()
+    if dest is not None:
+        shutil.rmtree(dest, ignore_errors=True)
+    print(json.dumps(result))
 `);
   const marker = path.join(os.tmpdir(), 'manualos-acd-escape-marker.txt');
   const python = findPython();
   assert.ok(python, 'python3 is required');
-  const stdout = execFileSync(python, [scriptPath, VENDOR, archivePath, marker], {
-    encoding: 'utf8',
-    env: { PATH: process.env.PATH, PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1' },
-  });
-  fs.rmSync(dir, { recursive: true, force: true });
-  return JSON.parse(stdout);
+  try {
+    const stdout = execFileSync(python, [scriptPath, VENDOR, archivePath, marker], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1' },
+    });
+    const result = JSON.parse(stdout);
+    assert.equal(typeof result.dest, 'string', entryName);
+    assert.equal(result.dest.length > 0, true, entryName);
+    assert.equal(fs.existsSync(result.dest), false, entryName);
+    return result;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 test('ACD runs leave no acd-build directories', async () => {
