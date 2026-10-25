@@ -78,12 +78,44 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
+| `TWILIO_ACCOUNT_SID` | To send escalation SMS | Account SID. Never logged. |
+| `TWILIO_AUTH_TOKEN` | To accept Twilio webhooks | Validates `X-Twilio-Signature`. Voice, SMS, and relay stay **503** until this is set. |
+| `TWILIO_FROM_NUMBER` | To send SMS | E.164 sender for escalation texts. |
+| `SUPPORT_PHONE` | No | E.164 number customers call. Mentioned in HELP and the model prompt. |
+| `ESCALATION_PHONE` | To reach a person | Owner cell, E.164. Dial target and escalation SMS recipient. |
+| `LLM_PROVIDER` | No | `openai`. Any other value keeps the keypad / canned-text fallback. |
+| `LLM_API_KEY` | For live AI answers | OpenAI API key. Missing → `<Gather>` on calls and a canned SMS. |
+| `LLM_MODEL` | No | Default `gpt-4o-mini`. |
+| `LLM_MONTHLY_BUDGET_USD` | No | ManualOS share of the shared OpenAI budget. Default `10` (the pool is $20 across two businesses). |
+| `LLM_USD_PER_1M_INPUT` | No | Default `0.15`, the gpt-4o-mini input rate. Change this if `LLM_MODEL` changes. |
+| `LLM_USD_PER_1M_OUTPUT` | No | Default `0.60`, the gpt-4o-mini output rate. |
+| `PUBLIC_BASE_URL` | Recommended on Railway | Public origin only, for example `https://manualforge-backend-production.up.railway.app`. Signature checks and the `wss://` relay URL use it. |
+| `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, and the budget counter. Railway's disk is ephemeral; mount a volume. |
+| `SUPPORT_INTEGRATOR_ENABLED` | No | `true` mentions Integrator pricing. Default off, because that plan is not launched. |
 
 `STRIPE_PUBLISHABLE_KEY` is not read by this server. Hosted Checkout only needs the URL returned by `/create-checkout-session`. The old `STRIPE_PRICE_ID` variable is unused.
 
 When `FRONTEND_URL` is missing and `NODE_ENV` or `RAILWAY_ENVIRONMENT` is `production`, the process logs a fatal error and exits. In any other environment it logs a warning and still boots.
 
-Browser CORS allows the origin of `FRONTEND_URL` and `https://www.manualos.com`.
+Browser CORS allows the origin of `FRONTEND_URL`, `https://manualos.com`, and `https://www.manualos.com`.
+
+## Phone and SMS support
+
+The support line is off until `TWILIO_AUTH_TOKEN` is set. With the token set and no `LLM_API_KEY`, or once `LLM_MONTHLY_BUDGET_USD` is spent, calls get a keypad (`1` order or manual status, `2` billing, `0` a person) and texts get a short canned reply. Nothing here calls Twilio or OpenAI during manual generation.
+
+Configure the Twilio number (HTTP POST):
+
+- Voice, a call comes in: `https://manualforge-backend-production.up.railway.app/api/twilio/voice`
+- Voice status, call status changes: `https://manualforge-backend-production.up.railway.app/api/twilio/voice/status`
+- Messaging, a message comes in: `https://manualforge-backend-production.up.railway.app/api/twilio/sms`
+
+`PUBLIC_BASE_URL` must be that same origin. The relay URL in the call TwiML is `wss://<that host>/api/twilio/relay`. Handoff, dial result, keypad, and voicemail transcription URLs are returned inside TwiML (`/api/twilio/voice/handoff`, `/api/twilio/voice/dial-status`, `/api/twilio/voice/menu`, `/api/twilio/voice/transcription`).
+
+In the Twilio console, accept the ConversationRelay predictive/generative AI addendum before the live voice path will connect. Leave Messaging Service Advanced Opt-Out off, or STOP may never reach this app; the webhook handles STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT, HELP, INFO, START, and UNSTOP itself. Customer texts are prefixed `ManualOS Support:` and include `Reply STOP to opt out, HELP for help. Msg&data rates may apply.` Inbound texts are stored as opt-in. The website checkbox posts `{ "phone", "consentTextVersion", "source" }` to `POST /api/support/sms-consent`.
+
+Live answers use OpenAI with a 12-turn cap per call, an 8-turn cap per SMS thread, `max_tokens` 200, and a short history. The monthly counter is priced as gpt-4o-mini ($0.15 / 1M input, $0.60 / 1M output) unless the rate variables are set. The assistant does not promise refunds, does not give binding legal or safety advice, refuses card numbers, and does not name third-party brands. Saying "representative", an urgent or safety issue, a legal issue, an angry caller, or a billing dispute over $500 ends the relay and dials `ESCALATION_PHONE` for 25 seconds. No answer, busy, or failed dials a 120-second transcribed voicemail and texts the owner the recording link. Integrator pricing ($249/month, $2,490/year, 25 manuals, white-label, $9 extra) is included only when `SUPPORT_INTEGRATOR_ENABLED` is true.
+
+Opt-outs, consent, SMS threads, and the budget counter are a JSON file under `SUPPORT_DATA_DIR`. Without a Railway volume that file disappears on redeploy, and the counter is only safe on one replica.
 
 ## Stripe setup
 

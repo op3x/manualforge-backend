@@ -18,6 +18,8 @@
         "multer": "^1.4.5-lts.1",
         "puppeteer-core": "^24.43.1",
         "stripe": "^23.0.1",
+        "twilio": "^6.2.0",
+        "ws": "^8.22.0",
         "xlsx": "^0.18.5"
     },
     "devDependencies": {

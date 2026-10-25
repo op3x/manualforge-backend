@@ -26,6 +26,7 @@ const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
+const { mountSupport } = require('./lib/support/http');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
@@ -98,7 +99,17 @@ function logWebhookEvent(event) {
   }
 }
 
-function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {}) {
+function createApp({
+  env = process.env,
+  stripe,
+  anthropic,
+  renderPdf,
+  jobs,
+  supportStore,
+  twilioClient,
+  supportComplete,
+  supportNow,
+} = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const uploadLimit = limits(env).uploadBytes;
@@ -296,6 +307,20 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
       },
     }).catch(next);
   });
+
+  const support = mountSupport(app, {
+    env,
+    store: supportStore,
+    twilioClient,
+    complete: supportComplete,
+    now: supportNow,
+  });
+  const listen = app.listen.bind(app);
+  app.listen = function listenWithRelay(...args) {
+    const server = listen(...args);
+    support.attach(server);
+    return server;
+  };
 
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
