@@ -674,6 +674,12 @@ test('logos are PNG or SVG, size-capped, and program files are not stored', () =
   PNG.copy(oversized);
   assert.throws(() => validateLogo(oversized), (err) => err.status === 400 && /too large/.test(err.message));
   assert.throws(() => normalizeCompanyName(`<${'A'.repeat(10)}>`), (err) => err.status === 400);
+  assert.equal(normalizeCompanyName('中'.repeat(80)), '中'.repeat(80));
+  assert.equal(normalizeCompanyName('😀'.repeat(80)), '😀'.repeat(80));
+  assert.equal(normalizeCompanyName('e\u0301'.repeat(80)), 'e\u0301'.repeat(80));
+  assert.equal(normalizeCompanyName('👨‍👩‍👧‍👦'.repeat(80)), '👨‍👩‍👧‍👦'.repeat(80));
+  assert.throws(() => normalizeCompanyName('😀'.repeat(81)), (err) => err.status === 400 && err.message === 'Company name is too long.');
+  assert.throws(() => normalizeCompanyName('👨‍👩‍👧‍👦'.repeat(81)), (err) => err.status === 400 && err.message === 'Company name is too long.');
   assert.throws(() => accounts.writeBranding('../cus_test123', {}), (err) => err.status === 400);
   assert.equal(fs.existsSync(path.join(dir, '..', 'cus_test123', 'branding.json')), false);
 });
@@ -837,7 +843,67 @@ test('the cover warning stays above the footer on branded and plain covers', asy
   }
 });
 
-function pdfTextRuns(pdf) {
+function multiplyMatrix(left, right) {
+  const [a1, b1, c1, d1, e1, f1] = left;
+  const [a2, b2, c2, d2, e2, f2] = right;
+  return [
+    a1 * a2 + c1 * b2,
+    b1 * a2 + d1 * b2,
+    a1 * c2 + c1 * d2,
+    b1 * c2 + d1 * d2,
+    a1 * e2 + c1 * f2 + e1,
+    b1 * e2 + d1 * f2 + f1,
+  ];
+}
+
+function contentTokens(source) {
+  const tokens = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index];
+    if (ch === '%') {
+      while (index < source.length && source[index] !== '\n') index += 1;
+      continue;
+    }
+    if (/\s/.test(ch)) continue;
+    if (ch === '<') {
+      const end = source.indexOf('>', index);
+      if (end < 0) break;
+      tokens.push(source.slice(index, end + 1));
+      index = end;
+      continue;
+    }
+    if (ch === '(') {
+      let end = index + 1;
+      let depth = 1;
+      while (end < source.length && depth > 0) {
+        if (source[end] === '\\') end += 2;
+        else {
+          if (source[end] === '(') depth += 1;
+          else if (source[end] === ')') depth -= 1;
+          end += 1;
+        }
+      }
+      tokens.push(source.slice(index, end));
+      index = end - 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < source.length && !/[\s<>()[\]/%]/.test(source[end])) end += 1;
+    tokens.push(source.slice(index, end));
+    index = end - 1;
+  }
+  return tokens;
+}
+
+function userPoint(textMatrix, ctm, x, y) {
+  const placed = multiplyMatrix(ctm, textMatrix);
+  return {
+    x: placed[0] * x + placed[2] * y + placed[4],
+    y: placed[1] * x + placed[3] * y + placed[5],
+  };
+}
+
+function pdfHeaderRuns(pdf) {
   const zlib = require('zlib');
   const text = pdf.toString('latin1');
   const runs = [];
@@ -858,38 +924,90 @@ function pdfTextRuns(pdf) {
     } catch {
       inflated = null;
     }
-    if (inflated) {
-      const source = inflated.toString('latin1');
-      const blocks = source.matchAll(/BT([\s\S]*?)ET/g);
-      for (const block of blocks) {
-        const body = block[1];
-        const placed = body.match(/([0-9.\-]+) ([0-9.\-]+) ([0-9.\-]+) ([0-9.\-]+) ([0-9.\-]+) ([0-9.\-]+) Tm/);
-        if (!placed) continue;
-        const advances = [...body.matchAll(/([0-9.\-]+) ([0-9.\-]+) Td/g)].map((item) => Number(item[1]));
-        const glyphs = (body.match(/<[0-9A-F]+>/gi) || []).length;
-        if (glyphs < 4) continue;
-        const x = Number(placed[5]);
-        const y = Number(placed[6]);
-        const endX = x + advances.reduce((sum, width) => sum + width, 0) + 12;
-        runs.push({ x, y, end: endX, glyphs });
-      }
-    }
+    if (inflated) runs.push(...headerRunsInStream(inflated.toString('latin1')));
     cursor = end + 9;
   }
   return runs;
 }
 
-function headerGaps(runs) {
-  const header = runs.filter((run) => run.y > 20 && run.y < 120);
-  const gaps = [];
-  for (const right of header) {
-    if (right.x < 450) continue;
-    for (const left of header) {
-      if (left.x > 200 || Math.abs(left.y - right.y) > 25) continue;
-      gaps.push(right.x - left.end);
+function headerRunsInStream(source) {
+  const tokens = contentTokens(source);
+  const identity = [1, 0, 0, 1, 0, 0];
+  let ctm = identity;
+  const stack = [];
+  let textMatrix = identity;
+  const runs = [];
+  let run = null;
+  const flush = () => {
+    if (!run || run.glyphs < 4) {
+      run = null;
+      return;
+    }
+    const last = run.advances.length ? run.advances[run.advances.length - 1] : 0;
+    runs.push({ x: run.x, y: run.y, end: run.x + run.advances.reduce((sum, width) => sum + width, 0) + last, glyphs: run.glyphs });
+    run = null;
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === 'q') {
+      stack.push(ctm);
+      continue;
+    }
+    if (token === 'Q') {
+      ctm = stack.pop() || identity;
+      continue;
+    }
+    if (token === 'cm' && index >= 6) {
+      const values = tokens.slice(index - 6, index).map(Number);
+      if (values.every((value) => Number.isFinite(value))) ctm = multiplyMatrix(ctm, values);
+      continue;
+    }
+    if (token === 'BT') {
+      textMatrix = identity;
+      continue;
+    }
+    if (token === 'ET') {
+      flush();
+      continue;
+    }
+    if (token === 'Tm' && index >= 6) {
+      const values = tokens.slice(index - 6, index).map(Number);
+      if (values.every((value) => Number.isFinite(value))) textMatrix = values;
+      continue;
+    }
+    if ((token === 'Td' || token === 'TD') && index >= 2) {
+      const tx = Number(tokens[index - 2]);
+      const ty = Number(tokens[index - 1]);
+      if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+      const before = userPoint(textMatrix, ctm, 0, 0);
+      textMatrix = multiplyMatrix([1, 0, 0, 1, tx, ty], textMatrix);
+      const after = userPoint(textMatrix, ctm, 0, 0);
+      if (run) run.advances.push(after.x - before.x);
+      continue;
+    }
+    if (token === 'Tj' && index >= 1 && tokens[index - 1].startsWith('<')) {
+      const origin = userPoint(textMatrix, ctm, 0, 0);
+      if (origin.y < 730 || origin.y > 785) continue;
+      if (!run) run = { x: origin.x, y: origin.y, advances: [], glyphs: 0 };
+      run.glyphs += 1;
     }
   }
-  return gaps;
+  flush();
+  return runs;
+}
+
+function headerLayout(runs) {
+  const gaps = [];
+  const ends = [];
+  for (const right of runs) {
+    if (right.x < 500) continue;
+    for (const left of runs) {
+      if (left.x > 80 || Math.abs(left.y - right.y) > 8) continue;
+      gaps.push(right.x - left.end);
+      ends.push(left.end);
+    }
+  }
+  return { gaps, ends };
 }
 
 test('a long running header stays clear of Rev. A', async () => {
@@ -901,8 +1019,15 @@ test('a long running header stays clear of Rev. A', async () => {
   assert.ok([...fitted].length <= 110);
   const wide = fitHeaderLeft(`${'N'.repeat(80)} · Packaging Conveyor · Operating and Maintenance Manual`);
   assert.equal(wide.endsWith('…'), true);
-  assert.ok([...wide].length < 80);
+  assert.equal(wide.includes('Operating and Maintenance Manual'), false);
+  assert.ok([...wide].length <= 110);
   assert.equal(fitHeaderLeft('North Line · Line · Operating and Maintenance Manual'), 'North Line · Line · Operating and Maintenance Manual');
+  const family = '👨‍👩‍👧‍👦';
+  const emojiHeader = fitHeaderLeft(family.repeat(80));
+  const emojiClusters = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(emojiHeader)].map((part) => part.segment);
+  assert.equal(emojiClusters.at(-1), '…');
+  assert.ok(emojiClusters.length < 81);
+  assert.ok(emojiClusters.slice(0, -1).every((part) => part === family), 'header split an emoji cluster');
 
   const puppeteer = require('puppeteer-core');
   const executablePath = findChrome();
@@ -917,6 +1042,10 @@ test('a long running header stays clear of Rev. A', async () => {
     named: documentBranding({ companyName: company }),
     unbroken: documentBranding({ companyName: 'N'.repeat(80) }),
     plain: null,
+    cjk40: documentBranding({ companyName: '中'.repeat(40) }),
+    cjk80: documentBranding({ companyName: '中'.repeat(80) }),
+    hangul80: documentBranding({ companyName: '한'.repeat(80) }),
+    fullwidth80: documentBranding({ companyName: 'Ａ'.repeat(80) }),
   };
   const browser = await puppeteer.launch(launchOptions(executablePath));
   try {
@@ -934,9 +1063,10 @@ test('a long running header stays clear of Rev. A', async () => {
         displayHeaderFooter: false,
         margin: { top: '0', right: '0', bottom: '0', left: '0' },
       }));
-      const gaps = headerGaps(pdfTextRuns(pdf));
-      assert.ok(gaps.length > 0, `${name} produced no running header`);
-      for (const gap of gaps) assert.ok(gap > 8, `${name} header runs into Rev. A (gap ${gap})`);
+      const layout = headerLayout(pdfHeaderRuns(pdf));
+      assert.ok(layout.gaps.length > 0, `${name} produced no running header`);
+      for (const gap of layout.gaps) assert.ok(gap >= 8, `${name} header runs into Rev. A (gap ${gap}pt)`);
+      for (const end of layout.ends) assert.ok(end <= 561, `${name} header ends at ${end}pt, past the right margin`);
     }
   } finally {
     project.identity.productName = savedName;

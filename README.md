@@ -195,7 +195,7 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
    `https://manualforge-backend-production.up.railway.app/webhook`
    Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
-6. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, and read and update Subscriptions. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. This repository does not create the products, prices, webhook endpoint, or API key.
+6. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, read and update Subscriptions, and Customers read. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. This repository does not create the products, prices, webhook endpoint, or API key.
 
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 
