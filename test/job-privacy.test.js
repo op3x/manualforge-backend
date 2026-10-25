@@ -222,6 +222,45 @@ test('startup sweep keeps recent orphan pdfs for one hour and still drops files 
   }
 });
 
+test('no job file on disk contains the raw session id', () => {
+  const clock = fakeClock(Date.UTC(2026, 6, 1));
+  const dir = tempDir();
+  const sessionId = 'cs_test_retention_session_bearer_value';
+  const customerId = 'cus_retention_customer_bearer';
+  const subscriptionId = 'sub_retention_subscription_bearer';
+  const store = openStore(clock, dir);
+  try {
+    const job = store.create({
+      sessionId,
+      customerId,
+      subscriptionId,
+      nameSource: 'Pump',
+    });
+    store.savePdf(job.id, Buffer.from('%PDF-1.4\n%retention\n'));
+    job.status = 'succeeded';
+    store.persist(job);
+    const names = fs.readdirSync(dir);
+    assert.ok(names.some((name) => name === `${job.id}.json`));
+    assert.ok(names.some((name) => name === `${job.id}.pdf`));
+    for (const name of names) {
+      const text = fs.readFileSync(path.join(dir, name)).toString('utf8');
+      assert.equal(text.includes(sessionId), false, name);
+      assert.equal(text.includes(customerId), false, name);
+      assert.equal(text.includes(subscriptionId), false, name);
+    }
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, `${job.id}.json`), 'utf8'));
+    assert.equal(onDisk.sessionId, undefined);
+    assert.equal(onDisk.customerId, undefined);
+    assert.equal(onDisk.subscriptionId, undefined);
+    assert.equal(onDisk.sessionIdHash, store.hashCredential(sessionId));
+    assert.equal(onDisk.customerIdHash, store.hashCredential(customerId));
+    assert.equal(onDisk.subscriptionIdHash, store.hashCredential(subscriptionId));
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('lookup removes a job once its 24 hour expiry has passed', () => {
   const clock = fakeClock(Date.UTC(2026, 5, 1));
   const dir = tempDir();

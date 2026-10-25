@@ -68,7 +68,7 @@ const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDi
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { emptyGenerationReason, generateManual, machineContentReason } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
-const { logPythonAvailability } = require('./lib/parsers/acd');
+const { logPythonAvailability, sweepStaleAcdTemps } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog, redactSecrets } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
@@ -256,6 +256,7 @@ function createApp({
   const store = jobs || createJobStore({ env });
   logPortalTokenStatus(env);
   loadRevocations(env);
+  sweepStaleAcdTemps();
   const app = express();
   app.disable('x-powered-by');
   // Railway is one proxy hop. req.ip is the client that hop saw, not a header the client can rotate.
