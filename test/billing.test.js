@@ -21,6 +21,10 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.equal(starter.payment_intent_data.metadata.manuals_used, '0');
   assert.equal(starter.payment_intent_data.metadata.plan, 'starter');
   assert.equal(starter.payment_method_types, undefined);
+  assert.equal(starter.custom_text, undefined);
+  assert.equal(starter.automatic_tax, undefined);
+  assert.equal(starter.billing_address_collection, undefined);
+  assert.deepEqual(starter.managed_payments, { enabled: true });
   assert.match(starter.integration_identifier, /manualos_starter_[a-z]{8}$/);
 
   const pro = checkoutParams('pro', env);
@@ -29,8 +33,27 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.deepEqual(pro.metadata, { plan: 'pro' });
   assert.deepEqual(pro.subscription_data.metadata, { plan: 'pro' });
   assert.equal(pro.payment_method_types, undefined);
+  assert.deepEqual(pro.managed_payments, { enabled: true });
+  assert.equal(pro.custom_text, undefined);
   assert.match(pro.integration_identifier, /manualos_pro_[a-z]{8}$/);
   assert.notEqual(starter.integration_identifier, pro.integration_identifier);
+
+  for (const flag of [undefined, '', 'true', '1', 'yes', 'FALSE ']) {
+    const params = checkoutParams('pro', { ...env, MANUALOS_MANAGED_PAYMENTS: flag === 'FALSE ' ? 'FALSE ' : flag });
+    if (flag === 'FALSE ') {
+      assert.equal(params.managed_payments, undefined);
+    } else {
+      assert.deepEqual(params.managed_payments, { enabled: true }, String(flag));
+    }
+  }
+  for (const flag of ['false', 'FALSE', '0', 'off', 'no', ' false ']) {
+    const starterOff = checkoutParams('starter', { ...env, MANUALOS_MANAGED_PAYMENTS: flag });
+    const proOff = checkoutParams('pro', { ...env, MANUALOS_MANAGED_PAYMENTS: flag });
+    assert.equal(starterOff.managed_payments, undefined, flag);
+    assert.equal(proOff.managed_payments, undefined, flag);
+    assert.equal(starterOff.metadata.plan, 'starter');
+    assert.deepEqual(proOff.subscription_data.metadata, { plan: 'pro' });
+  }
 });
 
 test('checkout rejects an unknown plan before talking about prices', () => {

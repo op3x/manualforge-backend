@@ -157,6 +157,7 @@ function createApp({
       }
       const plan = req.body && req.body.plan;
       const params = checkoutParams(plan, env);
+      // #13 order, once #10 is merged: withCheckoutPolicy(withAttribution(params, attribution), { plan, env }).
       const session = await stripeClient.checkout.sessions.create(withCheckoutPolicy(params, { plan, env }));
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');

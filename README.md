@@ -22,7 +22,11 @@ Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mo
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
 
-Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard.
+Managed Payments is on unless `MANUALOS_MANAGED_PAYMENTS` is `false`. Checkout then sends `managed_payments[enabled]=true` and does not send `custom_text`, `billing_address_collection`, `automatic_tax`, `tax_id_collection`, `payment_method_types`, or `consent_collection.terms_of_service`. Link is the merchant of record and collects the billing address and the tax. The pay-button refund line is not shown in that mode.
+
+Set `MANUALOS_MANAGED_PAYMENTS=false` to restore the previous Checkout. That mode requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel.
+
+Either mode sets a PaymentIntent or Subscription description that names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset. Set it to `1` only when Managed Payments is off and a terms of service URL is saved in the Dashboard. With Managed Payments on, the terms checkbox is omitted; save the Terms URL in Checkout settings so Link can show it.
 
 ### `GET /verify-session?session_id=cs_...`
 
@@ -77,7 +81,8 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_PRICE_STARTER` | Yes | Price id for the $39 one-time Starter price |
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
-| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. |
+| `MANUALOS_MANAGED_PAYMENTS` | No | Default on. Checkout sends `managed_payments[enabled]=true`. Set to `false` to disable Managed Payments and restore `custom_text` plus a required billing address. |
+| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required` when Managed Payments is off. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. The checkbox is omitted while Managed Payments is on. |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
@@ -149,9 +154,18 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 
-Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md) only after the account has an active registration. Turning on automatic tax without a registration collects no tax and returns no error.
+Managed Payments (Link as merchant of record) is on by default. The Stripe Node SDK 23 pins API version `2026-09-30.endive`, which is later than the required `2025-03-31.basil`. No preview header is set. Do not also set `automatic_tax`: Managed Payments calculates and withholds tax itself, and that parameter is one of the fields the [update guide](https://docs.stripe.com/payments/managed-payments/update-checkout.md) says to remove.
 
-`CHECKOUT_REQUIRE_TOS` stays unset. Stripe rejects Checkout when `consent_collection.terms_of_service` is `required` and the Dashboard has no terms of service URL. Set the variable to `1` only after that URL is saved. Any other value, including omitting it, leaves the checkbox off.
+Each ManualOS product needs tax code `txcd_10103001` (SaaS, business use) before a Managed Payments session will open. Preview the change, then apply it yourself:
+
+```bash
+node scripts/set-manualos-tax-codes.js
+node scripts/set-manualos-tax-codes.js --apply
+```
+
+The first command only prints. It matches products with `metadata.brand=manualos`, prices whose `lookup_key` starts with `manualos`, and the price ids in `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_PRO`, and the Integrator price variables when those are set. The update writes `tax_code` only. It does not change `metadata` or `lookup_key`.
+
+In the Dashboard, turn on Managed Payments, confirm those tax codes, and save the Terms of service URL under Checkout settings. Link shows its own payment terms. `CHECKOUT_REQUIRE_TOS` stays unset. With Managed Payments on, Checkout does not send `consent_collection.terms_of_service` even if that variable is `1`. Set the variable to `1` only after the Terms URL is saved and only if `MANUALOS_MANAGED_PAYMENTS=false`. Any other value, including omitting it, leaves the checkbox off.
 
 ## Model
 

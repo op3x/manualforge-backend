@@ -42,8 +42,11 @@ function preserved(result, source) {
   assert.equal(result.mode, source.mode);
   assert.equal(result.integration_identifier, source.integration_identifier);
   assert.equal(result.payment_method_types, undefined);
-  assert.equal(result.billing_address_collection, 'required');
-  assert.equal(result.custom_text.submit.message, source.mode === 'subscription' ? SUBSCRIPTION_MESSAGE : PAYMENT_MESSAGE);
+  assert.equal(result.billing_address_collection, undefined);
+  assert.equal(result.custom_text, undefined);
+  assert.equal(result.automatic_tax, undefined);
+  assert.equal(result.tax_id_collection, undefined);
+  assert.deepEqual(result.managed_payments, { enabled: true });
   assert.equal(result.consent_collection, undefined);
 }
 
@@ -82,10 +85,20 @@ test('submit message is the refund rule and stays within 1200 characters', () =>
   assert.equal(SUBSCRIPTION_MESSAGE.length <= 1200, true);
   assert.equal(PAYMENT_MESSAGE.includes('Cancel anytime.'), false);
   assert.equal(SUBSCRIPTION_MESSAGE.endsWith('Cancel anytime.'), true);
-  const starter = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env });
-  const pro = withCheckoutPolicy(checkoutParams('pro', env), { plan: 'pro', env });
+  const legacy = { ...env, MANUALOS_MANAGED_PAYMENTS: 'false' };
+  const starter = withCheckoutPolicy(checkoutParams('starter', legacy), { plan: 'starter', env: legacy });
+  const pro = withCheckoutPolicy(checkoutParams('pro', legacy), { plan: 'pro', env: legacy });
   assert.equal(starter.custom_text.submit.message, PAYMENT_MESSAGE);
   assert.equal(pro.custom_text.submit.message, SUBSCRIPTION_MESSAGE);
+  assert.equal(starter.billing_address_collection, 'required');
+  assert.equal(starter.managed_payments, undefined);
+  assert.equal(pro.managed_payments, undefined);
+
+  const on = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env });
+  assert.equal(on.custom_text, undefined);
+  assert.equal(on.billing_address_collection, undefined);
+  assert.deepEqual(on.managed_payments, { enabled: true });
+  assert.equal(on.payment_intent_data.description, STARTER_DESCRIPTION);
 });
 
 test('starter description uses STARTER_CREDITS and pluralizes', () => {
@@ -230,7 +243,8 @@ test('descriptions name the plan without calling the product AI', () => {
 });
 
 test('policy merges nested checkout data and does not overwrite metadata', () => {
-  const starter = checkoutParams('starter', env);
+  const legacyEnv = { ...env, MANUALOS_MANAGED_PAYMENTS: 'false' };
+  const starter = checkoutParams('starter', legacyEnv);
   starter.customer_creation = 'always';
   starter.payment_intent_data.transfer_group = 'grp_starter';
   starter.payment_intent_data.metadata.credit_hold = 'hold_1';
@@ -238,7 +252,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
     submit: { message: 'old', extra: 'keep' },
     shipping_address: { message: 'Ship to the plant.' },
   };
-  const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: '0' } });
+  const result = withCheckoutPolicy(starter, { plan: 'starter', env: { ...legacyEnv, CHECKOUT_REQUIRE_TOS: '0' } });
   assert.equal(result.customer_creation, 'always');
   assert.equal(result.payment_intent_data.transfer_group, 'grp_starter');
   assert.equal(result.payment_intent_data.description, STARTER_DESCRIPTION);
@@ -250,32 +264,77 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   assert.equal(result.custom_text.submit.extra, 'keep');
   assert.deepEqual(result.custom_text.shipping_address, { message: 'Ship to the plant.' });
   assert.equal(result.consent_collection, undefined);
+  assert.equal(result.managed_payments, undefined);
+  assert.equal(starter.payment_intent_data.transfer_group, 'grp_starter');
 
-  const pro = checkoutParams('pro', env);
+  const pro = checkoutParams('pro', legacyEnv);
   pro.subscription_data.description = 'replace me';
   pro.subscription_data.trial_period_days = 0;
   pro.consent_collection = { promotions: 'auto' };
-  const off = withCheckoutPolicy(pro, { plan: 'pro', env: {} });
+  const off = withCheckoutPolicy(pro, { plan: 'pro', env: legacyEnv });
   assert.equal(off.subscription_data.description, PRO_MONTHLY);
   assert.equal(off.subscription_data.trial_period_days, 0);
   assert.deepEqual(off.subscription_data.metadata, { plan: 'pro' });
   assert.deepEqual(off.consent_collection, { promotions: 'auto' });
 
-  const on = withCheckoutPolicy(pro, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
+  const on = withCheckoutPolicy(pro, { plan: 'pro', env: { ...legacyEnv, CHECKOUT_REQUIRE_TOS: '1' } });
   assert.deepEqual(on.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
   assert.deepEqual(pro.consent_collection, { promotions: 'auto' });
+
+  const mp = checkoutParams('pro', env);
+  mp.metadata.brand = 'manualos';
+  mp.subscription_data.metadata.brand = 'manualos';
+  mp.consent_collection = { promotions: 'auto', terms_of_service: 'required' };
+  mp.custom_text = { submit: { message: 'gone' } };
+  mp.billing_address_collection = 'required';
+  mp.automatic_tax = { enabled: true };
+  mp.tax_id_collection = { enabled: true };
+  mp.payment_method_types = ['card'];
+  mp.subscription_data.invoice_settings = { description: 'nope' };
+  mp.subscription_data.trial_period_days = 0;
+  const stripped = withCheckoutPolicy(mp, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
+  assert.equal(stripped.custom_text, undefined);
+  assert.equal(stripped.billing_address_collection, undefined);
+  assert.equal(stripped.automatic_tax, undefined);
+  assert.equal(stripped.tax_id_collection, undefined);
+  assert.equal(stripped.payment_method_types, undefined);
+  assert.equal(stripped.subscription_data.invoice_settings, undefined);
+  assert.equal(stripped.subscription_data.trial_period_days, 0);
+  assert.equal(stripped.subscription_data.description, PRO_MONTHLY);
+  assert.deepEqual(stripped.consent_collection, { promotions: 'auto' });
+  assert.deepEqual(stripped.managed_payments, { enabled: true });
+  assert.equal(stripped.metadata.brand, 'manualos');
+  assert.equal(stripped.subscription_data.metadata.brand, 'manualos');
+  assert.equal(stripped.subscription_data.metadata.plan, 'pro');
+  assert.deepEqual(mp.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
+  assert.equal(mp.custom_text.submit.message, 'gone');
 });
 
-test('terms of service consent is sent only when CHECKOUT_REQUIRE_TOS is 1', () => {
-  const starter = checkoutParams('starter', env);
+test('terms of service consent is sent only when Managed Payments is off and CHECKOUT_REQUIRE_TOS is 1', () => {
+  const legacy = { ...env, MANUALOS_MANAGED_PAYMENTS: 'false' };
+  const starter = checkoutParams('starter', legacy);
   for (const flag of [undefined, '', '0', 'true', 'yes', '01']) {
-    const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: flag } });
+    const result = withCheckoutPolicy(starter, {
+      plan: 'starter',
+      env: { ...legacy, CHECKOUT_REQUIRE_TOS: flag },
+    });
     assert.equal(result.consent_collection, undefined, String(flag));
+    assert.equal(result.managed_payments, undefined);
   }
   for (const flag of ['1', ' 1 ', '1\n']) {
-    const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: flag } });
+    const result = withCheckoutPolicy(starter, {
+      plan: 'starter',
+      env: { ...legacy, CHECKOUT_REQUIRE_TOS: flag },
+    });
     assert.deepEqual(result.consent_collection, { terms_of_service: 'required' });
   }
+  const blocked = withCheckoutPolicy(checkoutParams('starter', env), {
+    plan: 'starter',
+    env: { CHECKOUT_REQUIRE_TOS: '1' },
+  });
+  assert.equal(blocked.consent_collection, undefined);
+  assert.equal(blocked.custom_text, undefined);
+  assert.deepEqual(blocked.managed_payments, { enabled: true });
 });
 
 test('checkout policy and attribution compose in either order', () => {
@@ -293,11 +352,11 @@ test('checkout policy and attribution compose in either order', () => {
     assert.deepEqual(policyThenAttribution, attributionThenPolicy);
     assert.equal(policyThenAttribution.metadata.plan, plan);
     assert.equal(policyThenAttribution.metadata.attr_utm_source, 'newsletter');
-    assert.equal(policyThenAttribution.billing_address_collection, 'required');
-    assert.equal(
-      policyThenAttribution.custom_text.submit.message,
-      plan === 'pro' ? SUBSCRIPTION_MESSAGE : PAYMENT_MESSAGE,
-    );
+    assert.equal(policyThenAttribution.billing_address_collection, undefined);
+    assert.equal(policyThenAttribution.custom_text, undefined);
+    assert.deepEqual(policyThenAttribution.managed_payments, { enabled: true });
+    assert.equal(policyThenAttribution.automatic_tax, undefined);
+    assert.equal(policyThenAttribution.payment_method_types, undefined);
     assert.deepEqual(policyThenAttribution.line_items, base.line_items);
     assert.equal(policyThenAttribution.success_url, base.success_url);
     if (plan === 'starter') {
@@ -408,12 +467,13 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
   for (const entry of cases) {
     const result = withCheckoutPolicy(entry.source, { plan: entry.plan, env });
     const expected = structuredClone(entry.source);
-    expected.billing_address_collection = 'required';
-    expected.custom_text = { submit: { message: entry.message } };
+    expected.managed_payments = { enabled: true };
     expected[entry.slot] = { ...expected[entry.slot], description: entry.description };
     assert.deepEqual(result, expected);
     assert.equal(result.consent_collection, undefined);
-    assert.equal(result.custom_text.submit.message.includes('Cancel anytime.'), entry.source.mode === 'subscription');
+    assert.equal(result.custom_text, undefined);
+    assert.equal(result.billing_address_collection, undefined);
+    assert.equal(entry.message.includes('Cancel anytime.'), entry.source.mode === 'subscription');
     for (const key of Object.keys(entry.source.metadata)) {
       if (!key.includes('utm_')) continue;
       assert.equal(result.metadata[key], entry.source.metadata[key], key);
@@ -529,9 +589,48 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
         body: JSON.stringify({ plan: 'starter' }),
       });
       assert.equal(paid.status, 200);
-      assert.equal(tosCalls[0].consent_collection.terms_of_service, 'required');
+      assert.equal(tosCalls[0].consent_collection, undefined);
+      assert.equal(tosCalls[0].custom_text, undefined);
+      assert.deepEqual(tosCalls[0].managed_payments, { enabled: true });
       assert.equal(tosCalls[0].payment_intent_data.metadata.manuals_used, '0');
       assert.equal(String(process.env.CHECKOUT_REQUIRE_TOS || '').trim() === '1', false);
+
+      const legacyCalls = [];
+      const legacyEnv = { ...tosEnv, MANUALOS_MANAGED_PAYMENTS: 'false' };
+      const legacyApp = createApp({
+        env: legacyEnv,
+        stripe: {
+          checkout: {
+            sessions: {
+              create: async (params) => {
+                legacyCalls.push(params);
+                return { id: 'cs_legacy', url: 'https://checkout.stripe.com/c/pay/cs_legacy' };
+              },
+            },
+          },
+        },
+        anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
+      });
+      const legacyServer = legacyApp.listen(0, '127.0.0.1');
+      await new Promise((resolve, reject) => {
+        legacyServer.once('listening', resolve);
+        legacyServer.once('error', reject);
+      });
+      try {
+        const legacyBase = `http://127.0.0.1:${legacyServer.address().port}`;
+        const legacyPaid = await fetch(legacyBase + '/create-checkout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: 'pro' }),
+        });
+        assert.equal(legacyPaid.status, 200);
+        assert.equal(legacyCalls[0].consent_collection.terms_of_service, 'required');
+        assert.equal(legacyCalls[0].managed_payments, undefined);
+        assert.equal(legacyCalls[0].custom_text.submit.message.endsWith('Cancel anytime.'), true);
+        assert.equal(legacyCalls[0].billing_address_collection, 'required');
+      } finally {
+        await new Promise((resolve) => legacyServer.close(resolve));
+      }
     } finally {
       await new Promise((resolve) => tosServer.close(resolve));
     }
