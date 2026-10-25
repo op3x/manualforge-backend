@@ -63,8 +63,17 @@ test('STEP assembly records bodies, units, and part-number names', { skip: !corp
   assert.ok(frame.cad.bom.some((part) => part.qty > 1));
   assert.equal(frame.cad.bom.some((part) => /COMPLETE FRAME ASY/i.test(part.partNumber) || /COMPLETE FRAME ASY/i.test(part.description)), false);
   assert.equal(frame.cad.bom.some((part) => /NEEDS INPUT/.test(part.description)), false);
+});
+
+// The transfer chamber (CERN-OHL-P) and NEMA 23 (CC-BY-3.0) STEP files are not
+// committed; these tests run only when MANUALOS_CORPUS (or the private store)
+// provides the full corpus.
+test('STEP geometry records inch units', { skip: !corpusHas('cad/nist_ftc_08_asme1_rc.stp') }, async () => {
   const inch = await load('cad/nist_ftc_08_asme1_rc.stp');
   assert.equal(inch.cad.lengthUnit, 'inch');
+});
+
+test('STEP product name is corrected from the file name', { skip: !corpusHas('cad/freecadlib_NEMA23_stepper.step') }, async () => {
   const motor = await load('cad/freecadlib_NEMA23_stepper.step');
   assert.match(motor.identity.productName, /NEMA 23/);
   assert.match(motor.warnings.join(' '), /NEMA 23/);

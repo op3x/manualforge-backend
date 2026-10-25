@@ -18,13 +18,10 @@
   ],
   "supporting_files": [
     "plc/acd_ACDTestsWithAOI.L5X",
-    "plc/emulator_Plc_emulator.L5X",
     "plc/brewery_Cooker_1_AutoLogic_Program.L5X",
     "plc/acd_CuteLogix.ACD",
-    "plc/grfics_simplified_te_plcopen.xml",
     "cad/cadzinho_title_a1.dxf",
-    "cad/nist_ftc_08_asme1_rc.stp",
-    "cad/freecadlib_NEMA23_stepper.step",
-    "cad/creator_transfer_chamber_COMPLETE_FRAME_ASY.stp"
-  ]
+    "cad/nist_ftc_08_asme1_rc.stp"
+  ],
+  "notes": "Only MIT, Apache-2.0, public-domain and original ManualOS files are committed. See NOTICE.md. GPL, CC-BY and CERN-OHL files are kept out of the repo; tests that need them skip unless MANUALOS_CORPUS points at the full private corpus."
 }
