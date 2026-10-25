@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { parseUploads } = require('../lib/parsers');
-const { findPython, logPythonAvailability } = require('../lib/parsers/acd');
+const { ACD_TEMP_MAX_AGE_MS, findPython, logPythonAvailability, sweepStaleAcdTemps } = require('../lib/parsers/acd');
 const { corpusHas, corpusRoot } = require('./corpus-env');
 
 const VENDOR = path.join(__dirname, '../third_party/python');
@@ -122,6 +122,38 @@ test('an archive entry cannot write outside its output directory', () => {
     assert.equal(result.raised, true, name);
     assert.equal(result.escaped, false, name);
     assert.equal(fs.existsSync(path.join(os.tmpdir(), 'manualos-acd-escape-marker.txt')), false, name);
+  }
+});
+
+test('startup sweep removes ACD temp folders older than one hour', () => {
+  assert.equal(ACD_TEMP_MAX_AGE_MS, 60 * 60 * 1000);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-acd-sweep-'));
+  const oldDir = path.join(root, 'manualos-acd-old');
+  const freshDir = path.join(root, 'manualos-acd-fresh');
+  const otherDir = path.join(root, 'other-temp');
+  fs.mkdirSync(oldDir);
+  fs.writeFileSync(path.join(oldDir, 'upload.ACD'), 'project');
+  fs.mkdirSync(freshDir);
+  fs.mkdirSync(otherDir);
+  fs.writeFileSync(path.join(root, 'manualos-acd-not-a-dir'), 'leave');
+  const now = Date.now();
+  const oldStamp = new Date(now - ACD_TEMP_MAX_AGE_MS - 1000);
+  fs.utimesSync(oldDir, oldStamp, oldStamp);
+  try {
+    assert.equal(sweepStaleAcdTemps({ directory: root, now }), 1);
+    assert.equal(fs.existsSync(oldDir), false);
+    assert.equal(fs.existsSync(freshDir), true);
+    assert.equal(fs.existsSync(otherDir), true);
+    assert.equal(fs.existsSync(path.join(root, 'manualos-acd-not-a-dir')), true);
+    const kept = path.join(root, 'manualos-acd-within-hour');
+    fs.mkdirSync(kept);
+    const keptStamp = new Date(now - ACD_TEMP_MAX_AGE_MS + 5000);
+    fs.utimesSync(kept, keptStamp, keptStamp);
+    assert.equal(sweepStaleAcdTemps({ directory: root, now }), 0);
+    assert.equal(fs.existsSync(kept), true);
+    assert.equal(fs.existsSync(freshDir), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
