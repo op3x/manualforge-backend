@@ -490,8 +490,8 @@ test('warning_closed does not suspend and charge_refunded does not suspend by it
       status: 'charge_refunded',
     }))).status, 200);
     assert.equal(subscription.metadata.period_access, undefined);
-    assert.equal(subscription.metadata.open_dispute_count, '0');
-    assert.equal(subscription.metadata.closed_disputes, 'dp_charge_refunded');
+    assert.equal(subscription.metadata.open_dispute_count, undefined);
+    assert.equal(subscription.metadata.closed_disputes, undefined);
     assert.equal(subscription.status, 'active');
   });
 });

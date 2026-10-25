@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createApp } = require('../server');
-const { clearGenerationStarted, markGenerationStarted } = require('../lib/delivery');
+const { clearGenerationStarted, markGenerationStarted, refundCheck } = require('../lib/delivery');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 
 test.after(() => {
@@ -353,4 +353,141 @@ test('pro stamps the current period charge and skips a mismatched period', async
     assert.equal(updates.filter((row) => row.metadata.first_manual_at).length, 1);
     assert.equal(charges.ch_old.metadata.first_manual_at, undefined);
   });
+});
+
+function recentStarter(paid) {
+  const created = Math.floor(Date.now() / 1000);
+  paid.stripe.paymentIntents.retrieve = async () => ({ id: 'pi_1', created, metadata: { ...paid.meta } });
+  return created;
+}
+
+test('G3 a generation marker older than 15 minutes does not block a refund', async () => {
+  const paid = starterStripe();
+  recentStarter(paid);
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  const started = Date.parse(paid.meta.generation_started_at);
+  const blocked = await refundCheck(paid.stripe, 'pi_1', { now: started + (15 * 60 * 1000) });
+  assert.equal(blocked.purchases[0].refund_eligible, false);
+  assert.match(blocked.purchases[0].reason, /generation in progress since /);
+  const open = await refundCheck(paid.stripe, 'pi_1', { now: started + (15 * 60 * 1000) + 1000 });
+  assert.equal(open.purchases[0].refund_eligible, true);
+  const later = await refundCheck(paid.stripe, 'pi_1', { now: started + (2 * 60 * 60 * 1000) });
+  assert.equal(later.purchases[0].refund_eligible, true);
+  assert.equal(later.purchases[0].reason.startsWith('eligible until '), true);
+  assert.equal(paid.meta.generation_in_progress, '1');
+});
+
+test('a stale generation count resets to 1 instead of incrementing', async () => {
+  const paid = starterStripe();
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  const stale = new Date(Date.now() - (16 * 60 * 1000)).toISOString();
+  paid.meta.generation_started_at = stale;
+  paid.meta.generation_in_progress = '4';
+  const started = await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(paid.meta.generation_in_progress, '1');
+  assert.equal(paid.meta.generation_started_at, started);
+  assert.notEqual(started, stale);
+  const again = await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(again, started);
+  assert.equal(paid.meta.generation_in_progress, '2');
+});
+
+test('resetOrphans replaces a leftover count instead of incrementing it', async () => {
+  const paid = starterStripe();
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(paid.meta.generation_in_progress, '2');
+  const reset = await markGenerationStarted(paid.stripe, access, 'cs_test_starter', { resetOrphans: true });
+  assert.equal(paid.meta.generation_in_progress, '1');
+  assert.equal(paid.meta.generation_started_at, reset);
+});
+
+test('G4 a crashed run plus a failed retry clears the generation count', async () => {
+  const paid = starterStripe();
+  recentStarter(paid);
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(paid.meta.generation_in_progress, '1');
+  await withServer(createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: anthropic(),
+    renderPdf: async () => {
+      throw new Error('render failed');
+    },
+  }), async (base) => {
+    const createdJob = await postJob(base, 'line.L5X', L5X);
+    assert.equal(createdJob.status, 202);
+    const done = await waitJob(base, (await createdJob.json()).id);
+    assert.equal(done.status, 'failed');
+  });
+  assert.equal(paid.meta.generation_in_progress, undefined);
+  assert.equal(paid.meta.generation_started_at, undefined);
+  const later = await refundCheck(paid.stripe, 'pi_1', { now: Date.now() + (3 * 24 * 60 * 60 * 1000) });
+  assert.equal(later.purchases[0].refund_eligible, true);
+});
+
+test('G5 a failed clear is retried and then ignored after 15 minutes', async () => {
+  const paid = starterStripe();
+  recentStarter(paid);
+  const original = paid.stripe.paymentIntents.update;
+  let clears = 0;
+  paid.stripe.paymentIntents.update = async (id, params) => {
+    const metadata = params.metadata || {};
+    if ('generation_in_progress' in metadata && metadata.generation_in_progress !== '1' && !metadata.first_manual_at) {
+      clears += 1;
+      throw new Error('rate limited sk_test_secretvalue');
+    }
+    return original(id, params);
+  };
+  const errors = [];
+  const previous = console.error;
+  console.error = (...args) => errors.push(args.map((arg) => String(arg)).join(' '));
+  try {
+    await withServer(createApp({
+      env: env(),
+      stripe: paid.stripe,
+      anthropic: anthropic(),
+      renderPdf: async () => {
+        throw new Error('render failed');
+      },
+    }), async (base) => {
+      const createdJob = await postJob(base, 'line.L5X', L5X);
+      assert.equal(createdJob.status, 202);
+      const done = await waitJob(base, (await createdJob.json()).id);
+      assert.equal(done.status, 'failed');
+    });
+  } finally {
+    console.error = previous;
+  }
+  assert.equal(clears, 3);
+  assert.equal(paid.meta.generation_in_progress, '1');
+  const logged = errors.join('\n');
+  assert.match(logged, /Generation progress clear failed after 3 attempts/);
+  assert.match(logged, /starter/);
+  assert.match(logged, /rate limited \[redacted\]/);
+  assert.equal(logged.includes('sk_test_secretvalue'), false);
+  const later = await refundCheck(paid.stripe, 'pi_1', { now: Date.now() + (24 * 60 * 60 * 1000) });
+  assert.equal(later.purchases[0].refund_eligible, true);
+});
+
+test('a clear write succeeds on a later attempt', async () => {
+  const paid = starterStripe();
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  const original = paid.stripe.paymentIntents.update;
+  let clears = 0;
+  paid.stripe.paymentIntents.update = async (id, params) => {
+    if (params.metadata && params.metadata.generation_in_progress === '') {
+      clears += 1;
+      if (clears === 1) throw new Error('rate limited');
+    }
+    return original(id, params);
+  };
+  await clearGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(clears, 2);
+  assert.equal(Object.hasOwn(paid.meta, 'generation_in_progress'), false);
+  assert.equal(Object.hasOwn(paid.meta, 'generation_started_at'), false);
 });
