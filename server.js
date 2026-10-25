@@ -14,6 +14,7 @@ const {
   assertCanGenerate,
   checkoutParams,
   isStripeNotFound,
+  overageCheckoutParams,
   publicAccess,
   recordStarterManual,
   refundStarterCredit,
@@ -21,6 +22,16 @@ const {
   verifyCheckoutSession,
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
+const {
+  applyWebhookEvent,
+  assertOverageConfigured,
+  refundIntegratorCredit,
+  reserveIntegratorCredit,
+} = require('./lib/integrator');
+const { createAccountStore } = require('./lib/accounts/store');
+const { documentBranding, normalizeCompanyName, publicBranding, validateLogo } = require('./lib/branding');
+const { LOGO_MAX_BYTES } = require('./lib/config');
+const { exposed } = require('./lib/errors');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -28,18 +39,29 @@ const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
 const { mountSupport } = require('./lib/support/http');
+
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
   return new Stripe(String(key).trim());
 }
 
+function logSafe(value) {
+  return String(redactCustomerLog(value))
+    .replace(/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]+/g, '[redacted]')
+    .replace(/\bwhsec_[A-Za-z0-9]+/g, '[redacted]');
+}
+
 function sendError(res, err) {
   if (err && err.expose) {
-    if (err.logMessage) console.error(redactCustomerLog(err.logMessage));
-    return res.status(err.status || 500).json({ error: err.message });
+    if (err.logMessage) console.error(logSafe(err.logMessage));
+    const body = { error: err.message };
+    if (err.details && typeof err.details === 'object') {
+      for (const [key, value] of Object.entries(err.details)) body[key] = value;
+    }
+    return res.status(err.status || 500).json(body);
   }
-  console.error(redactCustomerLog(err && err.stack ? err.stack : err));
+  console.error(logSafe(err && err.stack ? err.stack : err));
   return res.status(500).json({ error: 'Internal server error' });
 }
 
@@ -106,6 +128,7 @@ function createApp({
   anthropic,
   renderPdf,
   jobs,
+  accounts,
   supportStore,
   twilioClient,
   supportComplete,
@@ -116,7 +139,9 @@ function createApp({
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
+  const brandingUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: LOGO_MAX_BYTES, files: 1 } });
   const store = jobs || createJobStore({ env });
+  const accountStore = accounts || createAccountStore({ env });
   const app = express();
   app.disable('x-powered-by');
   // Railway is one proxy hop. req.ip is the client that hop saw, not a header the client can rotate.
@@ -128,10 +153,47 @@ function createApp({
       return callback(null, false);
     },
   }));
+  function loadBranding(access) {
+    if (!access || access.plan !== 'integrator' || !access.customerId) return null;
+    try {
+      return documentBranding(accountStore.readBranding(access.customerId));
+    } catch (err) {
+      console.error(logSafe(err && err.expose ? err.message : 'Integrator branding could not be read'));
+      return null;
+    }
+  }
+
+  async function releaseCredit(credit) {
+    if (!credit || credit.kind !== 'integrator') return null;
+    return refundIntegratorCredit(stripeClient, credit.subscriptionId, credit.token);
+  }
+
+  async function refundFailedJob(credit) {
+    const failures = [];
+    try {
+      await releaseCredit(credit);
+    } catch (err) {
+      failures.push(err);
+    }
+    try {
+      const starterCredit = credit && credit.kind !== 'integrator' ? credit : null;
+      await refundStarterCredit(
+        stripeClient,
+        starterCredit && starterCredit.paymentIntentId,
+        starterCredit && starterCredit.token,
+      );
+    } catch (err) {
+      failures.push(err);
+    }
+    for (const err of failures) {
+      console.error(logSafe(err && err.message ? err.message : 'Credit refund failed'));
+    }
+  }
+
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: Boolean(anthropicClient) });
   });
-  app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const secret = env.STRIPE_WEBHOOK_SECRET;
     if (!stripeClient || !secret) {
       console.error('Webhook rejected: STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET is not set');
@@ -141,8 +203,15 @@ function createApp({
     try {
       event = stripeClient.webhooks.constructEvent(req.body, req.headers['stripe-signature'], secret);
     } catch (err) {
-      console.error('Webhook signature verification failed:', err && err.message ? err.message : err);
+      console.error(logSafe(`Webhook signature verification failed: ${err && err.message ? err.message : err}`));
       return res.status(400).send('Webhook signature verification failed');
+    }
+    try {
+      await applyWebhookEvent(stripeClient, event, env);
+    } catch (err) {
+      const detail = err && err.stack ? err.stack : (err && err.message ? err.message : err);
+      console.error(logSafe(`Webhook handler failed (${event && event.type ? event.type : 'unknown'}): ${detail}`));
+      return res.status(500).json({ error: 'Webhook handler failed' });
     }
     logWebhookEvent(event);
     return res.json({ received: true });
@@ -151,12 +220,39 @@ function createApp({
 
   app.post('/create-checkout-session', async (req, res) => {
     try {
-      if (!stripeClient) {
-        console.error('STRIPE_SECRET_KEY is not set');
-        return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      const body = req.body || {};
+      const plan = body.plan;
+      let params;
+      if (plan === 'integrator_overage') {
+        const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
+        assertOverageConfigured(env);
+        if (!stripeClient) {
+          console.error('STRIPE_SECRET_KEY is not set');
+          return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+        }
+        if (!sessionId) throw exposed(400, 'session_id is required');
+        let access;
+        try {
+          access = await verifyCheckoutSession(stripeClient, sessionId, env);
+        } catch (err) {
+          if (isStripeNotFound(err)) throw exposed(402, 'Payment required. This checkout session is not valid.');
+          throw err;
+        }
+        if (!access.valid || access.plan !== 'integrator' || !access.subscriptionId) {
+          throw exposed(402, 'Payment required. This checkout session is not an active Integrator plan.');
+        }
+        params = overageCheckoutParams(env, {
+          subscriptionId: access.subscriptionId,
+          customerId: access.customerId,
+          sessionId,
+        });
+      } else {
+        params = checkoutParams(plan, env, { interval: body.interval });
+        if (!stripeClient) {
+          console.error('STRIPE_SECRET_KEY is not set');
+          return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+        }
       }
-      const plan = req.body && req.body.plan;
-      const params = checkoutParams(plan, env);
       const session = await stripeClient.checkout.sessions.create(withCheckoutPolicy(params, { plan, env }));
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');
@@ -202,20 +298,17 @@ function createApp({
       throw err;
     }
     let credit = null;
-    if (reserveAtStart && access.plan === 'starter') {
+    if (access.plan === 'integrator') {
+      credit = await reserveIntegratorCredit(stripeClient, access.subscriptionId, env);
+    } else if (reserveAtStart && access.plan === 'starter') {
       credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env);
     }
+    const branding = loadBranding(access);
     try {
-      const result = await respond(access, files, credit, project);
+      const result = await respond(access, files, credit, project, branding);
       return result;
     } catch (err) {
-      if (credit) {
-        try {
-          await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
-        } catch (refundErr) {
-          console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
-        }
-      }
+      await refundFailedJob(credit);
       throw err;
     }
   }
@@ -223,7 +316,7 @@ function createApp({
   app.post('/jobs', upload.fields([{ name: 'file', maxCount: 25 }, { name: 'files', maxCount: 25 }]), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: true,
-      respond: async (access, files, credit, project) => {
+      respond: async (access, files, credit, project, branding) => {
         const job = store.create();
         res.status(202).json(publicJob(job));
         job.status = 'running';
@@ -236,6 +329,7 @@ function createApp({
             anthropic: anthropicClient,
             env,
             renderPdf,
+            branding,
             onProgress(stage, percent, message) {
               job.status = 'running';
               job.progress = { stage, percent, message };
@@ -247,14 +341,8 @@ function createApp({
           job.status = 'succeeded';
           job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
         } catch (err) {
-          if (credit) {
-            try {
-              await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
-            } catch (refundErr) {
-              console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
-            }
-          }
-          console.error(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message)));
+          await refundFailedJob(credit);
+          console.error(logSafe(err && err.logMessage ? err.logMessage : (err && err.message)));
           job.status = 'failed';
           job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
           job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
@@ -289,7 +377,7 @@ function createApp({
   app.post('/generate-manual', upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
-      respond: async (access, files, credit, project) => {
+      respond: async (access, files, credit, project, branding) => {
         const result = await generateManual({
           files,
           project,
@@ -297,6 +385,7 @@ function createApp({
           anthropic: anthropicClient,
           env,
           renderPdf,
+          branding,
         });
         if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
         res.set({
@@ -310,6 +399,58 @@ function createApp({
         res.send(result.pdf);
       },
     }).catch(next);
+  });
+
+  async function requireIntegrator(req) {
+    const fromQuery = req.query && typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    const sessionId = readSessionId(req) || fromQuery;
+    if (!sessionId) throw exposed(400, 'session_id is required');
+    if (!stripeClient) {
+      console.error('STRIPE_SECRET_KEY is not set');
+      throw exposed(500, 'Checkout is temporarily unavailable.', 'STRIPE_SECRET_KEY is not set');
+    }
+    let access;
+    try {
+      access = await verifyCheckoutSession(stripeClient, sessionId, env);
+    } catch (err) {
+      if (isStripeNotFound(err)) throw exposed(402, 'Payment required. This checkout session is not valid.');
+      throw err;
+    }
+    if (!access.valid || access.plan !== 'integrator' || !access.customerId) {
+      throw exposed(402, 'Payment required. This checkout session is not an active Integrator plan.');
+    }
+    return access;
+  }
+
+  app.get('/integrator/branding', async (req, res) => {
+    try {
+      const access = await requireIntegrator(req);
+      return res.json(publicBranding(accountStore.readBranding(access.customerId)));
+    } catch (err) {
+      return sendError(res, err);
+    }
+  });
+
+  function saveBranding(req, res) {
+    Promise.resolve().then(async () => {
+      const access = await requireIntegrator(req);
+      const companyName = normalizeCompanyName(req.body && req.body.company_name);
+      const logo = req.file ? validateLogo(req.file.buffer) : undefined;
+      if (companyName === undefined && logo === undefined) throw exposed(400, 'Provide a company name or a logo.');
+      const saved = accountStore.writeBranding(access.customerId, { companyName, logo });
+      return res.json(publicBranding(saved));
+    }).catch((err) => sendError(res, err));
+  }
+
+  app.post('/integrator/branding', (req, res, next) => {
+    const type = String(req.headers['content-type'] || '');
+    if (type.includes('multipart/form-data')) {
+      return brandingUpload.single('logo')(req, res, (err) => {
+        if (err) return next(err);
+        return saveBranding(req, res);
+      });
+    }
+    return saveBranding(req, res);
   });
 
   const support = mountSupport(app, {
@@ -330,9 +471,12 @@ function createApp({
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err && err.expose) return sendError(res, err);
-    console.error(redactCustomerLog(err && err.stack ? err.stack : err));
+    console.error(logSafe(err && err.stack ? err.stack : err));
     if (err && err.name === 'MulterError') {
-      const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
+      const logoRoute = req.path === '/integrator/branding';
+      const message = err.code === 'LIMIT_FILE_SIZE'
+        ? (logoRoute ? 'Logo file is too large.' : 'File is too large.')
+        : 'Upload failed.';
       return res.status(400).json({ error: message });
     }
     if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body.' });
