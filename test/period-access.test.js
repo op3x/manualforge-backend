@@ -5,6 +5,7 @@ const path = require('node:path');
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 const { PRO_DISPUTE_LOST_MESSAGE, PRO_REFUNDED_MESSAGE, PRO_SUSPENDED_MESSAGE } = require('../lib/billing');
+const { restoresAccess } = require('../lib/dispute-outcome');
 
 test.after(() => {
   removeTestJobDirectories();
@@ -463,6 +464,13 @@ test('a refund of an earlier period does not block the current one', async () =>
     const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
     assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null });
   });
+});
+
+test('restoresAccess is true only for a won dispute', () => {
+  assert.equal(restoresAccess('won'), true);
+  for (const status of ['warning_closed', 'prevented', 'lost', 'charge_refunded', 'warning_needs_response', 'warning_under_review', 'needs_response', 'under_review', '']) {
+    assert.equal(restoresAccess(status), false);
+  }
 });
 
 test('warning_closed does not suspend and charge_refunded does not suspend by itself', async () => {

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createApp } = require('../server');
+const { clearGenerationStarted, markGenerationStarted } = require('../lib/delivery');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 
 test.after(() => {
@@ -207,6 +208,22 @@ test('the first downloadable pdf stamps once and a later success keeps that time
     assert.equal(paid.meta.first_manual_at, stamped);
     assert.equal(paid.calls.updates.filter((metadata) => metadata.first_manual_at).length, 1);
   });
+});
+
+test('one job finishing does not clear another job that is still running', async () => {
+  const paid = starterStripe();
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  const first = await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  const second = await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.match(first, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(second, first);
+  assert.equal(paid.meta.generation_in_progress, '2');
+  await clearGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(paid.meta.generation_started_at, first);
+  assert.equal(paid.meta.generation_in_progress, '1');
+  await clearGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(Object.hasOwn(paid.meta, 'generation_started_at'), false);
+  assert.equal(Object.hasOwn(paid.meta, 'generation_in_progress'), false);
 });
 
 test('a stamp failure does not serve the pdf and refunds the credit', async () => {

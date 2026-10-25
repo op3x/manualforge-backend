@@ -852,17 +852,25 @@ test('N2 integrator overage uses plan integrator_overage and overage_remaining',
     metadata: { plan: 'integrator', overage_remaining: '1', manuals_used: '2' },
   };
   const intent = { metadata: { ...params.payment_intent_data.metadata } };
+  const intents = {
+    pi_over: intent,
+    pi_over_lost: { metadata: { ...params.payment_intent_data.metadata } },
+  };
   const stripe = {
     webhooks: sdk.webhooks,
     checkout: {
       sessions: {
         list: async ({ payment_intent: paymentIntentId }) => ({
-          data: paymentIntentId === 'pi_over' ? [{ id: 'cs_over', metadata: params.metadata }] : [],
+          data: intents[paymentIntentId] ? [{ id: 'cs_over', metadata: params.metadata }] : [],
         }),
       },
     },
     paymentIntents: {
-      retrieve: async (id) => ({ id, created: 1700000000, metadata: { ...intent.metadata } }),
+      retrieve: async (id) => ({ id, created: 1700000000, metadata: { ...(intents[id] ? intents[id].metadata : {}) } }),
+      update: async (id, update) => {
+        intents[id].metadata = mergeMeta(intents[id].metadata, update);
+        return { id, metadata: { ...intents[id].metadata } };
+      },
     },
     subscriptions: {
       retrieve: async (id) => {
@@ -920,7 +928,7 @@ test('N2 integrator overage uses plan integrator_overage and overage_remaining',
     assert.equal(subscription.metadata.overage_suspended, undefined);
     assert.equal((await signedWebhook(base, stripeEvent('evt_n2_lost', 'charge.dispute.closed', {
       id: 'dp_n2_lost',
-      charge: { id: 'ch_over', payment_intent: 'pi_over' },
+      charge: { id: 'ch_over_lost', payment_intent: 'pi_over_lost' },
       status: 'lost',
     }))).status, 200);
     assert.equal(subscription.metadata.overage_remaining, '0');
@@ -944,6 +952,85 @@ test('N2 integrator overage uses plan integrator_overage and overage_remaining',
     }))).status, 200);
     assert.equal(subscription.metadata.overage_suspended, undefined);
     assert.equal(subscription.metadata.overage_remaining, '1');
+  });
+});
+
+test('R1 a refund and a lost dispute on the same overage purchase decrement once', async () => {
+  const checkoutEnv = {
+    ...env(),
+    MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE: 'price_integrator_overage',
+  };
+  const params = overageCheckoutParams(checkoutEnv, {
+    subscriptionId: 'sub_r1',
+    customerId: 'cus_r1',
+    sessionId: 'cs_r1',
+  });
+  const subscription = {
+    id: 'sub_r1',
+    status: 'active',
+    metadata: { plan: 'integrator', overage_remaining: '2' },
+  };
+  const intents = {
+    pi_a: { metadata: { ...params.payment_intent_data.metadata } },
+    pi_b: { metadata: { ...params.payment_intent_data.metadata } },
+    pi_pool: { metadata: { credits_remaining: '2', manuals_used: '0' } },
+  };
+  const stripe = {
+    webhooks: sdk.webhooks,
+    checkout: {
+      sessions: {
+        list: async ({ payment_intent: paymentIntentId }) => {
+          if (paymentIntentId === 'pi_pool') return { data: [{ id: 'cs_pool', metadata: { kind: 'overage' } }] };
+          if (!intents[paymentIntentId] || paymentIntentId === 'pi_pool') return { data: [] };
+          return { data: [{ id: `cs_${paymentIntentId}`, metadata: params.metadata }] };
+        },
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => ({ id, created: 1700000000, metadata: { ...intents[id].metadata } }),
+      update: async (id, update) => {
+        intents[id].metadata = mergeMeta(intents[id].metadata, update);
+        return { id, metadata: { ...intents[id].metadata } };
+      },
+    },
+    subscriptions: {
+      retrieve: async () => ({ id: subscription.id, status: subscription.status, metadata: { ...subscription.metadata } }),
+      update: async (id, update) => {
+        assert.equal(id, subscription.id);
+        subscription.metadata = mergeMeta(subscription.metadata, update);
+        return { id, metadata: { ...subscription.metadata } };
+      },
+    },
+  };
+  const refund = (id, paymentIntentId, chargeId) => stripeEvent(id, 'charge.refunded', {
+    id: chargeId,
+    amount: 900,
+    amount_refunded: 900,
+    refunded: true,
+    payment_intent: paymentIntentId,
+  });
+  const lost = (id, paymentIntentId, chargeId, disputeId) => stripeEvent(id, 'charge.dispute.closed', {
+    id: disputeId,
+    charge: { id: chargeId, payment_intent: paymentIntentId },
+    status: 'lost',
+  });
+  await withServer(createApp({ env: env(), stripe, anthropic: null }), async (base) => {
+    assert.equal((await signedWebhook(base, refund('evt_r1_refund', 'pi_a', 'ch_a'))).status, 200);
+    assert.equal(subscription.metadata.overage_remaining, '1');
+    assert.equal(intents.pi_a.metadata.overage_removed, '1');
+    assert.equal((await signedWebhook(base, lost('evt_r1_lost', 'pi_a', 'ch_a', 'dp_r1'))).status, 200);
+    assert.equal(subscription.metadata.overage_remaining, '1');
+    assert.equal((await signedWebhook(base, refund('evt_r1_refund_again', 'pi_a', 'ch_a'))).status, 200);
+    assert.equal(subscription.metadata.overage_remaining, '1');
+    assert.equal((await signedWebhook(base, refund('evt_r1_other', 'pi_b', 'ch_b'))).status, 200);
+    assert.equal(subscription.metadata.overage_remaining, '0');
+    assert.equal(intents.pi_b.metadata.overage_removed, '1');
+
+    assert.equal((await signedWebhook(base, refund('evt_r1_pool_refund', 'pi_pool', 'ch_pool'))).status, 200);
+    assert.equal(intents.pi_pool.metadata.credits_remaining, '1');
+    assert.equal(intents.pi_pool.metadata.overage_removed, '1');
+    assert.equal((await signedWebhook(base, lost('evt_r1_pool_lost', 'pi_pool', 'ch_pool', 'dp_pool'))).status, 200);
+    assert.equal(intents.pi_pool.metadata.credits_remaining, '1');
   });
 });
 
