@@ -21,6 +21,12 @@ const {
   verifyCheckoutSession,
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
+const {
+  applyManualosCheckout,
+  classifyStripeEvent,
+  createIdSet,
+  rememberManualosPayments,
+} = require('./lib/stripeBrand');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -111,8 +117,14 @@ function createApp({
   supportComplete,
   supportNow,
   mailer,
+  onStripeEvent,
+  knownChargeIds,
+  knownCustomerIds,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
+  const knownCharges = createIdSet(knownChargeIds);
+  const knownCustomers = createIdSet(knownCustomerIds);
+  const handleStripeEvent = typeof onStripeEvent === 'function' ? onStripeEvent : logWebhookEvent;
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
@@ -131,7 +143,7 @@ function createApp({
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: Boolean(anthropicClient) });
   });
-  app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const secret = env.STRIPE_WEBHOOK_SECRET;
     if (!stripeClient || !secret) {
       console.error('Webhook rejected: STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET is not set');
@@ -144,7 +156,26 @@ function createApp({
       console.error('Webhook signature verification failed:', err && err.message ? err.message : err);
       return res.status(400).send('Webhook signature verification failed');
     }
-    logWebhookEvent(event);
+    let decision;
+    try {
+      decision = await classifyStripeEvent(event, {
+        stripe: stripeClient,
+        env,
+        knownChargeIds: knownCharges,
+        knownCustomerIds: knownCustomers,
+      });
+    } catch {
+      console.error('Webhook classification failed');
+      return res.status(500).json({ error: 'Webhook processing failed' });
+    }
+    if (decision !== 'ours') return res.json({ received: true });
+    try {
+      await handleStripeEvent(event);
+      rememberManualosPayments(knownCharges, knownCustomers, event);
+    } catch {
+      console.error('Webhook handler failed');
+      return res.status(500).json({ error: 'Webhook processing failed' });
+    }
     return res.json({ received: true });
   });
   app.use(express.json({ limit: '1mb' }));
@@ -156,8 +187,12 @@ function createApp({
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       const plan = req.body && req.body.plan;
-      const params = checkoutParams(plan, env);
-      const session = await stripeClient.checkout.sessions.create(withCheckoutPolicy(params, { plan, env }));
+      const params = await applyManualosCheckout(
+        stripeClient,
+        withCheckoutPolicy(checkoutParams(plan, env), { plan, env }),
+        plan,
+      );
+      const session = await stripeClient.checkout.sessions.create(params);
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });

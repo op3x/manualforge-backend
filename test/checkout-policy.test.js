@@ -244,6 +244,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   assert.equal(result.payment_intent_data.description, STARTER_DESCRIPTION);
   assert.deepEqual(result.payment_intent_data.metadata, {
     plan: 'starter',
+    brand: 'manualos',
     manuals_used: '0',
     credit_hold: 'hold_1',
   });
@@ -258,7 +259,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   const off = withCheckoutPolicy(pro, { plan: 'pro', env: {} });
   assert.equal(off.subscription_data.description, PRO_MONTHLY);
   assert.equal(off.subscription_data.trial_period_days, 0);
-  assert.deepEqual(off.subscription_data.metadata, { plan: 'pro' });
+  assert.deepEqual(off.subscription_data.metadata, { plan: 'pro', brand: 'manualos' });
   assert.deepEqual(off.consent_collection, { promotions: 'auto' });
 
   const on = withCheckoutPolicy(pro, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
@@ -442,9 +443,9 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
   }
 });
 
-test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
-  const calls = [];
-  const stripe = {
+function checkoutStripe(calls, customerCalls, priceLists) {
+  let customers = 0;
+  return {
     checkout: {
       sessions: {
         create: async (params) => {
@@ -453,7 +454,27 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
         },
       },
     },
+    customers: {
+      create: async (params) => {
+        customerCalls.push(params);
+        customers += 1;
+        return { id: `cus_${customers}` };
+      },
+    },
+    prices: {
+      list: async (params) => {
+        priceLists.push(params);
+        return { data: [] };
+      },
+    },
   };
+}
+
+test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
+  const calls = [];
+  const customerCalls = [];
+  const priceLists = [];
+  const stripe = checkoutStripe(calls, customerCalls, priceLists);
   const appEnv = {
     NODE_ENV: 'test',
     FRONTEND_URL: 'https://manualos.com',
@@ -481,6 +502,8 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
     });
     assert.equal(bad.status, 400);
     assert.equal(calls.length, 0);
+    assert.equal(customerCalls.length, 0);
+    assert.equal(priceLists.length, 0);
 
     for (const plan of ['starter', 'pro']) {
       const response = await fetch(base + '/create-checkout-session', {
@@ -492,8 +515,17 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
       const body = await response.json();
       assert.deepEqual(Object.keys(body), ['url']);
     }
-    assert.deepEqual(calls[0], withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
-    assert.deepEqual(calls[1], withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
+    const starterExpected = withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv });
+    starterExpected.customer = 'cus_1';
+    starterExpected.customer_update = { address: 'auto' };
+    const proExpected = withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv });
+    proExpected.customer = 'cus_2';
+    proExpected.customer_update = { address: 'auto' };
+    assert.deepEqual(calls[0], starterExpected);
+    assert.deepEqual(calls[1], proExpected);
+    assert.deepEqual(customerCalls, [{ metadata: { brand: 'manualos' } }, { metadata: { brand: 'manualos' } }]);
+    assert.deepEqual(priceLists[0], { lookup_keys: ['manualos_starter'], active: true, limit: 1 });
+    assert.deepEqual(priceLists[1], { lookup_keys: ['manualos_pro'], active: true, limit: 1 });
     assert.equal(calls[0].consent_collection, undefined);
     assert.equal(calls[1].consent_collection, undefined);
     for (const params of calls) {
@@ -504,16 +536,7 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
     const tosEnv = { ...appEnv, CHECKOUT_REQUIRE_TOS: '1' };
     const tosApp = createApp({
       env: tosEnv,
-      stripe: {
-        checkout: {
-          sessions: {
-            create: async (params) => {
-              tosCalls.push(params);
-              return { id: 'cs_tos', url: 'https://checkout.stripe.com/c/pay/cs_tos' };
-            },
-          },
-        },
-      },
+      stripe: checkoutStripe(tosCalls, [], []),
       anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
     });
     const tosServer = tosApp.listen(0, '127.0.0.1');

@@ -54,7 +54,7 @@ Kept for the current site. Same body as before (`file`, or JSON `plcContent`, pl
 
 ### `POST /webhook`
 
-Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` and logs the event. Requests with a bad or missing signature get `400`.
+Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` and logs ManualOS events. Requests with a bad or missing signature get `400`. Events for HTS Atlas or any other brand get `200` and are not processed. See [Shared Stripe account](#shared-stripe-account).
 
 Each generate call re-reads the Checkout Session, PaymentIntent, and Subscription, so access stays correct even if a webhook is delayed. The endpoint is still required: subscription renewals, cancellations, and delayed payment methods are asynchronous, and the signature is what shows the call came from Stripe.
 
@@ -145,7 +145,26 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
    `https://manualforge-backend-production.up.railway.app/webhook`
    Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
-4. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, and read Subscriptions. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode.
+4. Create a restricted API key that can write Checkout Sessions, create Customers, read Prices, read and update PaymentIntents, and read Subscriptions. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode.
+5. On the Starter price set lookup key `manualos_starter`. On the Pro price set lookup key `manualos_pro`. Checkout uses the lookup key when it finds one, and otherwise uses the price id variables above.
+
+### Shared Stripe account
+
+This Stripe account is also used by HTS Atlas (`metadata.brand=htsatlas`, price lookup keys prefixed `htsatlas_`). ManualOS Checkout stamps `metadata.brand=manualos` on the Checkout Session, on `subscription_data.metadata`, and on the Customer it creates for that session. Starter PaymentIntents get the same brand. The pay button still collects a billing address, and Checkout saves that address onto the Customer (`customer_update.address=auto`).
+
+The webhook returns **200** `{ "received": true }` for HTS Atlas and for any other brand. That response does not log the event, write a file, change access, update Stripe, or send mail. Stripe will not retry it. ManualOS events are logged as before.
+
+Checkout, subscription, and invoice events are ManualOS when they have `brand=manualos`, a lookup key prefixed `manualos_`, a price id from `STRIPE_PRICE_*`, or — for objects created before this stamp — `metadata.plan` of `starter`, `pro`, `integrator`, or `overage`. A foreign brand or a lookup key that does not start with `manualos_` wins over those signals.
+
+`charge.refunded`, `charge.dispute.created`, and `radar.early_fraud_warning.created` (and other `charge.*`, `refund.*`, and `radar.early_fraud_warning.*` events) are ManualOS when this process has already recorded that charge or PaymentIntent from a ManualOS event, or when `customer.metadata.brand` is `manualos`. An explicit foreign brand is ignored even if the customer id is already known. A charge this process has recorded stays ManualOS if the customer is later stamped with another brand. A charge with no brand and no recorded id is ignored.
+
+Recorded charge ids live in memory and reset when the process restarts. Customer metadata is the durable signal.
+
+Before relying on refund, dispute, or early-fraud handling for purchases made before this change:
+
+- Set lookup key `manualos_starter` on the existing Starter price and `manualos_pro` on the existing Pro price. No Railway variable changes. Until the keys exist, Checkout keeps using `STRIPE_PRICE_STARTER` and `STRIPE_PRICE_PRO`.
+- Set `metadata.brand=manualos` on existing ManualOS Customers. Do not put that value on HTS Atlas customers. Until it is set, refunds, disputes, and early fraud warnings for those customers are acknowledged and ignored, unless this running process has already seen the charge.
+- Give the restricted key Customers write and Prices read, in addition to the Checkout, PaymentIntent, and Subscription permissions it already needs. This repository does not create prices, webhook endpoints, or live-mode changes.
 
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 

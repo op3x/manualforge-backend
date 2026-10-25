@@ -97,6 +97,12 @@ function createHarness() {
     subscriptions: {
       retrieve: async () => ({ id: 'sub_1', status: 'trialing' }),
     },
+    customers: {
+      create: async () => ({ id: 'cus_test' }),
+    },
+    prices: {
+      list: async () => ({ data: [] }),
+    },
     webhooks: {
       constructEvent(body, signature, secret) {
         if (signature !== 't=1,v1=ok' || secret !== 'whsec_test') {
@@ -195,7 +201,7 @@ test('health, checkout, verify, and webhook', async () => {
       body: JSON.stringify({
         id: 'evt_1',
         type: 'customer.subscription.updated',
-        data: { object: { id: 'sub_1', status: 'active' } },
+        data: { object: { id: 'sub_1', status: 'active', metadata: { plan: 'pro', brand: 'manualos' } } },
       }),
     });
     assert.equal(webhook.status, 200);

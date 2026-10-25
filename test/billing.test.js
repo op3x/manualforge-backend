@@ -17,17 +17,18 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.equal(starter.line_items[0].quantity, 1);
   assert.equal(starter.success_url, 'https://manualos.com/upload.html?session_id={CHECKOUT_SESSION_ID}');
   assert.equal(starter.cancel_url, 'https://manualos.com/#pricing');
-  assert.deepEqual(starter.metadata, { plan: 'starter' });
+  assert.deepEqual(starter.metadata, { plan: 'starter', brand: 'manualos' });
   assert.equal(starter.payment_intent_data.metadata.manuals_used, '0');
   assert.equal(starter.payment_intent_data.metadata.plan, 'starter');
+  assert.equal(starter.payment_intent_data.metadata.brand, 'manualos');
   assert.equal(starter.payment_method_types, undefined);
   assert.match(starter.integration_identifier, /manualos_starter_[a-z]{8}$/);
 
   const pro = checkoutParams('pro', env);
   assert.equal(pro.mode, 'subscription');
   assert.equal(pro.line_items[0].price, 'price_pro');
-  assert.deepEqual(pro.metadata, { plan: 'pro' });
-  assert.deepEqual(pro.subscription_data.metadata, { plan: 'pro' });
+  assert.deepEqual(pro.metadata, { plan: 'pro', brand: 'manualos' });
+  assert.deepEqual(pro.subscription_data.metadata, { plan: 'pro', brand: 'manualos' });
   assert.equal(pro.payment_method_types, undefined);
   assert.match(pro.integration_identifier, /manualos_pro_[a-z]{8}$/);
   assert.notEqual(starter.integration_identifier, pro.integration_identifier);
