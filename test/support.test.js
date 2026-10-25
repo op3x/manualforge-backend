@@ -3773,3 +3773,121 @@ test('default support prompt does not promise unshipped documents', () => {
   assert.match(enabled, /Pro is \$79 per month: unlimited manuals\. Plus applicable taxes\. Plus a PM schedule, startup and shutdown procedures, and other documents on request\./);
   assert.match(enabled, /Starter is \$39 one-time for 3 manuals\. Plus applicable taxes\./);
 });
+
+test('round 9 single digits across texts and implied refunds', async () => {
+  const env = aiEnv();
+  const shapes = [
+    {
+      parts: ['5 5 5 5 5 5 5 5', '5 5 5 5 4 4 4 4'],
+      pan: '5555555555554444',
+      leak: /5555555555554444|5 5 5 5 5 5 5 5|5 5 5 5 4 4 4 4/,
+    },
+    {
+      parts: ['4 1 1 1', '1 1 1 1', '1 1 1 1', '1 1 1 1'],
+      pan: '4111111111111111',
+      leak: /4111111111111111|4 1 1 1|1 1 1 1/,
+    },
+    {
+      parts: ['4-1-1-1-1-1-1-1', '1-1-1-1-1-1-1-1'],
+      pan: '4111111111111111',
+      leak: /4111111111111111|4-1-1-1-1-1-1-1|1-1-1-1-1-1-1-1/,
+    },
+    {
+      parts: ['5 five 5 five 5 five 5 five', '5 five 5 five 4 four 4 four'],
+      pan: '5555555555554444',
+      leak: /5555555555554444|5 five 5 five|4 four 4 four/,
+    },
+    {
+      parts: ['5,5,5,5,5,5,5,5', '5.5.5.5.4.4.4.4'],
+      pan: '5555555555554444',
+      leak: /5555555555554444|5,5,5,5,5,5,5,5|5\.5\.5\.5\.4\.4\.4\.4/,
+    },
+  ];
+  for (const shape of shapes) {
+    const session = state();
+    const store = tempStore();
+    const phone = '+15551119821';
+    let mainCalls = 0;
+    const seen = [];
+    let decision;
+    for (const text of shape.parts) {
+      decision = await policy.triageTurn({
+        channel: 'sms',
+        text,
+        state: session,
+        env,
+        spentUsd: 0,
+        complete: async (request) => {
+          if (request.maxTokens === 200) {
+            mainCalls += 1;
+            seen.push(JSON.stringify(request.messages));
+          }
+          if (request.maxTokens === 60) return allowVerdict();
+          return answer('Noted.');
+        },
+      });
+      store.saveThread(phone, session);
+    }
+    assert.match(decision.reply, /cannot take card numbers/, shape.parts.join(' | '));
+    assert.equal(mainCalls, shape.parts.length - 1, shape.parts.join(' | '));
+    assert.equal(seen.some((blob) => blob.includes(shape.pan)), false, shape.parts.join(' | '));
+    const saved = fs.readFileSync(path.join(store.directory, 'threads.json'), 'utf8');
+    assert.doesNotMatch(saved, shape.leak, shape.parts.join(' | '));
+    assert.doesNotMatch(JSON.stringify(session.history), shape.leak, shape.parts.join(' | '));
+  }
+
+  const ordinary = await policy.triageTurn({
+    channel: 'sms',
+    text: 'I need 1 manual and 2 sensors',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) return allowVerdict();
+      return answer('Starter includes 3 manuals.');
+    },
+  });
+  assert.match(ordinary.reply, /3 manuals/);
+  assert.doesNotMatch(ordinary.reply, /cannot take card numbers/);
+
+  const repeated = state();
+  let repeatedDecision;
+  for (const text of ['4 1 1 1', '4 1 1 1', '4 1 1 1', '4 1 1 1']) {
+    repeatedDecision = await policy.triageTurn({
+      channel: 'sms',
+      text,
+      state: repeated,
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        if (request.maxTokens === 60) return allowVerdict();
+        return answer('Noted.');
+      },
+    });
+  }
+  assert.deepEqual((repeated.digitGroups || []).map((group) => group.digits), ['4111', '4111', '4111', '4111']);
+  assert.doesNotMatch(repeatedDecision.reply, /cannot take card numbers/, '4111411141114111 fails Luhn');
+
+  const promised = [
+    'your bill will be adjusted',
+    'a discount on your next renewal',
+    'the charge will disappear',
+    "we'll extend your plan at no cost",
+  ];
+  for (const phrase of promised) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /adjusted|discount|disappear|no cost/i, phrase);
+  }
+  for (const phrase of [
+    'I cannot approve or issue a refund',
+    'How do I cancel the subscription?',
+    'Your balance is $39',
+    'Starter includes a free trial',
+    'The manual is ready to download',
+    'How do I unsubscribe from Pro?',
+  ]) {
+    assert.equal(policy.promisesRefund(phrase), false, phrase);
+  }
+});
