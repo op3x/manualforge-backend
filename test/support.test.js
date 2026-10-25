@@ -16,6 +16,7 @@ const {
   SMS_CONSENT_LABEL,
   SMS_CONSENT_VERSION,
   SMS_OPT_IN_CONFIRMATION,
+  SMS_STOP_CONFIRMATION,
   VOICEMAIL_RECORDING_NOTICE,
   WEB_OPT_IN_LIMIT,
   WEB_OPT_IN_WINDOW_MS,
@@ -214,6 +215,11 @@ function openRelay(url, signature) {
       reject(err);
     });
   });
+}
+
+async function consentedRelay(base, env, params) {
+  await postTwilio(base, env, '/api/twilio/voice', params);
+  return postTwilio(base, env, '/api/twilio/voice/consent', params);
 }
 
 function relayUrlFrom(xml) {
@@ -482,15 +488,20 @@ test('voice signature, relay TwiML, and inert fallbacks', async () => {
     const params = { CallSid: 'CA_LIVE', From: '+15551110000', To: '+15557654321', CallStatus: 'ringing' };
     const ok = await postTwilio(base, h.env, '/api/twilio/voice', params);
     assert.equal(ok.status, 200);
-    const xml = await ok.text();
+    const opening = await ok.text();
+    assert.match(opening, /action="\/api\/twilio\/voice\/consent"/);
+    assert.match(opening, /say 'don't record' or press 9/i);
+    assert.match(opening, /Staying on the line means you agree/);
+    assert.doesNotMatch(opening, /ConversationRelay|transcriptionProvider/);
+    const agreed = await postTwilio(base, h.env, '/api/twilio/voice/consent', params);
+    const xml = await agreed.text();
     assert.match(xml, /<Connect action="\/api\/twilio\/voice\/handoff">/);
     assert.match(xml, /ttsProvider="Google"/);
     assert.match(xml, /voice="en-US-Neural2-C"/);
     assert.match(xml, /language="en-US"/);
     assert.match(xml, /transcriptionProvider="Deepgram"/);
     assert.ok(xml.includes(`welcomeGreeting="${WELCOME}"`));
-    assert.match(xml, /This call is transcribed, and may be recorded/);
-    assert.match(xml, /You're speaking with an AI assistant/);
+    assert.match(xml, /How can I help\? You can ask for a person at any time/);
     assert.doesNotMatch(xml, /voiceprint|diariz|speakerLabel|identifySpeaker|speakerId/i);
     assert.match(xml, new RegExp(`url="ws://${base.slice('http://'.length)}/api/twilio/relay\\?token=`));
 
@@ -515,7 +526,12 @@ test('voice signature, relay TwiML, and inert fallbacks', async () => {
     noKey.env.PUBLIC_BASE_URL = base;
     const res = await postTwilio(base, noKey.env, '/api/twilio/voice', { CallSid: 'CA_NOKEY', From: '+15551110000' });
     assert.equal(res.status, 200);
-    const xml = await res.text();
+    const opening = await res.text();
+    assert.match(opening, /action="\/api\/twilio\/voice\/consent"/);
+    assert.match(opening, /don't record/i);
+    assert.doesNotMatch(opening, /ConversationRelay|Press 1 for order/);
+    const menu = await postTwilio(base, noKey.env, '/api/twilio/voice/consent', { CallSid: 'CA_NOKEY', From: '+15551110000' });
+    const xml = await menu.text();
     assert.match(xml, /<Gather/);
     assert.match(xml, /Press 1 for order or manual status/);
     assert.match(xml, /press 2 for billing/);
@@ -548,8 +564,8 @@ test('voice signature, relay TwiML, and inert fallbacks', async () => {
     publicHost.env.PUBLIC_BASE_URL = 'https://manualos.example';
     const params = { CallSid: 'CA_PUBLIC', From: '+15551110000', To: '+15557654321' };
     const res = await signedFetch(
-      `${base}/api/twilio/voice`,
-      'https://manualos.example/api/twilio/voice',
+      `${base}/api/twilio/voice/consent`,
+      'https://manualos.example/api/twilio/voice/consent',
       params,
     );
     assert.equal(res.status, 200);
@@ -562,7 +578,7 @@ test('relay answers, refuses cards, and hands off', async () => {
   const h = harness();
   await withServer(h.app, async ({ base }) => {
     h.env.PUBLIC_BASE_URL = base;
-    const voice = await postTwilio(base, h.env, '/api/twilio/voice', {
+    const voice = await consentedRelay(base, h.env, {
       CallSid: 'CA_RELAY',
       From: '+15551110000',
       To: '+15557654321',
@@ -611,7 +627,7 @@ test('relay answers, refuses cards, and hands off', async () => {
   low.setComplete(async () => answer('I do not know that.', { confidence: 'low', summary: 'unsure' }));
   await withServer(low.app, async ({ base }) => {
     low.env.PUBLIC_BASE_URL = base;
-    const voice = await postTwilio(base, low.env, '/api/twilio/voice', { CallSid: 'CA_LOW', From: '+15551110009' });
+    const voice = await consentedRelay(base, low.env, { CallSid: 'CA_LOW', From: '+15551110009' });
     const relay = relayUrlFrom(await voice.text());
     const client = await openRelay(relay, twilio.getExpectedTwilioSignature(TOKEN, relay, {}));
     try {
@@ -772,8 +788,8 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
       const phone = `+1555200${String(index).padStart(4, '0')}`;
       const res = await postTwilio(base, h.env, '/api/twilio/sms', { From: phone, Body: body, MessageSid: `SM_STOP_${index}` });
       const xml = await res.text();
-      assert.match(xml, /unsubscribed/i);
-      assert.match(xml, /ManualOS Support:/);
+      assert.equal(smsText(xml), SMS_STOP_CONFIRMATION);
+      assert.doesNotMatch(xml, /ManualOS Support:/);
       assert.equal(h.store.isOptedOut(phone), true);
       const follow = await postTwilio(base, h.env, '/api/twilio/sms', { From: phone, Body: 'hello there', MessageSid: `SM_AFTER_${index}` });
       assert.doesNotMatch(await follow.text(), /<Message>/);
@@ -2156,7 +2172,7 @@ test('billing and complaint messages that mention a card still reach the owner',
   const h = harness();
   await withServer(h.app, async ({ base }) => {
     h.env.PUBLIC_BASE_URL = base;
-    const first = await postTwilio(base, h.env, '/api/twilio/voice', {
+    const first = await consentedRelay(base, h.env, {
       CallSid: 'CA_CARD_WORDS',
       From: '+15551117001',
       To: '+15557654321',
@@ -2184,7 +2200,7 @@ test('billing and complaint messages that mention a card still reach the owner',
       client.ws.close();
     }
 
-    const second = await postTwilio(base, h.env, '/api/twilio/voice', {
+    const second = await consentedRelay(base, h.env, {
       CallSid: 'CA_CARD_DIGITS',
       From: '+15551117002',
       To: '+15557654321',
@@ -2529,7 +2545,7 @@ test('after-hours billing calls and complaint texts escalate', async () => {
   const h = harness({ supportNow: afterHours });
   await withServer(h.app, async ({ base }) => {
     h.env.PUBLIC_BASE_URL = base;
-    const voice = await postTwilio(base, h.env, '/api/twilio/voice', {
+    const voice = await consentedRelay(base, h.env, {
       CallSid: 'CA_BILL_NIGHT',
       From: '+15551118000',
       To: '+15557654321',
