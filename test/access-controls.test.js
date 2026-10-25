@@ -7,7 +7,15 @@ const { createApp } = require('../server');
 const { createJobStore, removeTestJobDirectories } = require('../lib/jobs/store');
 const { assertCanGenerate, accessFromSession, STARTER_REFUNDED_MESSAGE } = require('../lib/billing');
 const { contentDisposition, downloadFileName } = require('../lib/download-name');
-const { signAccessToken, verifyAccessToken, ACCESS_TOKEN_TTL_MS } = require('../lib/access-token');
+const {
+  dropRevokedJti,
+  loadRevocations,
+  signAccessToken,
+  verifyAccessToken,
+  ACCESS_TOKEN_TTL_MS,
+  EXCHANGE_LIMIT,
+} = require('../lib/access-token');
+const { redactSecrets } = require('../server');
 
 test.after(() => {
   removeTestJobDirectories();
@@ -20,7 +28,7 @@ const env = {
   STRIPE_PRICE_PRO: 'price_pro',
   STRIPE_WEBHOOK_SECRET: 'whsec_test',
   STARTER_CREDITS: '3',
-  PORTAL_TOKEN_SECRET: 'portal-test-secret',
+  PORTAL_TOKEN_SECRET: 'test-portal-token-secret-32bytes-min',
 };
 
 function notFound() {
@@ -125,6 +133,9 @@ test('job routes require the owner and a revoked purchase keeps the access block
 
       const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
       assert.equal(pdf.status, 200);
+      assert.equal(pdf.headers.get('cache-control'), 'no-store');
+      assert.equal(pdf.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(pdf.headers.get('referrer-policy'), 'no-referrer');
       assert.match(pdf.headers.get('content-disposition'), /filename="forderband-linie-manual\.pdf"/);
       assert.match(pdf.headers.get('content-disposition'), /filename\*=UTF-8''/);
       assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
@@ -214,6 +225,9 @@ test('a bearer token replaces session_id and can be revoked', async () => {
       assert.equal(tokenBody.valid, true);
       assert.equal(tokenBody.plan, 'starter');
       assert.equal(tokenBody.billingIssue, false);
+      assert.equal(exchanged.headers.get('cache-control'), 'no-store');
+      assert.equal(exchanged.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(exchanged.headers.get('pragma'), 'no-cache');
 
       const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(tokenBody.access_token) });
       assert.equal(pdf.status, 200);
@@ -387,14 +401,18 @@ test('a malformed JSON body is a generic 400 and the parser detail stays in the 
   }
   const logged = lines.join('\n');
   assert.match(logged, /Invalid request body/);
-  assert.match(logged, /JSON/);
+  assert.match(logged, /entity\.parse\.failed/);
+  assert.match(logged, /length=/);
   assert.equal(logged.includes('{"plan":'), false);
+  assert.equal(logged.includes('Unexpected'), false);
+  assert.equal(redactSecrets('paid cs_live_abc123XYZ and cs_test_Def456').includes('cs_'), false);
+  assert.match(redactSecrets('cs_test_Def456'), /\[redacted\]/);
 });
 
 test('a ready manual reloads from disk for 24 hours', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-reload-'));
   const first = createJobStore({ directory: dir, env: { NODE_ENV: 'test' } });
-  const job = first.create({ sessionId: 'cs_owner', nameSource: 'Pump' });
+  const job = first.create({ sessionId: 'cs_owner', customerId: 'cus_owner', nameSource: 'Pump' });
   first.savePdf(job.id, Buffer.from('%PDF-1.4\n%kept\n'));
   job.status = 'succeeded';
   first.persist(job);
@@ -403,10 +421,244 @@ test('a ready manual reloads from disk for 24 hours', async () => {
   try {
     const loaded = second.get(job.id);
     assert.equal(loaded.status, 'succeeded');
+    assert.equal(loaded.sessionId, undefined);
+    assert.equal(loaded.customerId, undefined);
+    assert.equal(loaded.sessionIdHash, first.hashCredential('cs_owner'));
+    assert.equal(loaded.customerIdHash, first.hashCredential('cus_owner'));
+    const onDisk = fs.readFileSync(path.join(dir, `${job.id}.json`), 'utf8');
+    assert.equal(onDisk.includes('cs_owner'), false);
+    assert.equal(onDisk.includes('cus_owner'), false);
+    assert.equal((fs.statSync(path.join(dir, `${job.id}.json`)).mode & 0o077), 0);
     assert.equal(second.readPdf(job.id).includes(Buffer.from('%PDF-')), true);
     assert.equal(second.ready()[0].id, job.id);
   } finally {
     second.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tampered token and a wrong-secret token are rejected', async () => {
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '0', plan: 'starter' }) } },
+    paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
+  };
+  const app = createApp({ env, stripe, anthropic: null });
+  const minted = signAccessToken({ sessionId: 'cs_owner' }, env);
+  const [body, sig] = minted.token.split('.');
+  const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+  payload.sid = 'cs_other';
+  const tampered = `${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${sig}`;
+  const otherEnv = { ...env, PORTAL_TOKEN_SECRET: 'another-portal-secret-0123456789abcdef' };
+  const wrong = signAccessToken({ sessionId: 'cs_owner' }, otherEnv);
+  assert.equal(verifyAccessToken(tampered, env), null);
+  assert.equal(verifyAccessToken(wrong.token, env), null);
+  assert.equal(verifyAccessToken(`${body}.${sig}.extra`, env), null);
+  await withServer(app, async (base) => {
+    const tamperedRes = await fetch(`${base}/jobs`, { headers: authHeaders(tampered) });
+    assert.equal(tamperedRes.status, 401);
+    assert.equal((await tamperedRes.json()).code, 'access_token_invalid');
+    const wrongRes = await fetch(`${base}/jobs`, { headers: authHeaders(wrong.token) });
+    assert.equal(wrongRes.status, 401);
+    assert.equal((await wrongRes.json()).code, 'access_token_invalid');
+  });
+});
+
+test('GET /jobs resolves a compat caller once and does not call Stripe per job', async () => {
+  let retrieves = 0;
+  const stripe = {
+    checkout: { sessions: { retrieve: async (id) => {
+      retrieves += 1;
+      if (id !== 'cs_real') throw notFound();
+      return {
+        id,
+        metadata: { plan: 'pro' },
+        payment_status: 'paid',
+        customer: 'cus_real',
+        subscription: { id: 'sub_real', status: 'active', customer: 'cus_real' },
+      };
+    } } },
+    subscriptions: { retrieve: async () => ({ id: 'sub_real', status: 'active', customer: 'cus_real' }) },
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-amplify-'));
+  const store = createJobStore({ directory: dir, env });
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      const job = store.create({
+        sessionId: `cs_job_${i}`,
+        customerId: 'cus_real',
+        subscriptionId: 'sub_real',
+        nameSource: `Line ${i}`,
+      });
+      store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
+      job.status = 'succeeded';
+      store.persist(job);
+    }
+    const app = createApp({ env, stripe, jobs: store, anthropic: null });
+    await withServer(app, async (base) => {
+      const junk = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_made_up' } });
+      assert.equal(junk.status, 401);
+      assert.equal((await junk.json()).code, 'authorization_required');
+      assert.equal(retrieves, 1);
+      const owned = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_real' } });
+      assert.equal(owned.status, 200);
+      assert.equal((await owned.json()).jobs.length, 3);
+      assert.equal(retrieves, 2);
+    });
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rate limits return 429 and the webhook stays unlimited', async () => {
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => { throw notFound(); } } },
+  };
+  const app = createApp({ env, stripe, anthropic: null });
+  await withServer(app, async (base) => {
+    let last;
+    for (let i = 0; i < 11; i += 1) {
+      last = await fetch(`${base}/verify-session?session_id=cs_rate_${i}`);
+    }
+    assert.equal(last.status, 429);
+    const body = await last.json();
+    assert.deepEqual(body, { error: 'Too many requests.' });
+    assert.ok(Number(last.headers.get('retry-after')) > 0);
+
+    let webhookStatus = 0;
+    for (let i = 0; i < 12; i += 1) {
+      const hook = await fetch(`${base}/webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'stripe-signature': 'nope' },
+        body: '{}',
+      });
+      webhookStatus = hook.status;
+      await hook.text();
+    }
+    assert.equal(webhookStatus, 400);
+  });
+});
+
+test('a session can mint only five access tokens an hour', async () => {
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_exchange_limit', { manuals_used: '0', plan: 'starter' }) } },
+    paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
+  };
+  const app = createApp({ env, stripe, anthropic: null });
+  await withServer(app, async (base) => {
+    for (let i = 0; i < EXCHANGE_LIMIT; i += 1) {
+      const ok = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_exchange_limit' }),
+      });
+      assert.equal(ok.status, 200, String(i));
+      await ok.json();
+    }
+    const blocked = await fetch(`${base}/access-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: 'cs_exchange_limit' }),
+    });
+    assert.equal(blocked.status, 429);
+    assert.deepEqual(await blocked.json(), { error: 'Too many requests.' });
+    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+  });
+});
+
+test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () => {
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '1', plan: 'starter' }) } },
+    paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '1', plan: 'starter' } }) },
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-sunset-'));
+  const store = createJobStore({ directory: dir, env });
+  const job = store.create({ sessionId: 'cs_owner', nameSource: 'Pump' });
+  store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
+  job.status = 'succeeded';
+  store.persist(job);
+  const sunsetEnv = { ...env, LEGACY_SESSION_ID_SUNSET: '2000-01-01' };
+  const app = createApp({ env: sunsetEnv, stripe, jobs: store, anthropic: null });
+  try {
+    await withServer(app, async (base) => {
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      assert.equal(listed.status, 401);
+      const verified = await fetch(`${base}/verify-session?session_id=cs_owner`);
+      assert.equal(verified.status, 400);
+      const exchanged = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_owner' }),
+      });
+      assert.equal(exchanged.status, 200);
+      const token = (await exchanged.json()).access_token;
+      const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(token) });
+      assert.equal(pdf.status, 200);
+      await pdf.arrayBuffer();
+    });
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a short portal secret disables tokens and a revocation survives a restart', async () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  const shortEnv = { ...env, PORTAL_TOKEN_SECRET: 'too-short' };
+  const stripe = {
+    checkout: { sessions: { retrieve: async () => starterSession('cs_owner', { manuals_used: '0', plan: 'starter' }) } },
+    paymentIntents: { retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: '0', plan: 'starter' } }) },
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-revoke-'));
+  const store = createJobStore({ directory: dir, env });
+  const job = store.create({ sessionId: 'cs_owner', nameSource: 'Pump' });
+  store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
+  job.status = 'succeeded';
+  store.persist(job);
+  try {
+    const shortApp = createApp({ env: shortEnv, stripe, jobs: store, anthropic: null });
+    await withServer(shortApp, async (base) => {
+      const minted = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_owner' }),
+      });
+      assert.equal(minted.status, 503);
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_owner' } });
+      assert.equal(listed.status, 200);
+      assert.equal((await listed.json()).jobs.length, 1);
+    });
+    assert.match(warnings.join('\n'), /shorter than 32 bytes/);
+
+    const supportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-support-'));
+    const durableEnv = { ...env, SUPPORT_DATA_DIR: supportDir };
+    const minted = signAccessToken({ sessionId: 'cs_owner' }, durableEnv);
+    const durable = createApp({ env: durableEnv, stripe, jobs: store, anthropic: null });
+    try {
+      await withServer(durable, async (base) => {
+        const revoked = await fetch(`${base}/access-token/revoke`, {
+          method: 'POST',
+          headers: authHeaders(minted.token),
+        });
+        assert.equal(revoked.status, 200);
+        const jti = JSON.parse(Buffer.from(minted.token.split('.')[0], 'base64url').toString('utf8')).jti;
+        dropRevokedJti(jti);
+        assert.ok(verifyAccessToken(minted.token, durableEnv));
+        loadRevocations(durableEnv);
+        assert.equal(verifyAccessToken(minted.token, durableEnv), null);
+        const after = await fetch(`${base}/jobs/${job.id}`, { headers: authHeaders(minted.token) });
+        assert.equal(after.status, 401);
+        const saved = JSON.parse(fs.readFileSync(path.join(supportDir, 'revoked-tokens.json'), 'utf8'));
+        assert.equal(typeof saved[jti], 'number');
+      });
+    } finally {
+      fs.rmSync(supportDir, { recursive: true, force: true });
+    }
+  } finally {
+    console.warn = original;
+    store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

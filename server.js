@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
 const multer = require('multer');
+const rateLimit = require('express-rate-limit');
 const { createAnthropic } = require('./lib/anthropic');
 const { limits } = require('./lib/limits');
 const {
@@ -23,10 +24,15 @@ const {
   verifyCheckoutSession,
 } = require('./lib/billing');
 const {
+  legacySessionAllowed,
+  loadRevocations,
+  recordTokenExchange,
   revokeAccessToken,
   signAccessToken,
+  tokenExchangeGate,
   tokenSecret,
   verifyAccessToken,
+  warnIfTokenSecretShort,
   safeEqual,
 } = require('./lib/access-token');
 const { contentDisposition, downloadFileName, sourceName } = require('./lib/download-name');
@@ -61,7 +67,7 @@ const { emptyGenerationReason, generateManual, machineContentReason } = require(
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
-const { redactCustomerLog } = require('./lib/redact-log');
+const { redactCustomerLog, redactSecrets } = require('./lib/redact-log');
 const { closeBrowser } = require('./lib/manual/pdf');
 const { mountSupport } = require('./lib/support/http');
 function createStripe(env) {
@@ -81,10 +87,6 @@ function sendError(res, err) {
   return res.status(500).json({ error: 'Internal server error' });
 }
 
-function redactSecrets(value) {
-  return String(value || '').replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]');
-}
-
 function readSessionId(req) {
   const fromBody = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
   if (fromBody) return fromBody;
@@ -99,6 +101,36 @@ function exposed(status, message, logMessage, publicCode) {
   if (logMessage) err.logMessage = logMessage;
   if (publicCode) err.publicCode = publicCode;
   return err;
+}
+
+const PRIVATE_RESPONSE = {
+  'Cache-Control': 'no-store',
+  'X-Content-Type-Options': 'nosniff',
+  Pragma: 'no-cache',
+};
+
+function clientLimiter(max) {
+  return rateLimit({
+    windowMs: 60 * 1000,
+    limit: max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    statusCode: 429,
+    message: { error: 'Too many requests.' },
+  });
+}
+
+function tokenSecretProblem(env) {
+  const value = env && env.PORTAL_TOKEN_SECRET;
+  if (value != null && String(value).trim() && !tokenSecret(env)) {
+    return 'PORTAL_TOKEN_SECRET is shorter than 32 bytes';
+  }
+  return 'PORTAL_TOKEN_SECRET is not set';
+}
+
+function tooMany(res, retryAfter) {
+  if (retryAfter) res.set('Retry-After', String(retryAfter));
+  return res.status(429).json({ error: 'Too many requests.' });
 }
 
 function bearerToken(req) {
@@ -211,10 +243,21 @@ function createApp({
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
   const store = jobs || createJobStore({ env });
+  warnIfTokenSecretShort(env);
+  loadRevocations(env);
   const app = express();
   app.disable('x-powered-by');
   // Railway is one proxy hop. req.ip is the client that hop saw, not a header the client can rotate.
   app.set('trust proxy', 1);
+  app.use((req, res, next) => {
+    res.set('Referrer-Policy', 'no-referrer');
+    next();
+  });
+  const accessLimiter = clientLimiter(10);
+  const verifyLimiter = clientLimiter(10);
+  const jobReadLimiter = clientLimiter(60);
+  const jobWriteLimiter = clientLimiter(5);
+  const checkoutLimiter = clientLimiter(10);
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
@@ -328,7 +371,7 @@ function createApp({
       console.error(
         'Webhook handler failed',
         safeLogToken(event && event.type),
-        detail.replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]'),
+        redactSecrets(detail),
       );
       return res.status(500).json({ error: 'Webhook handler failed' });
     }
@@ -336,7 +379,7 @@ function createApp({
   });
   app.use(express.json({ limit: '1mb' }));
 
-  app.post('/create-checkout-session', async (req, res) => {
+  app.post('/create-checkout-session', checkoutLimiter, async (req, res) => {
     try {
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
@@ -380,7 +423,7 @@ function createApp({
 
   function verifiedBearer(token) {
     if (!tokenSecret(env)) {
-      throw exposed(503, 'Access tokens are temporarily unavailable.', 'PORTAL_TOKEN_SECRET is not set');
+      throw exposed(503, 'Access tokens are temporarily unavailable.', tokenSecretProblem(env));
     }
     const caller = verifyAccessToken(token, env);
     if (!caller) throw exposed(401, 'Access token is invalid or expired.', null, 'access_token_invalid');
@@ -388,12 +431,12 @@ function createApp({
   }
 
   // COMPAT(session-id): manualos.com/upload.html still posts session_id and
-  // sends X-Session-Id. Accept that for one release so the current page keeps
-  // working. Authorization: Bearer is the credential after POST /access-token.
+  // sends X-Session-Id. Accept that until LEGACY_SESSION_ID_SUNSET (UTC).
+  // Authorization: Bearer is the credential after POST /access-token.
   // A bearer token wins when both are sent. Query session_id is not a download
-  // credential. Remove the compat branch once upload, poll, and download all
-  // send the bearer token.
+  // credential. POST /access-token still accepts session_id after the sunset.
   function compatCaller(req) {
+    if (!legacySessionAllowed(env)) return null;
     const sessionId = readSessionId(req);
     if (!sessionId) return null;
     return { sessionId, customerId: '', subscriptionId: '', via: 'compat' };
@@ -411,28 +454,60 @@ function createApp({
     throw exposed(402, 'Payment required. Provide session_id in the form body or the X-Session-Id header.');
   }
 
-  async function callerOwnsJob(caller, job) {
+  function credentialMatches(presented, stored, storedHash) {
+    if (!presented) return false;
+    if (boundId(stored) && safeEqual(presented, stored)) return true;
+    if (!boundId(storedHash) || typeof store.hashCredential !== 'function') return false;
+    return safeEqual(store.hashCredential(presented), storedHash);
+  }
+
+  function sessionMatches(caller, job) {
     if (!caller || !job) return false;
-    if (boundId(job.sessionId) && safeEqual(caller.sessionId, job.sessionId)) return true;
-    const customerBound = boundId(job.customerId);
-    const subscriptionBound = boundId(job.subscriptionId);
-    if (!customerBound && !subscriptionBound) return false;
-    let customerId = caller.customerId || '';
-    let subscriptionId = caller.subscriptionId || '';
-    if ((customerBound && !customerId) || (subscriptionBound && !subscriptionId)) {
-      if (!stripeClient || !caller.sessionId) return false;
-      try {
-        const access = await verifyCheckoutSession(stripeClient, caller.sessionId, env);
-        customerId = customerId || access.customerId || '';
-        subscriptionId = subscriptionId || access.subscriptionId || '';
-      } catch (err) {
-        if (isStripeNotFound(err)) return false;
-        throw err;
-      }
-    }
-    if (customerBound && customerId && safeEqual(customerId, job.customerId)) return true;
-    if (subscriptionBound && subscriptionId && safeEqual(subscriptionId, job.subscriptionId)) return true;
+    return credentialMatches(caller.sessionId, job.sessionId, job.sessionIdHash);
+  }
+
+  function identityMatches(caller, job) {
+    if (sessionMatches(caller, job)) return true;
+    if (!caller || !job) return false;
+    if (credentialMatches(caller.customerId, job.customerId, job.customerIdHash)) return true;
+    if (credentialMatches(caller.subscriptionId, job.subscriptionId, job.subscriptionIdHash)) return true;
     return false;
+  }
+
+  function callerNeedsLookup(caller, job) {
+    if (!caller || !job || sessionMatches(caller, job)) return false;
+    const customerBound = boundId(job.customerId) || boundId(job.customerIdHash);
+    const subscriptionBound = boundId(job.subscriptionId) || boundId(job.subscriptionIdHash);
+    if (!customerBound && !subscriptionBound) return false;
+    if (customerBound && !caller.customerId) return true;
+    if (subscriptionBound && !caller.subscriptionId) return true;
+    return false;
+  }
+
+  // One Stripe retrieve for the whole request. Job loops must not call Stripe.
+  async function hydrateCaller(caller) {
+    if (!caller || caller.hydrated) return caller;
+    caller.hydrated = true;
+    if (!stripeClient || !caller.sessionId) {
+      caller.notFound = true;
+      return caller;
+    }
+    try {
+      const access = await verifyCheckoutSession(stripeClient, caller.sessionId, env);
+      if (!access || !access.plan) {
+        caller.notFound = true;
+        return caller;
+      }
+      caller.customerId = caller.customerId || access.customerId || '';
+      caller.subscriptionId = caller.subscriptionId || access.subscriptionId || '';
+      return caller;
+    } catch (err) {
+      if (isStripeNotFound(err)) {
+        caller.notFound = true;
+        return caller;
+      }
+      throw err;
+    }
   }
 
   function rememberJob(job) {
@@ -469,10 +544,11 @@ function createApp({
   async function sessionForVerify(req) {
     const token = bearerToken(req);
     if (token) return verifiedBearer(token).sessionId;
+    if (!legacySessionAllowed(env)) return '';
     return typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
   }
 
-  app.get('/verify-session', async (req, res) => {
+  app.get('/verify-session', verifyLimiter, async (req, res) => {
     try {
       const sessionId = await sessionForVerify(req);
       if (!sessionId) return res.status(400).json({ error: 'session_id is required' });
@@ -488,16 +564,18 @@ function createApp({
     }
   });
 
-  app.post('/access-token', async (req, res) => {
+  app.post('/access-token', accessLimiter, async (req, res) => {
     try {
       const sessionId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
       if (!sessionId) return res.status(400).json({ error: 'session_id is required.' });
+      const gate = tokenExchangeGate(sessionId, env);
+      if (!gate.ok) return tooMany(res, gate.retryAfter);
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
       }
       if (!tokenSecret(env)) {
-        console.error('PORTAL_TOKEN_SECRET is not set');
+        console.error(tokenSecretProblem(env));
         return res.status(503).json({ error: 'Access tokens are temporarily unavailable.' });
       }
       let access;
@@ -524,6 +602,10 @@ function createApp({
         customerId: access.plan === 'starter' ? '' : (access.customerId || ''),
         subscriptionId: access.plan === 'starter' ? '' : (access.subscriptionId || ''),
       }, env);
+      recordTokenExchange(sessionId, env);
+      const sidHash = typeof store.hashCredential === 'function' ? store.hashCredential(sessionId) : '';
+      if (sidHash) console.log('access_token_minted', sidHash.slice(0, 12));
+      res.set(PRIVATE_RESPONSE);
       return res.json({
         access_token: minted.token,
         token_type: 'Bearer',
@@ -536,12 +618,13 @@ function createApp({
     }
   });
 
-  app.post('/access-token/revoke', (req, res) => {
+  app.post('/access-token/revoke', accessLimiter, (req, res) => {
     try {
+      res.set(PRIVATE_RESPONSE);
       const token = bearerToken(req);
       if (!token) return res.status(401).json({ error: 'Access token is invalid or expired.', code: 'access_token_invalid' });
       if (!tokenSecret(env)) {
-        console.error('PORTAL_TOKEN_SECRET is not set');
+        console.error(tokenSecretProblem(env));
         return res.status(503).json({ error: 'Access tokens are temporarily unavailable.' });
       }
       if (!revokeAccessToken(token, env)) {
@@ -670,7 +753,7 @@ function createApp({
     }
   }
 
-  app.post('/jobs', upload.fields([{ name: 'file', maxCount: 25 }, { name: 'files', maxCount: 25 }]), (req, res, next) => {
+  app.post('/jobs', jobWriteLimiter, upload.fields([{ name: 'file', maxCount: 25 }, { name: 'files', maxCount: 25 }]), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: true,
       respond: async (access, files, credit, project, caller) => {
@@ -807,25 +890,35 @@ function createApp({
   async function ownedJob(req) {
     const caller = presentedCaller(req);
     const job = store.get(req.params.id);
-    if (!caller || !job || !(await callerOwnsJob(caller, job))) return null;
+    if (!caller || !job) return null;
+    if (!sessionMatches(caller, job) && callerNeedsLookup(caller, job)) await hydrateCaller(caller);
+    if (caller.notFound && !sessionMatches(caller, job)) return null;
+    if (!identityMatches(caller, job)) return null;
     return job;
   }
 
-  app.get('/jobs', async (req, res) => {
+  app.get('/jobs', jobReadLimiter, async (req, res) => {
     try {
       const caller = presentedCaller(req);
       if (!caller) return res.status(401).json({ error: 'Authorization is required.', code: 'authorization_required' });
-      const jobs = [];
-      for (const job of store.ready()) {
-        if (await callerOwnsJob(caller, job)) jobs.push(listedJob(job));
+      const ready = store.ready();
+      if (ready.some((job) => callerNeedsLookup(caller, job))) {
+        await hydrateCaller(caller);
+        if (caller.notFound) {
+          const owned = ready.filter((job) => sessionMatches(caller, job)).map(listedJob);
+          if (!owned.length) {
+            return res.status(401).json({ error: 'Authorization is required.', code: 'authorization_required' });
+          }
+          return res.json({ jobs: owned });
+        }
       }
-      return res.json({ jobs });
+      return res.json({ jobs: ready.filter((job) => identityMatches(caller, job)).map(listedJob) });
     } catch (err) {
       return sendError(res, err);
     }
   });
 
-  app.get('/jobs/:id', async (req, res) => {
+  app.get('/jobs/:id', jobReadLimiter, async (req, res) => {
     try {
       const job = await ownedJob(req);
       if (!job) return res.status(404).json(JOB_NOT_FOUND);
@@ -835,18 +928,21 @@ function createApp({
     }
   });
 
-  app.get('/jobs/:id/pdf', async (req, res) => {
+  app.get('/jobs/:id/pdf', jobReadLimiter, async (req, res) => {
     try {
+      const caller = presentedCaller(req);
       const job = await ownedJob(req);
       if (!job) return res.status(404).json(JOB_NOT_FOUND);
       if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
-      if (job.sessionId) {
-        const block = await accessBlock(stripeClient, job.sessionId, env);
+      const sessionForBlock = job.sessionId || (caller && identityMatches(caller, job) ? caller.sessionId : '');
+      if (sessionForBlock) {
+        const block = await accessBlock(stripeClient, sessionForBlock, env);
         if (block) return res.status(block.status).json({ error: block.message });
       }
       const pdf = store.readPdf(job.id);
       if (!pdf) return res.status(404).json(JOB_NOT_FOUND);
       res.set({
+        ...PRIVATE_RESPONSE,
         'Content-Type': 'application/pdf',
         'Content-Disposition': contentDisposition(job.nameSource || ''),
         'Content-Length': pdf.length,
@@ -862,7 +958,7 @@ function createApp({
       return res.status(404).json({ error: 'not_found' });
     }
     return next();
-  }, upload.single('file'), (req, res, next) => {
+  }, jobWriteLimiter, upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
       respond: async (access, files, credit, project, caller) => {
@@ -937,7 +1033,8 @@ function createApp({
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err && (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400))) {
-      console.error('Invalid request body', redactSecrets(redactCustomerLog(err.message)));
+      const length = typeof err.body === 'string' || Buffer.isBuffer(err.body) ? err.body.length : 0;
+      console.error('Invalid request body', err.type || 'SyntaxError', `length=${length}`);
       return res.status(400).json({ error: 'Invalid request body.' });
     }
     if (err && err.expose) return sendError(res, err);
@@ -1020,4 +1117,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { createApp, prepareListen, start, installShutdown, fieldsFrom };
+module.exports = { createApp, prepareListen, start, installShutdown, fieldsFrom, redactSecrets };
