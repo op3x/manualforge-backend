@@ -93,6 +93,32 @@ test('starter remaining is credits minus manuals_used', () => {
   assert.equal(suspended.valid, false);
   assert.equal(suspended.remaining, 0);
   assert.equal(suspended.creditStatus, 'suspended');
+
+  const refused = accessFromSession(
+    {
+      metadata: { plan: 'starter' },
+      payment_status: 'paid',
+      consent_collection: { terms_of_service: 'required' },
+    },
+    { id: 'pi_1', metadata: { manuals_used: '0' } },
+    null,
+    env
+  );
+  assert.equal(refused.valid, false);
+  assert.equal(refused.remaining, null);
+
+  const versioned = accessFromSession(
+    {
+      metadata: { plan: 'starter', terms_version: 'checkout-tos-v2' },
+      payment_status: 'paid',
+      consent_collection: { terms_of_service: 'required' },
+    },
+    { id: 'pi_1', metadata: { manuals_used: '0' } },
+    null,
+    env
+  );
+  assert.equal(versioned.valid, true);
+  assert.equal(versioned.remaining, 3);
 });
 
 test('pro stays valid during past_due and ends on unpaid, canceled, or incomplete_expired', () => {
@@ -144,6 +170,21 @@ test('pro stays valid during past_due and ends on unpaid, canceled, or incomplet
   assert.equal(lapsed.plan, 'pro');
   assert.equal(lapsed.remaining, null);
   assert.equal(lapsed.billingIssue, true);
+
+  const refused = accessFromSession(
+    {
+      metadata: { plan: 'pro' },
+      payment_status: 'paid',
+      consent_collection: { terms_of_service: 'required' },
+    },
+    null,
+    { id: 'sub_1', status: 'past_due', customer: 'cus_1' },
+    env
+  );
+  assert.equal(refused.valid, false);
+  assert.equal(refused.billingIssue, true);
+  assert.equal(refused.subscriptionId, 'sub_1');
+  assert.equal(refused.customerId, 'cus_1');
 });
 
 test('a refunded or suspended pro period is not valid while the subscription stays active', () => {
