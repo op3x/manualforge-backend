@@ -5,10 +5,11 @@ const os = require('os');
 const path = require('path');
 const { createJobStore, CLEANUP_INTERVAL_MS, ORPHAN_GRACE_MS, removeTestJobDirectories } = require('../lib/jobs/store');
 const { redactCustomerLog } = require('../lib/redact-log');
-const { emptyProject } = require('../lib/project');
+const { emptyProject, applyFields } = require('../lib/project');
 const { buildDocument } = require('../lib/manual/assemble');
+const { manualDate } = require('../lib/manual/date');
 const { launchOptions, closeBrowser } = require('../lib/manual/pdf');
-const { createApp, installShutdown } = require('../server');
+const { createApp, installShutdown, fieldsFrom } = require('../server');
 
 test.after(() => {
   removeTestJobDirectories();
@@ -255,7 +256,25 @@ test('logs record an identifier count and never the customer text or file name',
   assert.match(unicodeLog, /opened \[file\]/);
   assert.match(unicodeLog, /Program block \[redacted\]/);
   assert.equal(redactCustomerLog('schema 32.00.xml shipped'), 'schema 32.00.xml shipped');
-  for (const name of ['cell.awl', 'tags.db', 'part.stl', 'prog.ap', 'prog.ap17', 'pack.zap', 'pack.zap16', 'draw.dwg', 'draw.dxf', 'body.sldprt', 'body.sldasm', 'body.slddrw', 'proj.acd', 'model.step', 'model.stp', 'model.iges', 'model.igs']) {
+  assert.equal(redactCustomerLog('/tmp/32.00.xml'), '/tmp/32.00.xml');
+  assert.equal(
+    redactCustomerLog('/tmp/up/Förderband Geheim.L5X'),
+    '/tmp/up/[file]',
+  );
+  assert.equal(
+    redactCustomerLog('saved /var/backups/plant backup.tar.gz today'),
+    'saved /var/backups/[file] today',
+  );
+  assert.equal(
+    redactCustomerLog('cell.s7p and /tmp/up/Line 1.s7p'),
+    '[file] and /tmp/up/[file]',
+  );
+  assert.equal(
+    redactCustomerLog('C:\\plant\\Förderband Geheim.L5X'),
+    'C:\\plant\\[file]',
+  );
+  assert.equal(redactCustomerLog('"Förderband Geheim.L5X"'), '"[file]"');
+  for (const name of ['cell.awl', 'tags.db', 'part.stl', 'prog.ap', 'prog.ap17', 'pack.zap', 'pack.zap16', 'draw.dwg', 'draw.dxf', 'body.sldprt', 'body.sldasm', 'body.slddrw', 'proj.acd', 'model.step', 'model.stp', 'model.iges', 'model.igs', 'cell.s7p', 'backup.tar.gz', 'backup.tar.bz2', 'backup.tar.xz', 'backup.tar.zst']) {
     const line = redactCustomerLog(`got ${name} here`);
     assert.equal(line, 'got [file] here', name);
     assert.equal(line.includes(name), false);
@@ -451,4 +470,94 @@ test('shutdown closes the browser without letting puppeteer handle process signa
   assert.equal(serverClosed, true);
   assert.equal(browserClosed, 1);
   assert.equal(exited, 0);
+});
+
+test('shutdown forces exit when keep-alive connections stay open', async () => {
+  let browserClosed = 0;
+  let exited = null;
+  let idle = 0;
+  let all = 0;
+  let closeCalls = 0;
+  let cleared = 0;
+  const timers = [];
+  const handler = installShutdown({
+    close() { closeCalls += 1; },
+    closeIdleConnections() { idle += 1; },
+    closeAllConnections() { all += 1; },
+  }, {
+    closeBrowser: async () => { browserClosed += 1; },
+    exit: (code) => { exited = code; },
+    on: () => {},
+    forceMs: 10000,
+    setTimeout: (fn, ms) => {
+      const timer = { fn, ms, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout: () => { cleared += 1; },
+  });
+  const pending = handler();
+  assert.equal(closeCalls, 1);
+  assert.equal(idle, 1);
+  assert.equal(all, 1);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, 10000);
+  assert.equal(exited, null);
+  timers[0].fn();
+  await pending;
+  assert.equal(browserClosed, 1);
+  assert.equal(exited, 0);
+  assert.equal(cleared, 1);
+  timers[0].fn();
+  await handler();
+  assert.equal(browserClosed, 1);
+  assert.equal(exited, 0);
+});
+
+function revisionDate(doc) {
+  for (const chapter of doc.chapters) {
+    for (const section of chapter.sections) {
+      for (const block of section.blocks) {
+        if (block.type === 'table' && block.headers[0] === 'Revision' && block.headers[1] === 'Date') {
+          return block.rows[0][1];
+        }
+      }
+    }
+  }
+  return null;
+}
+
+test('manual date uses America/Chicago or a client-supplied date', () => {
+  const evening = new Date('2026-10-25T02:53:00Z');
+  assert.equal(manualDate({ now: evening, timeZone: 'America/Chicago' }), '2026-10-24');
+  assert.equal(manualDate({ now: evening, timeZone: 'UTC' }), '2026-10-25');
+  assert.equal(manualDate({ now: evening, timeZone: 'Not/AZone' }), '2026-10-24');
+  assert.equal(manualDate({ now: evening, timeZone: 'UTC', clientDate: '2024-05-06' }), '2024-05-06');
+  assert.equal(manualDate({ now: evening, timeZone: 'UTC', clientDate: '2026-02-31' }), '2026-10-25');
+  assert.equal(manualDate({ now: evening, clientDate: 'yesterday' }), '2026-10-24');
+
+  const zoned = buildDocument(emptyProject(), { now: evening, env: {} });
+  assert.equal(zoned.cover.date, '2026-10-24');
+  assert.equal(zoned.meta.date, '2026-10-24');
+  assert.equal(revisionDate(zoned), '2026-10-24');
+  assert.equal(JSON.stringify(zoned).includes('2026-10-25'), false);
+
+  const utc = buildDocument(emptyProject(), { now: evening, env: { MANUALOS_TZ: 'UTC' } });
+  assert.equal(utc.cover.date, '2026-10-25');
+  assert.equal(revisionDate(utc), '2026-10-25');
+
+  const project = emptyProject();
+  applyFields(project, { date: '2024-05-06' });
+  const supplied = buildDocument(project, { now: evening, env: { MANUALOS_TZ: 'UTC' } });
+  assert.equal(supplied.cover.date, '2024-05-06');
+  assert.equal(supplied.meta.date, '2024-05-06');
+  assert.equal(revisionDate(supplied), '2024-05-06');
+
+  const override = buildDocument(emptyProject(), { now: evening, env: { MANUALOS_TZ: 'UTC' }, date: '2024-01-02' });
+  assert.equal(override.cover.date, '2024-01-02');
+  assert.equal(revisionDate(override), '2024-01-02');
+  assert.deepEqual(fieldsFrom({ body: { date: '2026-10-24', revision: 'B', ignored: 'no' } }), {
+    date: '2026-10-24',
+    revision: 'B',
+  });
 });

@@ -66,7 +66,7 @@ function collectFiles(req) {
 function fieldsFrom(req) {
   const body = req.body || {};
   const fields = {};
-  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language']) {
+  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language', 'date']) {
     if (typeof body[key] === 'string') fields[key] = body[key];
   }
   return fields;
@@ -328,17 +328,29 @@ function installShutdown(server, {
   closeBrowser: close = closeBrowser,
   exit = process.exit,
   on = (signal, listener) => process.on(signal, listener),
+  setTimeout: schedule = setTimeout,
+  clearTimeout: cancel = clearTimeout,
+  forceMs = 10000,
 } = {}) {
   let shuttingDown = false;
   const handler = () => new Promise((resolve) => {
     if (shuttingDown) return resolve();
     shuttingDown = true;
+    let settled = false;
+    let timer;
     const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) cancel(timer);
       Promise.resolve()
         .then(() => close())
         .then(() => exit(0), () => exit(0))
         .then(resolve, resolve);
     };
+    timer = schedule(finish, forceMs);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    if (server && typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+    if (server && typeof server.closeAllConnections === 'function') server.closeAllConnections();
     if (server && typeof server.close === 'function') server.close(finish);
     else finish();
   });
@@ -361,4 +373,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { createApp, prepareListen, start, installShutdown };
+module.exports = { createApp, prepareListen, start, installShutdown, fieldsFrom };
