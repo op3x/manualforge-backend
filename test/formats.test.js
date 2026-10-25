@@ -14,9 +14,7 @@ const report = [];
 function mockAi() {
   return {
     messages: {
-      create: async () => {
-        throw new Error('mocked model');
-      },
+      create: async () => ({ content: [{ type: 'text', text: '{}' }] }),
     },
   };
 }
