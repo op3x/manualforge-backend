@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original ManualOS fixture. A pneumatic valve actuator, not a vendor sample. -->
+<Document>
+  <Engineering version="V17" />
+  <SW.Blocks.FB ID="0">
+    <AttributeList>
+      <Name>ValveActuator</Name>
+      <ProgrammingLanguage>LAD</ProgrammingLanguage>
+      <Interface><Sections xmlns="http://www.siemens.com/automation/Openness/SW/Interface/v5">
+        <Section Name="Input">
+          <Member Name="OpenCommand" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Open command</MultiLanguageText></Comment></Member>
+          <Member Name="ClosedFeedback" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Closed feedback</MultiLanguageText></Comment></Member>
+        </Section>
+        <Section Name="Output">
+          <Member Name="Actuator" Datatype="Bool"><Comment><MultiLanguageText Lang="en-US">Pneumatic valve actuator</MultiLanguageText></Comment></Member>
+        </Section>
+      </Sections></Interface>
+    </AttributeList>
+    <ObjectList>
+      <MultilingualText ID="1" CompositionName="Comment">
+        <ObjectList>
+          <MultilingualTextItem ID="2" CompositionName="Items">
+            <AttributeList><Culture>en-US</Culture><Text>Opens the pneumatic valve actuator when the open command is on and the closed feedback has dropped.</Text></AttributeList>
+          </MultilingualTextItem>
+        </ObjectList>
+      </MultilingualText>
+      <SW.Blocks.CompileUnit ID="3" CompositionName="CompileUnits">
+        <AttributeList>
+          <NetworkSource><FlgNet xmlns="http://www.siemens.com/automation/Openness/SW/NetworkSource/FlgNet/v4">
+            <Parts>
+              <Access Scope="GlobalVariable" UId="21"><Symbol><Component Name="OpenCommand" /></Symbol></Access>
+              <Access Scope="GlobalVariable" UId="22"><Symbol><Component Name="ClosedFeedback" /></Symbol></Access>
+              <Access Scope="GlobalVariable" UId="23"><Symbol><Component Name="Actuator" /></Symbol></Access>
+              <Part Name="Contact" UId="31" />
+              <Part Name="Contact" UId="32"><Negated Name="operand" /></Part>
+              <Part Name="Coil" UId="33" />
+            </Parts>
+            <Wires>
+              <Wire UId="41"><Powerrail /><NameCon UId="31" Name="in" /></Wire>
+              <Wire UId="42"><IdentCon UId="21" /><NameCon UId="31" Name="operand" /></Wire>
+              <Wire UId="43"><NameCon UId="31" Name="out" /><NameCon UId="32" Name="in" /></Wire>
+              <Wire UId="44"><IdentCon UId="22" /><NameCon UId="32" Name="operand" /></Wire>
+              <Wire UId="45"><NameCon UId="32" Name="out" /><NameCon UId="33" Name="in" /></Wire>
+              <Wire UId="46"><IdentCon UId="23" /><NameCon UId="33" Name="operand" /></Wire>
+            </Wires>
+          </FlgNet></NetworkSource>
+          <ProgrammingLanguage>LAD</ProgrammingLanguage>
+        </AttributeList>
+        <ObjectList>
+          <MultilingualText ID="4" CompositionName="Title">
+            <ObjectList>
+              <MultilingualTextItem ID="5" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Open the valve actuator</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+          <MultilingualText ID="6" CompositionName="Comment">
+            <ObjectList>
+              <MultilingualTextItem ID="7" CompositionName="Items">
+                <AttributeList><Culture>en-US</Culture><Text>Fault: the valve did not leave the closed position.</Text></AttributeList>
+              </MultilingualTextItem>
+            </ObjectList>
+          </MultilingualText>
+        </ObjectList>
+      </SW.Blocks.CompileUnit>
+    </ObjectList>
+  </SW.Blocks.FB>
+</Document>

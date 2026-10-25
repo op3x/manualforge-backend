@@ -153,18 +153,26 @@ test('plan gate, credit cost, and request classification', () => {
   assert.equal(planAllowsExtraDocuments('integrator'), true);
   assert.equal(creditsForDocumentRun(), 1);
   assert.equal(classifyRequest('poem about cats').related, false);
+  assert.equal(classifyRequest('write a poem').related, false);
   assert.equal(classifyRequest('chocolate cake recipe').related, false);
+  assert.equal(classifyRequest('recipe changeover').related, true);
+  assert.equal(classifyRequest('recipe changeover').kind, 'changeover');
+  assert.equal(classifyRequest('depositor cleaning').related, true);
+  assert.equal(classifyRequest('cookie depositor cleaning').kind, 'cleaning');
+  assert.equal(classifyRequest('sanitation checklist').related, true);
   assert.equal(classifyRequest('alarm and troubleshooting guide').related, true);
   assert.equal(classifyRequest('alarm and troubleshooting guide').kind, 'troubleshooting');
   assert.equal(classifyRequest('spare parts list').title, 'Spare Parts List');
   const selected = selectionFromRequest({
     body: {
       documents: '["manual","pm_schedule","shutdown","startup"]',
-      requested_documents: 'training checklist\npoem about cats',
+      requested_documents: 'alarm and troubleshooting guide, spare parts list',
     },
   });
   assert.equal(selected.requestsExtras, true);
-  assert.equal(selected.entries.filter((entry) => entry.status === 'skipped').length, 1);
+  assert.equal(selected.entries.filter((entry) => entry.kind === 'troubleshooting').length, 1);
+  assert.equal(selected.entries.filter((entry) => entry.kind === 'parts').length, 1);
+  assert.equal(selected.entries.filter((entry) => entry.status === 'skipped').length, 0);
   assert.equal(creditsForDocumentRun(selected), 1);
   assert.throws(() => selectionFromRequest({ body: { requested_documents: 'x'.repeat(1501) } }), (err) => err.status === 400);
   assert.throws(() => selectionFromRequest({ body: { documents: '["brochure"]' } }), (err) => err.status === 400);
@@ -176,14 +184,18 @@ test('schedules and procedures follow the equipment that was found', async () =>
   assert.match(pm, /Preventive Maintenance Schedule/);
   assert.match(pm, /recommended defaults/i);
   assert.match(pm, /Sign-off/);
-  assert.match(pm, /Daily tasks/);
-  assert.match(pm, /Run-hour tasks/);
-  assert.match(pm, /Conveyor motor run command/);
-  assert.match(pm, /Pneumatic cylinder valve/);
-  assert.match(pm, /Hydraulic pump enable/);
-  assert.match(pm, /Emergency stop circuit/);
-  assert.match(pm, /Part present sensor/);
-  assert.match(pm, /Gearbox lubrication point/);
+  assert.match(pm, /Tasks by interval/);
+  assert.match(pm, />Daily </);
+  assert.match(pm, /500 operating hours/);
+  assert.match(pm, /conveyor motor/i);
+  assert.equal(/run command/i.test(pm), false);
+  assert.match(pm, /pneumatic cylinder valve/i);
+  assert.match(pm, /hydraulic pump/i);
+  assert.match(pm, /emergency stop circuit/i);
+  assert.match(pm, /part present sensor/i);
+  assert.match(pm, /gearbox lubrication point/i);
+  assert.equal(/Walk the work area/.test(pm), false);
+  assert.equal(/Listen to/.test(pm), false);
   assert.match(pm, /data sheet/i);
   assert.equal(/\d+\s*Nm\b/.test(pm), false);
   assert.equal(/\d+\s*psi\b/i.test(pm), false);
@@ -191,14 +203,14 @@ test('schedules and procedures follow the equipment that was found', async () =>
 
   const line = await projectFrom(L5X, 'line.L5X');
   const linePm = htmlOf(buildPmSchedule(line, {}));
-  assert.match(linePm, /Conveyor motor/);
+  assert.match(linePm, /conveyor motor/i);
   assert.equal(/Drain filter bowls/.test(linePm), false);
   assert.equal(/Hydraulic pump/.test(linePm), false);
 
   const shutdown = htmlOf(buildShutdown(cell, {}));
   assert.match(shutdown, /Normal stop/);
   assert.match(shutdown, /Emergency stop/);
-  assert.match(shutdown, /Normal stop button/);
+  assert.match(shutdown, /normal stop button/i);
   assert.match(shutdown, /Lockout/);
   assert.match(shutdown, /Electrical/);
   assert.match(shutdown, /Pneumatic/);
@@ -211,9 +223,12 @@ test('schedules and procedures follow the equipment that was found', async () =>
   assert.match(startup, /Power-up/);
   assert.match(startup, /Homing and reset/);
   assert.match(startup, /First cycle/);
-  assert.match(startup, /Axis homing request/);
-  assert.match(startup, /Fault reset button/);
+  assert.match(startup, /Request homing/);
+  assert.match(startup, /releases the lift brake/);
+  assert.match(startup, /fault reset button/i);
   assert.match(startup, /shutdown procedure/i);
+  assert.equal(/EStop/.test(startup), false);
+  assert.equal(/Close Interlock/.test(startup), false);
 
   const guide = htmlOf(buildCustomDocument(cell, {
     id: 'custom_1',
@@ -222,8 +237,10 @@ test('schedules and procedures follow the equipment that was found', async () =>
     customKind: 'troubleshooting',
   }, {}));
   assert.match(guide, /Alarm and Troubleshooting Guide/);
-  assert.match(guide, /How this equipment works/);
+  assert.match(guide, /does not repeat that description/);
+  assert.match(guide, /guard is open/i);
   assert.equal(/XIC\(/.test(guide), false);
+  assert.equal((guide.match(/does not repeat that description/g) || []).length, 1);
 
   const branded = stampDocument(buildPmSchedule(cell, {}), {
     whiteLabel: true,
@@ -243,8 +260,8 @@ test('schedules and procedures follow the equipment that was found', async () =>
   named.identity.productName = 'Transfer cell';
   named.identity.productNameFromUser = true;
   const fromNames = htmlOf(buildPmSchedule(named, {}));
-  assert.match(fromNames, /Axis Vertical/);
-  assert.match(fromNames, /Photoeyes/);
+  assert.match(fromNames, /axis vertical/i);
+  assert.match(fromNames, /photoeyes/i);
   assert.equal(/does not move a product/.test(fromNames), false);
   const fromStop = htmlOf(buildShutdown(named, {}));
   assert.match(fromStop, /Stop/);
