@@ -248,8 +248,9 @@ test('policy facts, budget math, guardrails, and caps', async () => {
   assert.equal(policy.aiConfigured({ LLM_API_KEY: 'sk-test' }), true);
   assert.equal(policy.aiConfigured({ LLM_PROVIDER: 'other', LLM_API_KEY: 'sk-test' }), false);
   const prompt = policy.systemPrompt({}, 'voice');
-  assert.match(prompt, /Starter is \$39 one-time for 3 manuals/);
-  assert.match(prompt, /\$79 per month/);
+  assert.match(prompt, /Starter is \$39 one-time for 3 manuals\. Plus applicable taxes\./);
+  assert.match(prompt, /Pro is \$79 per month: unlimited manuals\. Plus applicable taxes\./);
+  assert.doesNotMatch(prompt, /PM schedule|startup|shutdown procedures|other documents on request/i);
   assert.match(prompt, /Starter within 30 days of purchase; Pro charges before that billing period ends/);
   assert.match(prompt, /Never promise a refund/);
   assert.doesNotMatch(prompt, /31-day/);
@@ -3754,4 +3755,21 @@ test('round 8 spelled cards across texts and refund phrasing', async () => {
   ]) {
     assert.equal(policy.promisesRefund(phrase), false, phrase);
   }
+});
+
+test('default support prompt does not promise unshipped documents', () => {
+  for (const env of [{}, { MANUALOS_EXTRA_DOCUMENTS: '' }, { MANUALOS_EXTRA_DOCUMENTS: '0' }, { MANUALOS_EXTRA_DOCUMENTS: 'false' }]) {
+    for (const channel of ['voice', 'sms']) {
+      const prompt = policy.systemPrompt(env, channel);
+      assert.match(prompt, /Starter is \$39 one-time for 3 manuals\. Plus applicable taxes\./);
+      assert.match(prompt, /Pro is \$79 per month: unlimited manuals\. Plus applicable taxes\./);
+      assert.doesNotMatch(prompt, /PM schedule/i);
+      assert.doesNotMatch(prompt, /startup/i);
+      assert.doesNotMatch(prompt, /shutdown/i);
+      assert.doesNotMatch(prompt, /other documents on request/i);
+    }
+  }
+  const enabled = policy.systemPrompt({ MANUALOS_EXTRA_DOCUMENTS: '1' }, 'voice');
+  assert.match(enabled, /Pro is \$79 per month: unlimited manuals\. Plus applicable taxes\. Plus a PM schedule, startup and shutdown procedures, and other documents on request\./);
+  assert.match(enabled, /Starter is \$39 one-time for 3 manuals\. Plus applicable taxes\./);
 });
