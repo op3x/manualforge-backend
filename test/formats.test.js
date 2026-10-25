@@ -183,7 +183,7 @@ function binaryDxf(pairs) {
   return Buffer.concat(chunks);
 }
 
-test('binary DXF keeps units, layers, and title text', { timeout: 120000 }, async () => {
+test('binary DXF keeps units, layers, and title text and does not render a manual', async () => {
   const buffer = binaryDxf([
     [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
     [0, 'SECTION'], [2, 'TABLES'], [0, 'TABLE'], [2, 'LAYER'], [70, 1],
@@ -191,12 +191,24 @@ test('binary DXF keeps units, layers, and title text', { timeout: 120000 }, asyn
     [0, 'SECTION'], [2, 'ENTITIES'], [0, 'TEXT'], [8, 'TITLE'], [1, 'Conveyor frame'],
     [0, 'ENDSEC'], [0, 'EOF'],
   ]);
-  const { project, html, pages } = await renderManual('frame.dxf', buffer);
+  const project = await parseUploads([{ name: 'frame.dxf', buffer }]);
   assert.equal(project.cad.lengthUnit, 'mm');
   assert.equal(project.cad.layers.includes('TITLE'), true);
   assert.equal(project.cad.titleBlock.includes('Conveyor frame'), true);
-  assert.match(html, /Conveyor Frame/);
-  remember({ format: 'Binary DXF', file: 'frame.dxf', rungs: 0, pages });
+  let rendered = false;
+  await assert.rejects(
+    () => generateManual({
+      project,
+      anthropic: mockAi(),
+      env: { ...process.env, MANUALOS_AI_RETRIES: '0' },
+      renderPdf: async () => {
+        rendered = true;
+        return Buffer.from('%PDF-1.4\n');
+      },
+    }),
+    (err) => err.code === 'no_model_result',
+  );
+  assert.equal(rendered, false);
 });
 
 test('ASCII STL reports size and shape only', { timeout: 120000 }, async () => {

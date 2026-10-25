@@ -47,7 +47,7 @@ const {
 const { createSmtpMailer } = require('./lib/support/mail');
 const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDir } = require('./lib/credit-ledger');
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
-const { generateManual } = require('./lib/pipeline');
+const { emptyGenerationReason, generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
@@ -551,6 +551,11 @@ function createApp({
           stopped = true;
           if (timer) cancelTimeout(timer);
           stopRefresh();
+          const emptyReason = emptyGenerationReason(result);
+          if (emptyReason) {
+            await failJob(new Error(emptyReason), false);
+            return null;
+          }
           try {
             const block = await accessBlock(stripeClient, sessionId, env);
             if (block) throw blockedError(block);
@@ -638,6 +643,13 @@ function createApp({
             env,
             renderPdf,
           });
+          const emptyReason = emptyGenerationReason(result);
+          if (emptyReason) {
+            const err = new Error(emptyReason);
+            err.status = 422;
+            err.expose = true;
+            throw err;
+          }
           const block = await accessBlock(stripeClient, sessionId, env);
           if (block) throw blockedError(block);
           if (!result.pdf || !result.pdf.length) {

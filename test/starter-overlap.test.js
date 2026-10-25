@@ -5,6 +5,8 @@ const os = require('os');
 const path = require('path');
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
+const { parseUploads } = require('../lib/parsers');
+const { emptyGenerationReason, generateManual } = require('../lib/pipeline');
 const {
   commitStarterCredit,
   readCreditHolds,
@@ -410,6 +412,94 @@ test('one failed model call still delivers the manual and keeps the credit', asy
     assert.equal(paid.meta.manuals_used, '1');
     assert.equal(paid.decrements.count, 0);
   });
+});
+
+function drawingBuffer() {
+  const gears = '/cursor/stores/bot/manualos-test-corpus/cad/cadzinho_gears.dxf';
+  if (fs.existsSync(gears)) return { name: 'cadzinho_gears.dxf', buffer: fs.readFileSync(gears) };
+  const text = [
+    '0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '4', '0', 'ENDSEC',
+    '0', 'SECTION', '2', 'TABLES', '0', 'LAYER', '2', 'TITLE', '0', 'ENDSEC',
+    '0', 'SECTION', '2', 'ENTITIES', '0', 'TEXT', '8', 'TITLE', '1', 'GEAR SKETCH', '0', 'ENDSEC',
+    '0', 'EOF', '',
+  ].join('\n');
+  return { name: 'sketch.dxf', buffer: Buffer.from(text) };
+}
+
+test('a drawing with no machine content returns its Starter credit once', async () => {
+  const paid = starterStripe();
+  let calls = 0;
+  const quiet = {
+    messages: {
+      create: async () => {
+        calls += 1;
+        return modelReply({ messages: [{ content: '' }] });
+      },
+    },
+  };
+  let rendered = false;
+  const app = createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: quiet,
+    renderPdf: async () => {
+      rendered = true;
+      return Buffer.from('%PDF-1.4\n%ok\n');
+    },
+  });
+  const drawing = drawingBuffer();
+  await withServer(app, async (base) => {
+    const form = new FormData();
+    form.set('session_id', 'cs_test_starter');
+    form.set('file', new Blob([drawing.buffer]), drawing.name);
+    const posted = await fetch(`${base}/jobs`, { method: 'POST', body: form });
+    assert.equal(posted.status, 202);
+    const job = await waitJob(base, (await posted.json()).id);
+    assert.equal(job.status, 'failed');
+    assert.equal(job.error, CREDIT_RETURN_MESSAGE);
+    assert.equal(calls, 0);
+    assert.equal(rendered, false);
+    assert.equal(paid.meta.manuals_used, '0');
+    assert.equal(paid.decrements.count, 1);
+    assert.equal(readCreditHolds(paid.meta).size, 0);
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
+    assert.equal(pdf.status, 409);
+  });
+});
+
+test('a no-machine-content signal is rejected even when a model call succeeds', async () => {
+  assert.equal(emptyGenerationReason({
+    noMachineContent: true,
+    modelCalls: { succeeded: 2 },
+  }), 'This upload has no machine content.');
+  assert.equal(emptyGenerationReason({
+    machineContent: false,
+    modelCalls: { succeeded: 1 },
+  }), 'This upload has no machine content.');
+  assert.equal(emptyGenerationReason({
+    hasMachineContent: false,
+    modelCalls: { succeeded: 1 },
+  }), 'This upload has no machine content.');
+  assert.equal(emptyGenerationReason({ modelCalls: { succeeded: 0 } }), 'No model call succeeded.');
+  assert.equal(emptyGenerationReason({ modelCalls: { succeeded: 1 } }), '');
+
+  const project = await parseUploads([{ name: 'line.L5X', buffer: L5X }]);
+  project.noMachineContent = true;
+  let rendered = false;
+  await assert.rejects(
+    () => generateManual({
+      project,
+      anthropic: anthropic(),
+      env: env(),
+      renderPdf: async () => {
+        rendered = true;
+        return Buffer.from('%PDF-1.4\n%ok\n');
+      },
+    }),
+    (err) => err.code === 'no_machine_content' && err.message === 'This upload has no machine content.',
+  );
+  assert.equal(rendered, false);
+  assert.equal(project.modelCalls.succeeded > 0, true);
 });
 
 test('a hung model call is stopped by the job timeout and the hold is released', async () => {
