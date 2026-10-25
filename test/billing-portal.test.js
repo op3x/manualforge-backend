@@ -1,3 +1,6 @@
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp } = require('../server');
@@ -1129,15 +1132,17 @@ test('a non-canceled HTS subscription blocks the portal on the token and session
       manualosSubscription({ id: 'sub_os_old', status: 'canceled', managed: true }),
       htsSubscription({ id: 'sub_hts_live', status: 'active' }),
     ], '198.51.100.96');
+    for (const result of [canceledManualos.sessionRes, canceledManualos.tokenRes]) {
+      assert.equal(result.status, 503);
+    }
     for (const body of [canceledManualos.sessionBody, canceledManualos.tokenBody]) {
-      assert.equal(body.method, 'link');
-      assert.equal(body.url, LINK_CANCEL_URL);
+      assert.deepEqual(body, { error: ONLINE_CANCEL_UNAVAILABLE });
+      assert.equal(JSON.stringify(body).includes('app.link.com'), false);
       assert.equal(JSON.stringify(body).includes('billing.stripe.com'), false);
     }
-    assert.equal(canceledManualos.sessionRes.status, 200);
-    assert.equal(canceledManualos.tokenRes.status, 200);
     assert.equal(canceledManualos.opened.length, 0);
     assert.equal(canceledManualos.lines.some((line) => line === PORTAL_BLOCKED_LOG), true);
+    assert.equal(canceledManualos.lines.some((line) => line === ONLINE_CANCEL_LOG), true);
 
     const activePair = await bothPaths([
       manualosSubscription({ id: 'sub_os_live', status: 'active', managed: false }),
@@ -1187,8 +1192,13 @@ test('a non-canceled HTS subscription blocks the portal on the token and session
   }
 }));
 
+function confirmationDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-cancel-'));
+}
+
 test('a ManualOS cancellation confirmation is sent once', async () => exclusive(async () => {
   const sent = [];
+  const dir = confirmationDir();
   const warnings = [];
   const logs = [];
   const retrieved = [];
@@ -1236,7 +1246,7 @@ test('a ManualOS cancellation confirmation is sent once', async () => exclusive(
     items: { data: [{ price: { id: 'price_pro' } }] },
   }, { cancel_at: null });
   const app = createApp({
-    env: baseEnv(),
+    env: baseEnv({ SUPPORT_DATA_DIR: dir }),
     stripe,
     anthropic: null,
     mailer: { async sendMail(message) { sent.push(message); } },
@@ -1312,7 +1322,7 @@ test('a ManualOS cancellation confirmation is sent once', async () => exclusive(
   const quietWarnings = [];
   console.warn = (...args) => quietWarnings.push(args.join(' '));
   const quiet = createApp({
-    env: baseEnv(),
+    env: baseEnv({ SUPPORT_DATA_DIR: dir }),
     stripe,
     anthropic: null,
     mailer: null,
@@ -1329,5 +1339,184 @@ test('a ManualOS cancellation confirmation is sent once', async () => exclusive(
     console.warn = originalWarn;
     console.error = originalError;
     await new Promise((resolve) => quietServer.server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+function confirmationStripe() {
+  return {
+    customers: {
+      retrieve: async (id) => ({ id, email: 'buyer@example.com' }),
+    },
+    webhooks: {
+      constructEvent(body, signature, secret) {
+        if (signature !== 't=1,v1=ok' || secret !== 'whsec_test') throw new Error('bad signature');
+        return JSON.parse(Buffer.from(body).toString('utf8'));
+      },
+    },
+  };
+}
+
+function confirmationEvent(end) {
+  return {
+    id: 'evt_sub_os',
+    type: 'customer.subscription.updated',
+    data: {
+      object: {
+        id: 'sub_os',
+        status: 'active',
+        customer: 'cus_buyer',
+        cancel_at: end,
+        cancel_at_period_end: false,
+        metadata: { brand: 'manualos' },
+        items: { data: [{ price: { id: 'price_pro' } }] },
+      },
+      previous_attributes: { cancel_at: null },
+    },
+  };
+}
+
+async function postConfirmation(base, payload) {
+  return fetch(`${base}/webhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+    body: JSON.stringify(payload),
+  });
+}
+
+test('concurrent cancellation deliveries send one confirmation', async () => exclusive(async () => {
+  const dir = confirmationDir();
+  const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
+  const sent = [];
+  let releaseSend;
+  const gate = new Promise((resolve) => { releaseSend = resolve; });
+  let started = 0;
+  const app = createApp({
+    env: baseEnv({ SUPPORT_DATA_DIR: dir }),
+    stripe: confirmationStripe(),
+    anthropic: null,
+    mailer: {
+      async sendMail(message) {
+        started += 1;
+        sent.push(message);
+        await gate;
+      },
+    },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  const payload = confirmationEvent(end);
+  const finished = [];
+  try {
+    const pending = [postConfirmation(base, payload), postConfirmation(base, payload)].map((run) => run.then((res) => {
+      finished.push(res);
+      return res;
+    }));
+    await new Promise((resolve, reject) => {
+      const timer = setInterval(() => {
+        if (started === 1 && finished.length === 1) {
+          clearInterval(timer);
+          clearTimeout(limit);
+          resolve();
+        }
+      }, 5);
+      const limit = setTimeout(() => {
+        clearInterval(timer);
+        reject(new Error(`concurrent confirmations did not settle started=${started} finished=${finished.length}`));
+      }, 3000);
+    });
+    assert.equal(started, 1);
+    releaseSend();
+    const responses = await Promise.all(pending);
+    assert.equal(responses.filter((res) => res.status === 200).length, 2);
+    assert.equal(started, 1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, 'buyer@example.com');
+    assert.equal(fs.readdirSync(path.join(dir, 'cancel-confirmations')).length, 1);
+  } finally {
+    releaseSend();
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('a cancellation confirmation is not sent again after a restart', async () => exclusive(async () => {
+  const dir = confirmationDir();
+  const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
+  const payload = confirmationEvent(end);
+  const env = baseEnv({ SUPPORT_DATA_DIR: dir });
+  const firstSent = [];
+  const first = createApp({
+    env,
+    stripe: confirmationStripe(),
+    anthropic: null,
+    mailer: { async sendMail(message) { firstSent.push(message); } },
+    now: () => FIXED,
+  });
+  const firstServer = await listen(first);
+  try {
+    const res = await postConfirmation(firstServer.base, payload);
+    assert.equal(res.status, 200);
+    assert.equal(firstSent.length, 1);
+    assert.equal(fs.readdirSync(path.join(dir, 'cancel-confirmations')).length, 1);
+  } finally {
+    await new Promise((resolve) => firstServer.server.close(resolve));
+  }
+
+  const secondSent = [];
+  const second = createApp({
+    env,
+    stripe: confirmationStripe(),
+    anthropic: null,
+    mailer: { async sendMail(message) { secondSent.push(message); } },
+    now: () => FIXED,
+  });
+  const secondServer = await listen(second);
+  try {
+    const again = await postConfirmation(secondServer.base, payload);
+    assert.equal(again.status, 200);
+    assert.deepEqual(await again.json(), { received: true });
+    assert.equal(secondSent.length, 0);
+    assert.equal(firstSent.length, 1);
+    assert.equal(fs.readdirSync(path.join(dir, 'cancel-confirmations')).length, 1);
+  } finally {
+    await new Promise((resolve) => secondServer.server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('a failed cancellation send releases the claim so a retry can send', async () => exclusive(async () => {
+  const dir = confirmationDir();
+  const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
+  const payload = confirmationEvent(end);
+  const sent = [];
+  let attempts = 0;
+  const app = createApp({
+    env: baseEnv({ SUPPORT_DATA_DIR: dir }),
+    stripe: confirmationStripe(),
+    anthropic: null,
+    mailer: {
+      async sendMail(message) {
+        attempts += 1;
+        if (attempts === 1) throw new Error('smtp down');
+        sent.push(message);
+      },
+    },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const failed = await postConfirmation(base, payload);
+    assert.equal(failed.status, 500);
+    assert.deepEqual(await failed.json(), { error: 'Webhook handler failed' });
+    assert.deepEqual(fs.readdirSync(path.join(dir, 'cancel-confirmations')), []);
+    const retried = await postConfirmation(base, payload);
+    assert.equal(retried.status, 200);
+    assert.equal(attempts, 2);
+    assert.equal(sent.length, 1);
+    assert.equal(fs.readdirSync(path.join(dir, 'cancel-confirmations')).length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }));

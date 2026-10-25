@@ -22,7 +22,7 @@ const INTEGRATOR_YEARLY = 'ManualOS Integrator: 25 manuals per month, billed yea
 const OVERAGE_DESCRIPTION = 'ManualOS Integrator: one extra manual';
 
 const AI_WORD = /\bAI\b/i;
-const CONSENT_KEYS = ['terms_version', 'disclosure_version', 'renewal_consent_at', 'terms_consent_at', 'consent_ip', 'brand'];
+const CONSENT_KEYS = ['terms_version', 'disclosure_version', 'renewal_consent_at', 'terms_consent_at', 'consent_ip'];
 
 function consentBody(plan) {
   const body = { plan, termsAccepted: true, termsVersion: 'terms-2026-10-25' };

@@ -164,7 +164,6 @@ function createApp({
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
   const clock = typeof now === 'function' ? now : () => Date.now();
   const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
-  const sentCancellationNotices = new Set();
   const uploadLimit = limits(env).uploadBytes;
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
   const store = jobs || createJobStore({ env });
@@ -250,7 +249,6 @@ function createApp({
         stripe: stripeForEvent,
         env,
         mailer: mailerClient,
-        sent: sentCancellationNotices,
       });
     } catch (err) {
       const detail = err && err.message ? String(err.message) : 'error';
