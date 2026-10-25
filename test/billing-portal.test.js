@@ -6,11 +6,19 @@ const {
   EMAIL_LIMIT,
   INVALID_LINK,
   IP_LIMIT,
+  PORTAL_UNAVAILABLE,
+  SESSION_PORTAL_MAX_AGE_MS,
+  SMTP_SKIP_WARNING,
+  SMTP_UNCONFIGURED_WARNING,
   TOKEN_TTL_MS,
+  customerOwnsManualos,
+  isManualosPurchase,
   normalizeEmail,
   sessionOpensPortal,
+  sessionWithinPortalWindow,
   signPortalToken,
   verifyPortalToken,
+  warnIfSmtpUnconfigured,
 } = require('../lib/billing-portal');
 
 const FIXED = Date.parse('2026-10-25T15:00:00.000Z');
@@ -43,8 +51,55 @@ function proSession(customer, extra = {}) {
     mode: 'subscription',
     payment_status: 'paid',
     customer,
-    metadata: { plan: 'pro' },
+    created: Math.floor(FIXED / 1000),
+    metadata: { plan: 'pro', brand: 'manualos' },
+    integration_identifier: 'manualos_pro_mhtbvcln',
     ...extra,
+  };
+}
+
+function htsSession(extra = {}) {
+  return {
+    id: 'cs_hts',
+    mode: 'subscription',
+    payment_status: 'paid',
+    customer: 'cus_hts',
+    created: Math.floor(FIXED / 1000),
+    metadata: { plan: 'pro', brand: 'htsatlas' },
+    integration_identifier: 'htsatlas_pro',
+    lookup_key: 'htsatlas_pro',
+    ...extra,
+  };
+}
+
+function manualosStripeExtras() {
+  return {
+    customers: {
+      retrieve: async (id) => {
+        if (id === 'cus_hts') return { id, metadata: { brand: 'htsatlas' } };
+        if (id === 'cus_unmarked') return { id, metadata: { plan: 'pro' } };
+        return { id, metadata: { brand: 'manualos' } };
+      },
+    },
+    subscriptions: {
+      list: async ({ customer }) => {
+        if (customer === 'cus_hts') {
+          return {
+            data: [{
+              metadata: { brand: 'htsatlas' },
+              items: { data: [{ price: { id: 'price_hts', lookup_key: 'htsatlas_pro' } }] },
+            }],
+          };
+        }
+        if (customer === 'cus_unmarked') return { data: [{ metadata: { plan: 'pro' } }] };
+        return {
+          data: [{
+            metadata: { brand: 'manualos' },
+            items: { data: [{ price: { id: 'price_pro', lookup_key: 'manualos_pro_mhtbvcln' } }] },
+          }],
+        };
+      },
+    },
   };
 }
 
@@ -64,9 +119,8 @@ test('portal tokens are bound to one customer and expire', () => {
   const webhookOnly = { STRIPE_WEBHOOK_SECRET: 'whsec_test' };
   const dedicated = signPortalToken('cus_buyer', env, FIXED);
   assert.equal(verifyPortalToken(dedicated, webhookOnly, FIXED), '');
-  const fallback = signPortalToken('cus_buyer', webhookOnly, FIXED);
-  assert.equal(verifyPortalToken(fallback, webhookOnly, FIXED), 'cus_buyer');
-  assert.equal(verifyPortalToken(fallback, env, FIXED), '');
+  assert.equal(signPortalToken('cus_buyer', webhookOnly, FIXED), '');
+  assert.equal(verifyPortalToken(dedicated, { PORTAL_TOKEN_SECRET: '   ', STRIPE_WEBHOOK_SECRET: 'whsec_test' }, FIXED), '');
 
   const [body, sig] = token.split('.');
   const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
@@ -80,6 +134,95 @@ test('portal tokens are bound to one customer and expire', () => {
   assert.equal(sessionOpensPortal({ mode: 'payment', payment_status: 'paid', customer: 'cus_s', metadata: { plan: 'starter' } }), false);
   assert.equal(sessionOpensPortal({ mode: 'payment', payment_status: 'paid', customer: 'cus_o', metadata: { plan: 'integrator_overage' } }), false);
   assert.equal(sessionOpensPortal({ payment_status: 'paid', customer: { id: 'cus_integrator' }, metadata: { plan: 'integrator' } }), true);
+});
+
+test('ManualOS identification ignores HTS Atlas on the shared Stripe account', async () => {
+  const env = baseEnv();
+  const cases = [
+    [{ metadata: { brand: 'manualos', plan: 'pro' } }, true],
+    [{ metadata: { brand: ' ManualOS ' } }, true],
+    [{ metadata: { brand: 'htsatlas', plan: 'pro' }, integration_identifier: 'htsatlas_pro', lookup_key: 'htsatlas_pro' }, false],
+    [{ metadata: { plan: 'pro' } }, false],
+    [{ metadata: { brand: 'htsatlas' }, line_items: { data: [{ price: { id: 'price_pro' } }] } }, true],
+    [{ metadata: { brand: 'htsatlas' }, lookup_key: 'htsatlas_pro' }, false],
+    [{ metadata: { plan: 'pro' }, integration_identifier: 'manualos_pro_mhtbvcln' }, true],
+    [{ metadata: { plan: 'pro' }, lookup_key: 'manualos_starter_kwnqxpdl' }, true],
+    [{ metadata: { plan: 'pro' }, line_items: { data: [{ price: { lookup_key: 'manualos_pro_mhtbvcln' } }] } }, true],
+  ];
+  for (const [session, expected] of cases) {
+    assert.equal(isManualosPurchase(session, null, null, env), expected, JSON.stringify(session.metadata));
+  }
+  assert.equal(isManualosPurchase(
+    null,
+    { metadata: { brand: 'htsatlas' }, items: { data: [{ price: { id: 'price_pro', lookup_key: 'manualos_pro_mhtbvcln' } }] } },
+    { metadata: { brand: 'manualos' } },
+    env,
+  ), false);
+  assert.equal(isManualosPurchase(
+    null,
+    { metadata: { plan: 'pro' }, items: { data: [{ price: { id: 'price_pro' } }] } },
+    null,
+    env,
+  ), true);
+  assert.equal(isManualosPurchase({ metadata: { plan: 'pro' } }, null, { metadata: { brand: 'manualos' } }, env), true);
+  assert.equal(isManualosPurchase(
+    { metadata: { brand: 'htsatlas' } },
+    { metadata: { brand: 'manualos' } },
+    { metadata: { brand: 'manualos' } },
+    env,
+  ), false);
+
+  const foreignCustomer = {
+    customers: { retrieve: async () => ({ metadata: { brand: 'manualos' } }) },
+    subscriptions: {
+      list: async () => ({
+        data: [{ metadata: { brand: 'htsatlas' }, items: { data: [{ price: { lookup_key: 'htsatlas_pro' } }] } }],
+      }),
+    },
+  };
+  assert.equal(await customerOwnsManualos(foreignCustomer, 'cus_hts', env), false);
+  const brandedOnly = {
+    customers: { retrieve: async () => ({ metadata: { brand: 'manualos' } }) },
+    subscriptions: { list: async () => ({ data: [] }) },
+  };
+  assert.equal(await customerOwnsManualos(brandedOnly, 'cus_new', env), true);
+  const unmarked = {
+    customers: { retrieve: async () => ({ metadata: { plan: 'pro' } }) },
+    subscriptions: { list: async () => ({ data: [{ metadata: { plan: 'pro' } }] }) },
+  };
+  assert.equal(await customerOwnsManualos(unmarked, 'cus_plain', env), false);
+  const missingApis = { customers: { retrieve: async () => ({ metadata: {} }) } };
+  assert.equal(await customerOwnsManualos(missingApis, 'cus_plain', env), false);
+});
+
+test('session_id portal access is limited to checkout sessions from the last 24 hours', () => {
+  const recent = { created: Math.floor(FIXED / 1000) };
+  assert.equal(sessionWithinPortalWindow(recent, FIXED), true);
+  assert.equal(sessionWithinPortalWindow({ created: Math.floor((FIXED - SESSION_PORTAL_MAX_AGE_MS) / 1000) }, FIXED), true);
+  assert.equal(sessionWithinPortalWindow({ created: Math.floor((FIXED - SESSION_PORTAL_MAX_AGE_MS) / 1000) - 1 }, FIXED), false);
+  assert.equal(sessionWithinPortalWindow({}, FIXED), false);
+  assert.equal(sessionWithinPortalWindow({ created: Math.floor(FIXED / 1000) + 60 }, FIXED), false);
+  assert.equal(sessionWithinPortalWindow({ created: FIXED }, FIXED), true);
+});
+
+test('smtp warnings name the missing cancel-mail configuration', () => {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => {
+    const line = args.join(' ');
+    if (line === SMTP_UNCONFIGURED_WARNING) warnings.push(line);
+  };
+  try {
+    const before = warnings.length;
+    assert.equal(warnIfSmtpUnconfigured({ SMTP_HOST: 'smtp.example.com', SMTP_FROM: 'alerts@example.com' }), false);
+    assert.equal(warnings.length, before);
+    assert.equal(warnIfSmtpUnconfigured({ SMTP_HOST: 'smtp.example.com' }), true);
+    assert.equal(warnings.at(-1), SMTP_UNCONFIGURED_WARNING);
+    assert.equal(warnIfSmtpUnconfigured({}), true);
+    assert.equal(SMTP_UNCONFIGURED_WARNING.includes('buyer@'), false);
+  } finally {
+    console.warn = original;
+  }
 });
 
 function listen(app) {
@@ -125,6 +268,9 @@ test('unknown and known emails match, and a token cannot open another customer',
         list: async (params) => {
           lists.push(params);
           await gate;
+          if (params.customer_details.email === 'hts-only@example.com') {
+            return { data: [htsSession({ customer: 'cus_hts_only', id: 'cs_hts_only' })] };
+          }
           if (params.customer_details.email === 'buyer@example.com') {
             return {
               data: [
@@ -132,6 +278,15 @@ test('unknown and known emails match, and a token cannot open another customer',
                 { id: 'cs_starter', mode: 'payment', payment_status: 'paid', customer: 'cus_starter', metadata: { plan: 'starter' } },
                 { id: 'cs_unpaid', mode: 'subscription', payment_status: 'unpaid', customer: 'cus_unpaid', metadata: { plan: 'pro' } },
                 proSession({ id: 'cus_expanded' }, { customer: { id: 'cus_expanded' }, id: 'cs_expanded' }),
+                htsSession(),
+                {
+                  id: 'cs_unmarked',
+                  mode: 'subscription',
+                  payment_status: 'paid',
+                  customer: 'cus_unmarked',
+                  created: Math.floor(FIXED / 1000),
+                  metadata: { plan: 'pro' },
+                },
               ],
             };
           }
@@ -140,7 +295,39 @@ test('unknown and known emails match, and a token cannot open another customer',
         retrieve: async (id) => {
           if (id === 'cs_test_pro') return proSession('cus_session');
           if (id === 'cs_starter') {
-            return { id, mode: 'payment', payment_status: 'paid', customer: 'cus_starter', metadata: { plan: 'starter' } };
+            return {
+              id,
+              mode: 'payment',
+              payment_status: 'paid',
+              customer: 'cus_starter',
+              created: Math.floor(FIXED / 1000),
+              metadata: { plan: 'starter' },
+            };
+          }
+          if (id === 'cs_old') {
+            return proSession('cus_old', { id, created: Math.floor(FIXED / 1000) - (25 * 60 * 60) });
+          }
+          if (id === 'cs_hts') return htsSession();
+          if (id === 'cs_unmarked') {
+            return {
+              id,
+              mode: 'subscription',
+              payment_status: 'paid',
+              customer: 'cus_unmarked',
+              created: Math.floor(FIXED / 1000),
+              metadata: { plan: 'pro' },
+            };
+          }
+          if (id === 'cs_price') {
+            return {
+              id,
+              mode: 'subscription',
+              payment_status: 'paid',
+              customer: 'cus_price',
+              created: Math.floor(FIXED / 1000),
+              metadata: { plan: 'pro' },
+              line_items: { data: [{ price: { id: 'price_pro' } }] },
+            };
           }
           const err = new Error('SUPER_SECRET_SESSION');
           err.statusCode = 404;
@@ -149,6 +336,7 @@ test('unknown and known emails match, and a token cannot open another customer',
         },
       },
     },
+    ...manualosStripeExtras(),
     billingPortal: {
       sessions: {
         create: async (params) => {
@@ -215,9 +403,18 @@ test('unknown and known emails match, and a token cannot open another customer',
     assert.equal(sent[0].text.includes('other@example.com'), false);
     const links = sent[0].text.match(/https:\/\/\S+/g);
     assert.equal(links.length, 2);
+    assert.equal(sent[0].text.includes('htsatlas'), false);
+    assert.equal(sent[0].text.includes('cus_hts'), false);
+    assert.equal(sent[0].text.includes('cus_unmarked'), false);
     const tokens = links.map((link) => new URL(link).searchParams.get('token'));
     const customers = tokens.map((token) => verifyPortalToken(token, env, FIXED));
     assert.deepEqual(customers, ['cus_buyer', 'cus_expanded']);
+    const htsOnly = await post(base, '/access-link', { email: 'hts-only@example.com' }, '198.51.100.10');
+    assert.equal(htsOnly.status, 202);
+    assert.deepEqual(await htsOnly.json(), { ok: true });
+    await app.settle();
+    assert.equal(sent.length, 1);
+    assert.equal(lists.length, 3);
 
     const mismatch = await post(base, '/billing-portal', {
       token: tokens[0],
@@ -264,6 +461,24 @@ test('unknown and known emails match, and a token cannot open another customer',
     const none = await post(base, '/billing-portal', {}, '198.51.100.19');
     assert.equal(none.status, 400);
     assert.equal((await none.json()).error, 'A cancel link is required.');
+
+    const old = await post(base, '/billing-portal', { session_id: 'cs_old' }, '198.51.100.22');
+    assert.equal(old.status, 400);
+    assert.equal((await old.json()).error, INVALID_LINK);
+    const hts = await post(base, '/billing-portal', { session_id: 'cs_hts' }, '198.51.100.23');
+    assert.equal(hts.status, 400);
+    assert.equal((await hts.json()).error, INVALID_LINK);
+    const unmarked = await post(base, '/billing-portal', { session_id: 'cs_unmarked' }, '198.51.100.24');
+    assert.equal(unmarked.status, 400);
+    assert.equal((await unmarked.json()).error, INVALID_LINK);
+    const priced = await post(base, '/billing-portal', { session_id: 'cs_price' }, '198.51.100.25');
+    assert.equal(priced.status, 200);
+    assert.equal(created.at(-1).customer, 'cus_price');
+    const htsToken = signPortalToken('cus_hts', env, FIXED);
+    const htsPortal = await post(base, '/billing-portal', { token: htsToken }, '198.51.100.26');
+    assert.equal(htsPortal.status, 400);
+    assert.equal((await htsPortal.json()).error, INVALID_LINK);
+    assert.equal(created.some((row) => row.customer === 'cus_hts' || row.customer === 'cus_unmarked' || row.customer === 'cus_old'), false);
 
     const badEmail = await post(base, '/access-link', { email: 'nope' }, '198.51.100.21');
     assert.equal(badEmail.status, 400);
@@ -450,6 +665,115 @@ test('lookup and mail failures do not change the access-link response or log the
     assert.equal(logged.includes('SUPER_SECRET_SMTP'), false);
   } finally {
     console.error = original;
+    await new Promise((resolve) => server.close(resolve));
+  }
+}));
+
+test('a missing portal secret fails closed and does not fall back to the webhook secret', async () => exclusive(async () => {
+  const lists = [];
+  const created = [];
+  const sent = [];
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  const env = baseEnv();
+  delete env.PORTAL_TOKEN_SECRET;
+  const stripe = {
+    checkout: {
+      sessions: {
+        list: async (params) => {
+          lists.push(params);
+          return { data: [proSession('cus_buyer')] };
+        },
+        retrieve: async () => proSession('cus_session'),
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/recent' };
+        },
+      },
+    },
+    ...manualosStripeExtras(),
+  };
+  const app = createApp({
+    env,
+    stripe,
+    anthropic: null,
+    mailer: { async sendMail(message) { sent.push(message); } },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const invalid = await post(base, '/access-link', { email: 'nope' }, '198.51.100.70');
+    assert.equal(invalid.status, 503);
+    assert.deepEqual(await invalid.json(), { error: PORTAL_UNAVAILABLE });
+    const known = await post(base, '/access-link', { email: 'buyer@example.com' }, '198.51.100.71');
+    assert.equal(known.status, 503);
+    assert.equal(known.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await known.json(), { error: PORTAL_UNAVAILABLE });
+    await app.settle();
+    assert.equal(lists.length, 0);
+    assert.equal(sent.length, 0);
+
+    const token = signPortalToken('cus_buyer', baseEnv(), FIXED);
+    const redeemed = await post(base, '/billing-portal', { token }, '198.51.100.72');
+    assert.equal(redeemed.status, 503);
+    assert.deepEqual(await redeemed.json(), { error: PORTAL_UNAVAILABLE });
+    assert.equal(created.length, 0);
+
+    const session = await post(base, '/billing-portal', { session_id: 'cs_test_pro' }, '198.51.100.73');
+    assert.equal(session.status, 200);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].customer, 'cus_session');
+
+    const logged = logs.join('\n');
+    assert.match(logged, /PORTAL_TOKEN_SECRET is not set/);
+    assert.equal(logged.includes('whsec_test'), false);
+    assert.equal(logged.includes(token), false);
+    assert.equal(logged.includes('buyer@example.com'), false);
+  } finally {
+    console.error = original;
+    await app.settle();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}));
+
+test('each skipped cancel email warns when SMTP is not configured', async () => exclusive(async () => {
+  const warnings = [];
+  const lists = [];
+  const original = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  const stripe = {
+    checkout: {
+      sessions: {
+        list: async (params) => {
+          lists.push(params);
+          return { data: [proSession('cus_buyer')] };
+        },
+      },
+    },
+  };
+  const app = createApp({
+    env: baseEnv(),
+    stripe,
+    anthropic: null,
+    mailer: null,
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const res = await post(base, '/access-link', { email: 'buyer@example.com' }, '198.51.100.80');
+    assert.equal(res.status, 202);
+    assert.deepEqual(await res.json(), { ok: true });
+    await app.settle();
+    assert.equal(lists.length, 0);
+    assert.equal(warnings.filter((line) => line === SMTP_SKIP_WARNING).length, 1);
+    assert.equal(warnings.some((line) => line.includes('buyer@example.com')), false);
+  } finally {
+    console.warn = original;
     await new Promise((resolve) => server.close(resolve));
   }
 }));

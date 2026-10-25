@@ -36,9 +36,9 @@ const {
   rollbackFirstManual,
   touchGenerationStarted,
 } = require('./lib/delivery');
-const { applyCheckoutConsent } = require('./lib/checkout-consent');
+const { applyCheckoutConsent, withManualosBrand } = require('./lib/checkout-consent');
 const { requestIp } = require('./lib/client-ip');
-const { mountBillingPortal } = require('./lib/billing-portal');
+const { mountBillingPortal, warnIfSmtpUnconfigured } = require('./lib/billing-portal');
 const { createSmtpMailer } = require('./lib/support/mail');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
@@ -261,16 +261,18 @@ function createApp({
       const plan = req.body && req.body.plan;
       // #13 order is withCheckoutPolicy around checkout params. #10's withAttribution
       // wraps that result (either order). #16 applyManualosCheckout may replace the
-      // price. Consent metadata is applied after that and only writes metadata.
-      const params = applyCheckoutConsent(
+      // price. Consent metadata is applied after that and only writes metadata, so it
+      // does not set consent_collection or custom_text. CHECKOUT_REQUIRE_CONSENT gates
+      // the 400; present consent is stored either way. withManualosBrand stamps brand.
+      const params = withManualosBrand(applyCheckoutConsent(
         await applyManualosCheckout(
           stripeClient,
           withCheckoutPolicy(checkoutParams(plan, env), { plan, env }),
           plan,
         ),
         req.body,
-        { ip: requestIp(req), now: clock() },
-      );
+        { ip: requestIp(req), now: clock(), env },
+      ));
       const session = await stripeClient.checkout.sessions.create(params);
       if (!session || !session.url) {
         console.error('Stripe Checkout Session did not include a URL');
@@ -621,6 +623,7 @@ function installShutdown(server, {
 
 function start() {
   if (!prepareListen(process.env)) return null;
+  warnIfSmtpUnconfigured(process.env);
   logPythonAvailability();
   const port = process.env.PORT || 3001;
   const app = createApp();

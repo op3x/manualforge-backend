@@ -18,9 +18,9 @@ Request JSON:
 - Starter: `{ "plan": "starter", "termsAccepted": true, "termsVersion": "<terms version>" }`
 - Pro: the Starter fields plus `"renewalConsent": true` and `"disclosureVersion": "<auto-renew disclosure version>"`
 
-`termsAccepted` and `renewalConsent` must be the boolean `true`. The version strings are the copy the buyer was shown, trimmed, with no control characters, at most 80 characters. A subscription plan (Pro, and Integrator when that checkout exists) is rejected with **400** when the renewal flag or `disclosureVersion` is missing. Starter is a one-time payment and does not require the renewal flag. Integrator overage, also one-time, follows the Starter rule.
+`termsAccepted` and `renewalConsent` must be the boolean `true`. The version strings are the copy the buyer was shown, trimmed, with no control characters, at most 80 characters. `CHECKOUT_REQUIRE_CONSENT` defaults off. While it is unset, a checkout without those fields still opens, and a complete consent body is stored. Set it to `1` only after the frontend sends the checkboxes. Then a subscription plan (Pro, and Integrator when that checkout exists) is rejected with **400** when Terms, the renewal flag, or `disclosureVersion` is missing. Starter is a one-time payment and does not require the renewal flag. Integrator overage, also one-time, follows the Starter rule.
 
-The server writes `terms_version` on the Checkout Session metadata. A subscription also writes `disclosure_version`, `renewal_consent_at` (ISO-8601), and `plan` on both the session metadata and `subscription_data.metadata`. Starter writes `terms_consent_at` instead of the renewal fields. `consent_ip` is added on those same objects when the request IP is already available (`req.ip`). This does not set `consent_collection` or `custom_text`.
+The server writes `terms_version` on the Checkout Session metadata. A subscription also writes `disclosure_version`, `renewal_consent_at` (ISO-8601), and `plan` on both the session metadata and `subscription_data.metadata`. Starter writes `terms_consent_at` instead of the renewal fields, on the session metadata and on `payment_intent_data.metadata`. `consent_ip` is added on those same objects when the request IP is already available (`req.ip`). New sessions also store `brand` `manualos` on that metadata so cancel links can ignore other products on the shared Stripe account. This does not set `consent_collection` or `custom_text`.
 
 Response JSON: `{ "url": "<hosted Checkout URL>" }`.
 
@@ -35,15 +35,15 @@ Checkout requires a billing address. The pay button shows: "Refundable until you
 
 Request JSON: `{ "email": "buyer@example.com" }`.
 
-`202` `{ "ok": true }` for every valid address, whether or not a subscription exists. The response is sent before the Stripe lookup, so an unknown address takes the same time as a known one. `400` `{ "error": "A valid email is required." }` for a missing or invalid address. `429` `{ "error": "Too many requests. Try again later." }` after 10 requests from one IP in an hour, or 3 requests for one address in an hour. The 429 body is the same in both cases.
+`202` `{ "ok": true }` for every valid address, whether or not a subscription exists. The response is sent before the Stripe lookup, so an unknown address takes the same time as a known one. `400` `{ "error": "A valid email is required." }` for a missing or invalid address. `429` `{ "error": "Too many requests. Try again later." }` after 10 requests from one IP in an hour, or 3 requests for one address in an hour. The 429 body is the same in both cases. `503` `{ "error": "Cancel links are temporarily unavailable." }` when `PORTAL_TOKEN_SECRET` is unset. That response is the same for every caller, including an invalid address, and it is sent before the Stripe lookup.
 
-When the address has a paid subscription Checkout Session from the last 12 months, the server emails `${FRONTEND_URL}/cancel?token=...`. The token is an HMAC tied to that session's Stripe customer and expires after one hour. It is not a Checkout `session_id` and cannot be used to generate a manual. No email is sent for an unknown address or a Starter-only buyer. The route does not say which of those happened.
+When the address has a paid ManualOS subscription Checkout Session from the last 12 months, the server emails `${FRONTEND_URL}/cancel?token=...`. A session counts when metadata `brand` is `manualos` on the session, subscription, or customer, when the price id is one of this service's `STRIPE_PRICE_*` values, or when a lookup key or integration id matches `manualos_*`. `metadata.plan` alone does not count. Anything else, including an HTS Atlas subscription, is ignored, and an HTS-only buyer is not emailed. No email is sent for an unknown address or a Starter-only buyer. The route does not say which of those happened. The token is an HMAC tied to that session's Stripe customer and expires after one hour. It is not a Checkout `session_id` and cannot be used to generate a manual. `PORTAL_TOKEN_SECRET` is the only HMAC key. `STRIPE_WEBHOOK_SECRET` is not a fallback.
 
 ### `POST /billing-portal`
 
 Request JSON: `{ "token": "<token from the email>" }` or `{ "session_id": "cs_..." }` for the buyer who still has their Checkout Session. Send one of those, not both. An optional `customer` must equal the customer on the token or session; a different customer is rejected and no portal session is created.
 
-`200` `{ "url": "<Billing Portal URL>" }`. `return_url` is `${FRONTEND_URL}/cancel`. When `STRIPE_PORTAL_CONFIGURATION_ID` is set, that configuration id is sent. `400` when the token or session is missing, invalid, expired, unpaid, or not a subscription. The same error is returned for an unknown session and for a Starter session. `429` uses the same body as `/access-link` after 10 requests from one IP in an hour.
+`200` `{ "url": "<Billing Portal URL>" }`. `return_url` is `${FRONTEND_URL}/cancel`. When `STRIPE_PORTAL_CONFIGURATION_ID` is set, that configuration id is sent. Use a ManualOS-only configuration; the Stripe account is shared with HTS Atlas, and the account default portal can show those subscriptions. `400` `{ "error": "A cancel link is required." }` when the body has neither field or both. `400` `{ "error": "This cancel link is invalid or expired." }` when the token is invalid or expired, the customer has no ManualOS subscription, or the session is unknown, unpaid, older than 24 hours, Starter, HTS Atlas, or otherwise not ManualOS. A `session_id` works only for a Checkout Session created in the last 24 hours. Older buyers use the email link. Token redemption returns `503` `{ "error": "Cancel links are temporarily unavailable." }` when `PORTAL_TOKEN_SECRET` is unset, before the token is treated as invalid. A `session_id` from the last 24 hours does not need that secret. `429` uses the same body as `/access-link` after 10 requests from one IP in an hour.
 
 ### `GET /verify-session?session_id=cs_...`
 
@@ -99,8 +99,9 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
 | `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. Renewal consent does not use this flag. |
-| `PORTAL_TOKEN_SECRET` | No | HMAC key for cancel links. When unset, `STRIPE_WEBHOOK_SECRET` is the key. Never logged. |
-| `STRIPE_PORTAL_CONFIGURATION_ID` | No | Billing Portal configuration id (`bpc_...`). Unset uses the account's default configuration. |
+| `CHECKOUT_REQUIRE_CONSENT` | No | Set to `1` after the frontend sends Terms and auto-renew checkboxes. Until then a missing checkbox is allowed, and a present checkbox is still stored. |
+| `PORTAL_TOKEN_SECRET` | For cancel links | HMAC key for `/access-link` tokens. If it is unset, `/access-link` and token redemption return 503. There is no fallback to `STRIPE_WEBHOOK_SECRET`. Never logged. |
+| `STRIPE_PORTAL_CONFIGURATION_ID` | Strongly recommended | Billing Portal configuration id (`bpc_...`). Use a configuration that includes only ManualOS products. This Stripe account is shared with HTS Atlas, and the account default portal can show those subscriptions. |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
@@ -110,7 +111,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `SUPPORT_PHONE` | No | E.164 number customers call. Mentioned in HELP and the model prompt. |
 | `ESCALATION_PHONE` | To reach a person | Owner cell, E.164. Dial target, escalation SMS recipient, and fallback call recipient. |
 | `ESCALATION_EMAIL` | For escalation email | Inbox used when an escalation text to `ESCALATION_PHONE` fails. |
-| `SMTP_HOST` | For escalation email | SMTP server. Unset skips the email and logs a warning. |
+| `SMTP_HOST` | For escalation email and cancel links | SMTP server. Unset skips those emails. Startup logs a warning, and each skipped cancel email logs another. |
 | `SMTP_PORT` | No | Default `587`. Port `465` uses implicit TLS. |
 | `SMTP_USER` | No | SMTP username. Leave unset for a relay that does not authenticate. |
 | `SMTP_PASS` | No | SMTP password. Never logged. |
@@ -171,7 +172,7 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
 4. Create a restricted API key with read access to Charges, PaymentIntents, Invoices, Subscriptions, Prices, Products, Checkout Sessions, and Customers, and write access to PaymentIntents, Subscriptions, Checkout Sessions, and Billing Portal sessions. Customers Write is not used. Also grant read access to Invoice payments, because renewal classification lists them. The delivery stamp writes metadata on the period charge, or on the invoice when that invoice has no charge, so Charges write and Invoices write are required for that stamp. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. The server updates subscription metadata only after the brand gate accepts the event. A lost dispute also cancels that subscription with no proration. A refund does not cancel it.
 5. On the Starter price set lookup key `manualos_starter`. On the Pro price set lookup key `manualos_pro`. Checkout uses the lookup key when it finds one, and otherwise uses the price id variables above. Setting those lookup keys is a Dashboard change and is not done by this repository.
-6. In **Settings → Billing → Customer portal** (test mode and live mode), turn the portal on and allow customers to cancel subscriptions at the end of the billing period. Save. The cancel API creates a portal session only; cancellation itself is this Dashboard setting. Optionally create a portal configuration with that setting and put its id in `STRIPE_PORTAL_CONFIGURATION_ID`.
+6. The Stripe account is shared with HTS Atlas. In **Settings → Billing → Customer portal** (test mode and live mode), create a portal configuration that includes only ManualOS products. Turn that portal on and allow customers to cancel those subscriptions at the end of the billing period, not immediately. Save. Copy that configuration id (`bpc_...`) into `STRIPE_PORTAL_CONFIGURATION_ID`. Do this in test mode and live mode. Leaving the variable unset uses the account default, which can show HTS Atlas subscriptions. The cancel API creates a portal session only; cancellation itself is this Dashboard setting. Set `PORTAL_TOKEN_SECRET` to its own random value. Do not reuse `STRIPE_WEBHOOK_SECRET`. Without `SMTP_HOST` and `SMTP_FROM`, cancel emails are skipped and a warning is logged at startup and on each skipped send.
 
 ### Shared Stripe account
 
@@ -237,6 +238,8 @@ The restricted key needs Charges Read and Write, Invoices Read and Write, Custom
 Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md) only after the account has an active registration. Turning on automatic tax without a registration collects no tax and returns no error.
 
 `CHECKOUT_REQUIRE_TOS` stays unset. Stripe rejects Checkout when `consent_collection.terms_of_service` is `required` and the Dashboard has no terms of service URL. Set the variable to `1` only after that URL is saved. Any other value, including omitting it, leaves the checkbox off.
+
+`CHECKOUT_REQUIRE_CONSENT` stays unset until the frontend sends `termsAccepted`, `termsVersion`, and, for subscriptions, `renewalConsent` and `disclosureVersion`. Present consent is stored before the flag is turned on. Set the variable to `1` after that frontend ships. Any other value leaves the requirement off.
 
 ## Model
 
