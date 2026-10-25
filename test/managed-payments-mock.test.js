@@ -8,10 +8,14 @@ const { withCheckoutPolicy } = require('../lib/checkoutPolicy');
 const { TOP_LEVEL_CONFLICTS } = require('../lib/managedPayments');
 
 function mockBinary() {
-  const fromEnv = process.env.STRIPE_MOCK_BIN;
-  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
-  const fallback = '/tmp/stripe-mock/stripe-mock';
-  if (fs.existsSync(fallback)) return fallback;
+  const candidates = [
+    process.env.STRIPE_MOCK_BIN,
+    '/tmp/stripe-mock/stripe-mock',
+    '/home/box/stripe-mock/stripe-mock',
+  ];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
   return '';
 }
 
@@ -66,7 +70,9 @@ function listen(child) {
   });
 }
 
-test('stripe-mock Checkout for Starter and Pro, flag on and off', { skip: binary ? false : 'stripe-mock binary not found' }, async () => {
+test('stripe-mock Checkout for Starter and Pro, flag on and off', {
+  skip: binary ? false : 'stripe-mock binary not found. Set STRIPE_MOCK_BIN or install stripe-mock at /tmp/stripe-mock/stripe-mock or /home/box/stripe-mock/stripe-mock.',
+}, async () => {
   const child = spawn(binary, ['-http-port', String(PORT), '-https-port', String(PORT + 1)], {
     stdio: 'ignore',
   });
@@ -101,7 +107,7 @@ test('stripe-mock Checkout for Starter and Pro, flag on and off', { skip: binary
       built.metadata.brand = 'manualos';
       if (plan === 'starter') built.payment_intent_data.metadata.brand = 'manualos';
       else built.subscription_data.metadata.brand = 'manualos';
-      if (flag !== 'false') {
+      if (flag === '1') {
         built.custom_text = { submit: { message: 'Refund rule that Managed Payments rejects.' } };
         built.automatic_tax = { enabled: true };
         built.tax_id_collection = { enabled: true };
@@ -112,6 +118,7 @@ test('stripe-mock Checkout for Starter and Pro, flag on and off', { skip: binary
         if (plan === 'starter') {
           built.payment_intent_data.receipt_email = 'buyer@example.com';
           built.payment_intent_data.statement_descriptor = 'MANUALOS';
+          built.payment_intent_data.statement_descriptor_suffix = 'MANUALOS';
         } else {
           built.subscription_data.invoice_settings = { description: 'nope' };
           built.subscription_data.default_tax_rates = ['txr_123'];
@@ -128,24 +135,29 @@ test('stripe-mock Checkout for Starter and Pro, flag on and off', { skip: binary
     }
 
     for (const plan of ['starter', 'pro']) {
-      const on = await send(plan, undefined);
+      const on = await send(plan, '1');
       assert.equal(on.session.livemode, false);
       assert.match(on.session.id, /^cs_/);
       assert.equal(on.posted.get('managed_payments[enabled]'), 'true');
       assert.equal(on.posted.get('mode'), plan === 'starter' ? 'payment' : 'subscription');
       assert.equal(on.posted.get('metadata[plan]'), plan);
       assert.equal(on.posted.get('metadata[brand]'), 'manualos');
-      assert.equal(on.session.billing_address_collection, null);
-      for (const key of ['custom_text[submit][message]', 'automatic_tax[enabled]', 'tax_id_collection[enabled]', 'billing_address_collection', 'payment_method_types[0]', 'customer_update[address]', 'consent_collection[terms_of_service]']) {
+      assert.equal(on.posted.get('billing_address_collection'), 'required');
+      assert.equal(on.session.billing_address_collection, 'required');
+      assert.equal(on.posted.get('consent_collection[terms_of_service]'), 'required');
+      for (const key of ['custom_text[submit][message]', 'automatic_tax[enabled]', 'tax_id_collection[enabled]', 'payment_method_types[0]', 'customer_update[address]']) {
         absent(on.posted, key);
       }
       for (const key of TOP_LEVEL_CONFLICTS) assert.equal(on.params[key], undefined, `${plan} ${key}`);
-      assert.equal(on.params.consent_collection && on.params.consent_collection.terms_of_service, undefined);
+      assert.equal(on.params.billing_address_collection, 'required');
+      assert.equal(on.params.consent_collection.terms_of_service, 'required');
       assert.equal(on.params.consent_collection.promotions, 'auto');
       assert.equal(on.posted.get('consent_collection[promotions]'), 'auto');
       if (plan === 'starter') {
         absent(on.posted, 'payment_intent_data[receipt_email]');
         absent(on.posted, 'payment_intent_data[statement_descriptor]');
+        absent(on.posted, 'payment_intent_data[statement_descriptor_suffix]');
+        assert.equal(on.params.payment_intent_data.statement_descriptor_suffix, undefined);
         assert.equal(on.posted.get('payment_intent_data[metadata][brand]'), 'manualos');
         assert.equal(on.posted.get('payment_intent_data[metadata][manuals_used]'), '0');
         assert.match(on.posted.get('payment_intent_data[description]'), /ManualOS Starter/);
@@ -156,7 +168,7 @@ test('stripe-mock Checkout for Starter and Pro, flag on and off', { skip: binary
         assert.match(on.posted.get('subscription_data[description]'), /ManualOS Pro/);
       }
 
-      const off = await send(plan, 'false');
+      const off = await send(plan, undefined);
       assert.equal(off.session.livemode, false);
       assert.match(off.session.id, /^cs_/);
       absent(off.posted, 'managed_payments[enabled]');
@@ -174,8 +186,12 @@ test('stripe-mock Checkout for Starter and Pro, flag on and off', { skip: binary
     }
 
     const explicit = await send('starter', 'true');
-    assert.equal(explicit.posted.get('managed_payments[enabled]'), 'true');
-    absent(explicit.posted, 'custom_text[submit][message]');
+    absent(explicit.posted, 'managed_payments[enabled]');
+    assert.match(explicit.posted.get('custom_text[submit][message]'), /Refundable until your first manual is delivered/);
+    const enabled = await send('pro', '1');
+    assert.equal(enabled.posted.get('managed_payments[enabled]'), 'true');
+    absent(enabled.posted, 'custom_text[submit][message]');
+    absent(enabled.posted, 'subscription_data[invoice_settings][description]');
   } finally {
     child.kill();
     await new Promise((resolve) => child.once('exit', resolve));

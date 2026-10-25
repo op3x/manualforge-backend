@@ -166,6 +166,48 @@ test('a missing price is a note and an unrelated brand is ignored', async () => 
   assert.equal(report.includes('price_missing'), false);
 });
 
+test('HTS Atlas products and non-manualos brands are refused', async () => {
+  const stripe = memoryStripe({
+    products: [
+      { id: 'prod_starter', name: 'ManualOS Starter', tax_code: null, livemode: true, metadata: {} },
+      { id: 'prod_hts', name: 'HTS Atlas', tax_code: null, livemode: true, metadata: { brand: 'HTSAtlas' } },
+      { id: 'prod_other', name: 'Other brand', tax_code: null, livemode: false, metadata: { brand: 'WidgetCo' } },
+      { id: 'prod_mixed', name: 'Mixed', tax_code: null, livemode: false, metadata: { brand: 'manualos' } },
+    ],
+    prices: [
+      { id: 'price_starter', product: 'prod_starter', lookup_key: null },
+      { id: 'price_hts', product: 'prod_hts', lookup_key: 'htsatlas_single_user_monthly' },
+      { id: 'price_hts_case', product: 'prod_hts', lookup_key: 'HTSATLAS_annual' },
+      { id: 'price_other', product: 'prod_other', lookup_key: null },
+      { id: 'price_mixed', product: 'prod_mixed', lookup_key: 'manualos_mixed' },
+      { id: 'price_mixed_hts', product: 'prod_mixed', lookup_key: 'htsatlas_mixed' },
+    ],
+  });
+  const result = await main(['--apply'], {
+    STRIPE_SECRET_KEY: 'sk_test_not_a_live_secret',
+    STRIPE_PRICE_STARTER: 'price_starter',
+    STRIPE_PRICE_PRO: 'price_hts',
+    MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY: 'price_other',
+  }, stripe);
+  assert.deepEqual(result.wrote, ['prod_starter']);
+  assert.equal(result.report.includes('sk_test_not_a_live_secret'), false);
+  assert.match(result.report, /refused prod_hts/);
+  assert.match(result.report, /brand HTSAtlas is not manualos/);
+  assert.match(result.report, /lookup_key starts with htsatlas_/);
+  assert.match(result.report, /refused prod_other/);
+  assert.match(result.report, /brand WidgetCo is not manualos/);
+  assert.match(result.report, /refused prod_mixed/);
+  assert.match(result.report, /Live Starter and Pro products are found only through STRIPE_PRICE_STARTER and STRIPE_PRICE_PRO/);
+  const after = stripe.snapshot();
+  assert.equal(after.products.find((product) => product.id === 'prod_starter').tax_code, 'txcd_10103001');
+  assert.equal(after.products.find((product) => product.id === 'prod_hts').tax_code, null);
+  assert.equal(after.products.find((product) => product.id === 'prod_other').tax_code, null);
+  assert.equal(after.products.find((product) => product.id === 'prod_mixed').tax_code, null);
+  assert.equal(after.products.find((product) => product.id === 'prod_hts').metadata.brand, 'HTSAtlas');
+  assert.equal(after.prices.find((price) => price.id === 'price_hts').lookup_key, 'htsatlas_single_user_monthly');
+  for (const call of stripe.updates) assert.notEqual(call.id, 'prod_hts');
+});
+
 test('help text does not require a key', async () => {
   const result = await main(['--help'], {}, null);
   assert.equal(result.code, 0);

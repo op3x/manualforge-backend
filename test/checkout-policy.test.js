@@ -42,13 +42,15 @@ function preserved(result, source) {
   assert.equal(result.mode, source.mode);
   assert.equal(result.integration_identifier, source.integration_identifier);
   assert.equal(result.payment_method_types, undefined);
-  assert.equal(result.billing_address_collection, undefined);
-  assert.equal(result.custom_text, undefined);
+  assert.equal(result.billing_address_collection, 'required');
+  assert.equal(typeof result.custom_text.submit.message, 'string');
   assert.equal(result.automatic_tax, undefined);
   assert.equal(result.tax_id_collection, undefined);
-  assert.deepEqual(result.managed_payments, { enabled: true });
+  assert.equal(result.managed_payments, undefined);
   assert.equal(result.consent_collection, undefined);
 }
+
+const mpEnv = { ...env, MANUALOS_MANAGED_PAYMENTS: '1' };
 
 function customerCopy(result) {
   return [
@@ -94,10 +96,11 @@ test('submit message is the refund rule and stays within 1200 characters', () =>
   assert.equal(starter.managed_payments, undefined);
   assert.equal(pro.managed_payments, undefined);
 
-  const on = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env });
+  const on = withCheckoutPolicy(checkoutParams('starter', mpEnv), { plan: 'starter', env: mpEnv });
   assert.equal(on.custom_text, undefined);
-  assert.equal(on.billing_address_collection, undefined);
+  assert.equal(on.billing_address_collection, 'required');
   assert.deepEqual(on.managed_payments, { enabled: true });
+  assert.equal(on.payment_intent_data.statement_descriptor_suffix, undefined);
   assert.equal(on.payment_intent_data.description, STARTER_DESCRIPTION);
 });
 
@@ -292,16 +295,19 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   mp.payment_method_types = ['card'];
   mp.subscription_data.invoice_settings = { description: 'nope' };
   mp.subscription_data.trial_period_days = 0;
-  const stripped = withCheckoutPolicy(mp, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
+  const stripped = withCheckoutPolicy(mp, {
+    plan: 'pro',
+    env: { MANUALOS_MANAGED_PAYMENTS: '1', CHECKOUT_REQUIRE_TOS: '1' },
+  });
   assert.equal(stripped.custom_text, undefined);
-  assert.equal(stripped.billing_address_collection, undefined);
+  assert.equal(stripped.billing_address_collection, 'required');
   assert.equal(stripped.automatic_tax, undefined);
   assert.equal(stripped.tax_id_collection, undefined);
   assert.equal(stripped.payment_method_types, undefined);
   assert.equal(stripped.subscription_data.invoice_settings, undefined);
   assert.equal(stripped.subscription_data.trial_period_days, 0);
   assert.equal(stripped.subscription_data.description, PRO_MONTHLY);
-  assert.deepEqual(stripped.consent_collection, { promotions: 'auto' });
+  assert.deepEqual(stripped.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
   assert.deepEqual(stripped.managed_payments, { enabled: true });
   assert.equal(stripped.metadata.brand, 'manualos');
   assert.equal(stripped.subscription_data.metadata.brand, 'manualos');
@@ -310,7 +316,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   assert.equal(mp.custom_text.submit.message, 'gone');
 });
 
-test('terms of service consent is sent only when Managed Payments is off and CHECKOUT_REQUIRE_TOS is 1', () => {
+test('terms of service consent is sent when CHECKOUT_REQUIRE_TOS is 1, including under Managed Payments', () => {
   const legacy = { ...env, MANUALOS_MANAGED_PAYMENTS: 'false' };
   const starter = checkoutParams('starter', legacy);
   for (const flag of [undefined, '', '0', 'true', 'yes', '01']) {
@@ -328,31 +334,34 @@ test('terms of service consent is sent only when Managed Payments is off and CHE
     });
     assert.deepEqual(result.consent_collection, { terms_of_service: 'required' });
   }
-  const blocked = withCheckoutPolicy(checkoutParams('starter', env), {
+  const kept = withCheckoutPolicy(checkoutParams('starter', mpEnv), {
     plan: 'starter',
-    env: { CHECKOUT_REQUIRE_TOS: '1' },
+    env: { ...mpEnv, CHECKOUT_REQUIRE_TOS: '1' },
   });
-  assert.equal(blocked.consent_collection, undefined);
-  assert.equal(blocked.custom_text, undefined);
-  assert.deepEqual(blocked.managed_payments, { enabled: true });
+  assert.deepEqual(kept.consent_collection, { terms_of_service: 'required' });
+  assert.equal(kept.custom_text, undefined);
+  assert.equal(kept.billing_address_collection, 'required');
+  assert.deepEqual(kept.managed_payments, { enabled: true });
+  const mpWithoutTos = withCheckoutPolicy(checkoutParams('starter', mpEnv), { plan: 'starter', env: mpEnv });
+  assert.equal(mpWithoutTos.consent_collection, undefined);
 });
 
 test('checkout policy and attribution compose in either order', () => {
   const attribution = { attr_utm_source: 'newsletter', attr_utm_medium: 'email' };
   for (const plan of ['starter', 'pro']) {
-    const base = checkoutParams(plan, env);
+    const base = checkoutParams(plan, mpEnv);
     const policyThenAttribution = withAttribution(
-      withCheckoutPolicy(base, { plan, env: {} }),
+      withCheckoutPolicy(base, { plan, env: mpEnv }),
       attribution,
     );
     const attributionThenPolicy = withCheckoutPolicy(
       withAttribution(structuredClone(base), attribution),
-      { plan, env: {} },
+      { plan, env: mpEnv },
     );
     assert.deepEqual(policyThenAttribution, attributionThenPolicy);
     assert.equal(policyThenAttribution.metadata.plan, plan);
     assert.equal(policyThenAttribution.metadata.attr_utm_source, 'newsletter');
-    assert.equal(policyThenAttribution.billing_address_collection, undefined);
+    assert.equal(policyThenAttribution.billing_address_collection, 'required');
     assert.equal(policyThenAttribution.custom_text, undefined);
     assert.deepEqual(policyThenAttribution.managed_payments, { enabled: true });
     assert.equal(policyThenAttribution.automatic_tax, undefined);
@@ -465,14 +474,15 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
     attr_utm_content: 'hero',
   };
   for (const entry of cases) {
-    const result = withCheckoutPolicy(entry.source, { plan: entry.plan, env });
+    const result = withCheckoutPolicy(entry.source, { plan: entry.plan, env: mpEnv });
     const expected = structuredClone(entry.source);
     expected.managed_payments = { enabled: true };
+    expected.billing_address_collection = 'required';
     expected[entry.slot] = { ...expected[entry.slot], description: entry.description };
     assert.deepEqual(result, expected);
     assert.equal(result.consent_collection, undefined);
     assert.equal(result.custom_text, undefined);
-    assert.equal(result.billing_address_collection, undefined);
+    assert.equal(result.billing_address_collection, 'required');
     assert.equal(entry.message.includes('Cancel anytime.'), entry.source.mode === 'subscription');
     for (const key of Object.keys(entry.source.metadata)) {
       if (!key.includes('utm_')) continue;
@@ -482,7 +492,7 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
 
     const composed = withCheckoutPolicy(withAttribution(structuredClone(entry.source), attribution), {
       plan: entry.plan,
-      env,
+      env: mpEnv,
     });
     for (const [key, value] of Object.entries(attribution)) {
       assert.equal(composed.metadata[key], value, key);
@@ -494,12 +504,52 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
     assert.equal(composed.integration_identifier, entry.source.integration_identifier);
     assert.equal(composed.client_reference_id, entry.source.client_reference_id);
     assert.equal(composed.customer, entry.source.customer);
+    assert.equal(composed.payment_intent_data && composed.payment_intent_data.statement_descriptor_suffix, undefined);
     assert.equal(composed[entry.slot].description, entry.description);
     const nestedMetadata = entry.source.mode === 'subscription'
       ? { ...entry.source[entry.slot].metadata, ...attribution }
       : entry.source[entry.slot].metadata;
     assert.deepEqual(composed[entry.slot].metadata, nestedMetadata);
   }
+});
+
+test('PR #16 customer handling stays on a Managed Payments session and custom_text stays off', () => {
+  const priced = withCheckoutPolicy(checkoutParams('starter', mpEnv), { plan: 'starter', env: mpEnv });
+  // applyManualosCheckout in PR #16 runs after withCheckoutPolicy. It creates a
+  // Customer, stamps that id, and sets customer_update.address after the strip.
+  const session = {
+    ...priced,
+    customer: 'cus_manualos',
+    customer_update: { address: 'auto' },
+    line_items: [{ price: 'price_from_lookup', quantity: priced.line_items[0].quantity }],
+    metadata: { ...priced.metadata, brand: 'manualos' },
+    payment_intent_data: {
+      ...priced.payment_intent_data,
+      metadata: { ...priced.payment_intent_data.metadata, brand: 'manualos' },
+    },
+  };
+  assert.equal(session.custom_text, undefined);
+  assert.deepEqual(session.managed_payments, { enabled: true });
+  assert.equal(session.customer, 'cus_manualos');
+  assert.deepEqual(session.customer_update, { address: 'auto' });
+  assert.equal(session.metadata.brand, 'manualos');
+  assert.equal(session.payment_intent_data.metadata.brand, 'manualos');
+  assert.equal(session.billing_address_collection, 'required');
+  assert.equal(session.payment_intent_data.statement_descriptor_suffix, undefined);
+  assert.equal(session.payment_intent_data.statement_descriptor, undefined);
+
+  const early = withCheckoutPolicy({
+    ...checkoutParams('pro', mpEnv),
+    customer: 'cus_manualos',
+    customer_update: { address: 'auto', name: 'auto' },
+    metadata: { plan: 'pro', brand: 'manualos' },
+  }, { plan: 'pro', env: mpEnv });
+  assert.equal(early.customer, 'cus_manualos');
+  assert.equal(early.customer_update, undefined);
+  assert.equal(early.custom_text, undefined);
+  assert.equal(early.metadata.brand, 'manualos');
+  assert.deepEqual(early.managed_payments, { enabled: true });
+  assert.equal(early.billing_address_collection, 'required');
 });
 
 test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
@@ -589,11 +639,53 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
         body: JSON.stringify({ plan: 'starter' }),
       });
       assert.equal(paid.status, 200);
-      assert.equal(tosCalls[0].consent_collection, undefined);
-      assert.equal(tosCalls[0].custom_text, undefined);
-      assert.deepEqual(tosCalls[0].managed_payments, { enabled: true });
+      assert.equal(tosCalls[0].consent_collection.terms_of_service, 'required');
+      assert.match(tosCalls[0].custom_text.submit.message, /Refundable until your first manual is delivered/);
+      assert.equal(tosCalls[0].managed_payments, undefined);
+      assert.equal(tosCalls[0].billing_address_collection, 'required');
       assert.equal(tosCalls[0].payment_intent_data.metadata.manuals_used, '0');
       assert.equal(String(process.env.CHECKOUT_REQUIRE_TOS || '').trim() === '1', false);
+
+      const mpCalls = [];
+      const mpHttpEnv = { ...tosEnv, MANUALOS_MANAGED_PAYMENTS: '1' };
+      const mpApp = createApp({
+        env: mpHttpEnv,
+        stripe: {
+          checkout: {
+            sessions: {
+              create: async (params) => {
+                mpCalls.push(params);
+                return { id: 'cs_mp', url: 'https://checkout.stripe.com/c/pay/cs_mp' };
+              },
+            },
+          },
+          prices: {
+            retrieve: async (id) => ({ id, product: { id: 'prod_coded', tax_code: 'txcd_10103001' } }),
+          },
+        },
+        anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
+      });
+      const mpServer = mpApp.listen(0, '127.0.0.1');
+      await new Promise((resolve, reject) => {
+        mpServer.once('listening', resolve);
+        mpServer.once('error', reject);
+      });
+      try {
+        const mpBase = `http://127.0.0.1:${mpServer.address().port}`;
+        const mpPaid = await fetch(mpBase + '/create-checkout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: 'starter' }),
+        });
+        assert.equal(mpPaid.status, 200);
+        assert.deepEqual(mpCalls[0].managed_payments, { enabled: true });
+        assert.equal(mpCalls[0].custom_text, undefined);
+        assert.equal(mpCalls[0].billing_address_collection, 'required');
+        assert.equal(mpCalls[0].consent_collection.terms_of_service, 'required');
+        assert.equal(mpCalls[0].payment_intent_data.statement_descriptor_suffix, undefined);
+      } finally {
+        await new Promise((resolve) => mpServer.close(resolve));
+      }
 
       const legacyCalls = [];
       const legacyEnv = { ...tosEnv, MANUALOS_MANAGED_PAYMENTS: 'false' };

@@ -11,8 +11,14 @@
 //
 // Matches a product when metadata.brand is manualos, when a price lookup_key
 // starts with "manualos", or when the price id is one of the ManualOS price
-// env vars. Do not point this at live mode until the dry-run output is what
-// you expect. This file does not print STRIPE_SECRET_KEY.
+// env vars. The live Starter and Pro products have no brand and no lookup_key,
+// so a run finds them only when STRIPE_PRICE_STARTER and STRIPE_PRICE_PRO are
+// set (Integrator prices: MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY, _ANNUAL,
+// and _OVERAGE). A product is refused, and not written, when its brand is set
+// to anything other than manualos (including htsatlas) or when any of its
+// prices has a lookup_key that starts with htsatlas_. Do not point this at
+// live mode until the dry-run output is what you expect. This file does not
+// print STRIPE_SECRET_KEY.
 
 const Stripe = require('stripe');
 const { MANUALOS_PRODUCT_TAX_CODE } = require('../lib/managedPayments');
@@ -58,9 +64,26 @@ function isManualosBrand(product) {
   return brandOf(product).toLowerCase() === 'manualos';
 }
 
-function isManualosLookup(price) {
+function lookupKeyOf(price) {
   const key = price && price.lookup_key;
-  return typeof key === 'string' && key.trim().toLowerCase().startsWith('manualos');
+  return typeof key === 'string' ? key.trim() : '';
+}
+
+function isManualosLookup(price) {
+  return lookupKeyOf(price).toLowerCase().startsWith('manualos');
+}
+
+function isHtsLookup(price) {
+  return lookupKeyOf(price).toLowerCase().startsWith('htsatlas_');
+}
+
+function refusalReasons(row, htsProductIds) {
+  const reasons = [];
+  const brand = (row.brand || '').trim().toLowerCase();
+  if (brand && brand !== 'manualos') reasons.push(`brand ${row.brand} is not manualos`);
+  const htsKeys = (row.lookupKeys || []).filter((key) => String(key).trim().toLowerCase().startsWith('htsatlas_'));
+  if (htsProductIds.has(row.id) || htsKeys.length) reasons.push('lookup_key starts with htsatlas_');
+  return reasons;
 }
 
 function isNotFound(err) {
@@ -150,6 +173,12 @@ async function collectManualosProducts(stripe, env) {
   }
 
   const prices = await listAll((query) => stripe.prices.list(query));
+  const htsProductIds = new Set();
+  for (const price of prices) {
+    if (!isHtsLookup(price)) continue;
+    const id = productIdOf(price.product);
+    if (id) htsProductIds.add(id);
+  }
   for (const price of prices) {
     if (!isManualosLookup(price)) continue;
     const id = productIdOf(price.product);
@@ -179,10 +208,11 @@ async function collectManualosProducts(stripe, env) {
     else await loadProduct(stripe, rows, id, key, lookups);
   }
 
-  const planned = [...rows.values()].map((row) => {
+  const planned = [];
+  const refused = [];
+  for (const row of rows.values()) {
     const current = row.tax_code === undefined ? null : row.tax_code;
-    const action = current === MANUALOS_PRODUCT_TAX_CODE ? 'unchanged' : 'update';
-    return {
+    const record = {
       id: row.id,
       name: row.name,
       brand: row.brand,
@@ -191,11 +221,20 @@ async function collectManualosProducts(stripe, env) {
       reasons: row.reasons.slice(),
       from: current,
       to: MANUALOS_PRODUCT_TAX_CODE,
-      action,
     };
-  });
+    const blocked = refusalReasons(row, htsProductIds);
+    if (blocked.length) {
+      refused.push({ ...record, action: 'refused', reasons: blocked });
+      continue;
+    }
+    planned.push({
+      ...record,
+      action: current === MANUALOS_PRODUCT_TAX_CODE ? 'unchanged' : 'update',
+    });
+  }
   planned.sort((a, b) => a.id.localeCompare(b.id));
-  return { planned, notes };
+  refused.sort((a, b) => a.id.localeCompare(b.id));
+  return { planned, notes, refused };
 }
 
 function formatTaxCodeReport(result, options) {
@@ -206,7 +245,8 @@ function formatTaxCodeReport(result, options) {
       : `dry-run: no products will be updated (tax_code ${MANUALOS_PRODUCT_TAX_CODE})`,
   ];
   const planned = result && Array.isArray(result.planned) ? result.planned : [];
-  if (!planned.length) lines.push('No ManualOS products matched.');
+  const refused = result && Array.isArray(result.refused) ? result.refused : [];
+  if (!planned.length && !refused.length) lines.push('No ManualOS products matched.');
   for (const row of planned) {
     const brand = row.brand ? `brand=${row.brand}` : 'brand=(none)';
     const lookups = row.lookupKeys && row.lookupKeys.length ? row.lookupKeys.join(',') : '(none)';
@@ -216,8 +256,16 @@ function formatTaxCodeReport(result, options) {
       `${row.id}  ${row.name || '(unnamed)'}  ${brand}  lookup_keys=${lookups}  livemode=${row.livemode ? 'true' : 'false'}  ${verb} ${from} -> ${row.to}  matched=${row.reasons.join(', ')}`
     );
   }
+  for (const row of refused) {
+    const brand = row.brand ? `brand=${row.brand}` : 'brand=(none)';
+    const lookups = row.lookupKeys && row.lookupKeys.length ? row.lookupKeys.join(',') : '(none)';
+    lines.push(
+      `refused ${row.id}  ${row.name || '(unnamed)'}  ${brand}  lookup_keys=${lookups}  livemode=${row.livemode ? 'true' : 'false'}  not updated  ${row.reasons.join('; ')}`
+    );
+  }
   for (const note of (result && result.notes) || []) lines.push(`note: ${note}`);
   lines.push('metadata and lookup_key are not modified.');
+  lines.push('Live Starter and Pro products are found only through STRIPE_PRICE_STARTER and STRIPE_PRICE_PRO. Integrator products are found through MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY, MANUALOS_STRIPE_PRICE_INTEGRATOR_ANNUAL, and MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE.');
   return lines.join('\n');
 }
 

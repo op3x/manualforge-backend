@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { checkoutParams } = require('../lib/billing');
+const { checkoutParams, lineItemsMissingTaxCode, managedPaymentsEnabled: billingFlag } = require('../lib/billing');
 const { withCheckoutPolicy, SUBSCRIPTION_REFUND_MESSAGE } = require('../lib/checkoutPolicy');
 const {
   MANUALOS_PRODUCT_TAX_CODE,
@@ -8,6 +8,7 @@ const {
   SUBSCRIPTION_DATA_CONFLICTS,
   PAYMENT_INTENT_DATA_CONFLICTS,
   managedPaymentsEnabled,
+  lineItemsMissingTaxCode: missingFromLib,
   applyManagedPayments,
 } = require('../lib/managedPayments');
 
@@ -18,35 +19,44 @@ const env = {
   STARTER_CREDITS: '3',
 };
 
+const mpEnv = { ...env, MANUALOS_MANAGED_PAYMENTS: '1' };
+
 function assertNoConflicts(params) {
   for (const key of TOP_LEVEL_CONFLICTS) {
     assert.equal(params[key], undefined, key);
   }
-  assert.equal(params.consent_collection && params.consent_collection.terms_of_service, undefined);
+  assert.equal(params.billing_address_collection, 'required');
   const subscription = params.subscription_data || {};
   for (const key of SUBSCRIPTION_DATA_CONFLICTS) assert.equal(subscription[key], undefined, key);
   const payment = params.payment_intent_data || {};
   for (const key of PAYMENT_INTENT_DATA_CONFLICTS) assert.equal(payment[key], undefined, key);
+  assert.equal(payment.statement_descriptor_suffix, undefined);
   assert.equal(params.lookup_key, undefined);
 }
 
-test('Managed Payments defaults on and false disables it', () => {
-  assert.equal(managedPaymentsEnabled(undefined), true);
-  assert.equal(managedPaymentsEnabled({}), true);
-  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: undefined }), true);
-  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: '' }), true);
-  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: 'true' }), true);
+test('Managed Payments is off unless MANUALOS_MANAGED_PAYMENTS is 1', () => {
+  assert.equal(managedPaymentsEnabled(undefined), false);
+  assert.equal(managedPaymentsEnabled({}), false);
+  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: undefined }), false);
+  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: '' }), false);
+  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: 'true' }), false);
+  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: 'yes' }), false);
   assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: 'false' }), false);
   assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: ' FALSE ' }), false);
   assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: '0' }), false);
   assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: 'off' }), false);
   assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: 'no' }), false);
+  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: '1' }), true);
+  assert.equal(managedPaymentsEnabled({ MANUALOS_MANAGED_PAYMENTS: ' 1 ' }), true);
+  assert.equal(billingFlag({ MANUALOS_MANAGED_PAYMENTS: '1' }), true);
+  assert.equal(billingFlag({}), false);
+  assert.equal(missingFromLib, lineItemsMissingTaxCode);
   assert.equal(MANUALOS_PRODUCT_TAX_CODE, 'txcd_10103001');
 });
 
 test('Starter and Pro sessions enable Managed Payments and keep plan metadata', () => {
   for (const plan of ['starter', 'pro']) {
-    const params = withCheckoutPolicy(checkoutParams(plan, env), { plan, env });
+    const params = withCheckoutPolicy(checkoutParams(plan, mpEnv), { plan, env: mpEnv });
     assert.deepEqual(params.managed_payments, { enabled: true });
     assert.equal(params.metadata.plan, plan);
     assert.equal(params.line_items[0].price, plan === 'starter' ? 'price_starter' : 'price_pro');
@@ -92,13 +102,14 @@ test('Integrator-shaped sessions follow the same flag', () => {
     billing_address_collection: 'required',
     consent_collection: { terms_of_service: 'required', promotions: 'auto' },
   };
-  const on = withCheckoutPolicy(integrator, { plan: 'integrator', env });
+  const on = withCheckoutPolicy(integrator, { plan: 'integrator', env: mpEnv });
   assert.deepEqual(on.managed_payments, { enabled: true });
   assert.equal(on.metadata.brand, 'manualos');
   assert.equal(on.subscription_data.metadata.brand, 'manualos');
   assert.equal(on.subscription_data.metadata.manuals_used, '0');
   assert.equal(on.subscription_data.description, 'ManualOS Integrator: 25 manuals per month');
-  assert.deepEqual(on.consent_collection, { promotions: 'auto' });
+  assert.deepEqual(on.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
+  assert.equal(on.billing_address_collection, 'required');
   assert.equal(on.integration_identifier, integrator.integration_identifier);
   assertNoConflicts(on);
   assert.equal(integrator.custom_text.submit.message, 'drop me');
@@ -122,12 +133,56 @@ test('applyManagedPayments does not invent a lookup key or drop an existing bran
     payment_intent_data: {
       metadata: { plan: 'starter', brand: 'manualos' },
       receipt_email: 'buyer@example.com',
+      statement_descriptor_suffix: 'MANUALOS',
     },
-  }, {});
+    billing_address_collection: 'required',
+    consent_collection: { terms_of_service: 'required' },
+  }, { MANUALOS_MANAGED_PAYMENTS: '1' });
   assert.equal(params.metadata.brand, 'manualos');
   assert.equal(params.payment_intent_data.metadata.brand, 'manualos');
   assert.equal(params.payment_intent_data.receipt_email, undefined);
+  assert.equal(params.payment_intent_data.statement_descriptor_suffix, undefined);
+  assert.equal(params.billing_address_collection, 'required');
+  assert.deepEqual(params.consent_collection, { terms_of_service: 'required' });
   assert.equal(params.lookup_key, undefined);
   assert.deepEqual(params.managed_payments, { enabled: true });
   assertNoConflicts(params);
+});
+
+test('a line item with no tax code is reported and a coded product is not', async () => {
+  const calls = [];
+  const stripe = {
+    prices: {
+      async retrieve(id) {
+        calls.push(id);
+        if (id === 'price_bare') return { id, product: { id: 'prod_bare', tax_code: null } };
+        if (id === 'price_obj') return { id, product: { id: 'prod_obj', tax_code: { id: 'txcd_10103001' } } };
+        if (id === 'price_bad') throw new Error('stripe down');
+        return { id, product: 'prod_id_only' };
+      },
+    },
+  };
+  const missing = await lineItemsMissingTaxCode(stripe, {
+    line_items: [
+      { price: 'price_ok', quantity: 1 },
+      { price: 'price_bare', quantity: 1 },
+      { price: { id: 'price_obj' }, quantity: 1 },
+      { price: 'price_bad', quantity: 1 },
+      { price: '', quantity: 1 },
+      { quantity: 1 },
+    ],
+  });
+  assert.deepEqual(missing, [
+    'price price_ok did not include a product',
+    'prod_bare',
+    'price price_bad could not be read',
+    'line item has no price id',
+    'line item has no price id',
+  ]);
+  const ready = await lineItemsMissingTaxCode(stripe, {
+    line_items: [{ price: 'price_obj', quantity: 1 }],
+  });
+  assert.deepEqual(ready, []);
+  assert.deepEqual(await lineItemsMissingTaxCode({}, { line_items: [{ price: 'price_obj' }] }), ['price retrieve is unavailable']);
+  assert.deepEqual(calls.includes('price_obj'), true);
 });
