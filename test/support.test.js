@@ -2205,7 +2205,8 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
       },
     });
     assert.doesNotMatch(decision.reply, /cannot take card numbers/, phrase);
-    assert.match(seen, /4111/, phrase);
+    assert.doesNotMatch(seen, /4111/, phrase);
+    assert.match(seen, /\[redacted\]/, phrase);
   }
 
   const seeded = state();
@@ -2290,7 +2291,9 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
       MessageSid: 'SM_ORDER_ID',
     });
     assert.doesNotMatch(await order.text(), /cannot take card numbers/);
-    assert.match(JSON.stringify(h.completions.at(-1).messages), /order 4111-1111-1111-1111/);
+    assert.doesNotMatch(JSON.stringify(h.completions.at(-1).messages), /4111/);
+    assert.match(JSON.stringify(h.completions.at(-1).messages), /order \[redacted\]/);
+    assert.doesNotMatch(fs.readFileSync(threadsPath, 'utf8'), /4111/);
   });
 
   const bills = harness();
@@ -2360,7 +2363,7 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
     ['gpt4', /gpt/i],
     ['Allen\u2013Bradley', /allen|bradley/i],
     ['inventor files', /inventor/i],
-    ['Schneider', /schneider/i],
+    ['Schneider Electric', /schneider/i],
     ['Modicon', /modicon/i],
     ['EcoStruxure', /ecostruxure/i],
   ];
@@ -2369,4 +2372,219 @@ test('round 4 promise bypasses, card separators, opt-out billing, and vendor lea
     assert.notEqual(cleaned, phrase, phrase);
     assert.doesNotMatch(cleaned, pattern, phrase);
   }
+});
+
+test('round 5 redaction, refund allowlist, opt-out, billing, and vendor context', async () => {
+  const env = aiEnv();
+  const prompt = policy.systemPrompt({}, 'sms');
+  assert.match(prompt, /You are the ManualOS support assistant/);
+  assert.match(prompt, /Never say you are a named AI model, and never name an AI company/);
+
+  const labeled = [
+    'ref 4111 1111 1111 1111',
+    'order 4111111111111111',
+    'ref 3782 822463 10005 exp 04/29',
+  ];
+  for (const phrase of labeled) {
+    assert.equal(policy.containsCardNumber(phrase), false, phrase);
+    const redacted = policy.redactCardNumbers(phrase);
+    assert.doesNotMatch(redacted, /4111|3782|822463|10005|04\/29/, phrase);
+    assert.match(redacted, /\[redacted\]/, phrase);
+    const session = state();
+    let seen = '';
+    const decision = await policy.triageTurn({
+      channel: 'sms',
+      text: phrase,
+      state: session,
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        seen = JSON.stringify(request.messages);
+        return answer('Email support@manualos.com and the team can look up that order.');
+      },
+    });
+    assert.doesNotMatch(decision.reply, /cannot take card numbers/, phrase);
+    assert.doesNotMatch(seen, /4111|3782|822463|10005|04\/29/, phrase);
+    assert.match(seen, /\[redacted\]/, phrase);
+    assert.doesNotMatch(JSON.stringify(session.history), /4111|3782|822463|10005|04\/29/, phrase);
+  }
+  assert.equal(policy.containsCardNumber('4111 x 1111 x 1111 x 1111'), true);
+  assert.equal(policy.redactCardNumbers('4111 x 1111 x 1111 x 1111'), '[redacted]');
+  assert.equal(policy.redactCardNumbers('4111x1111x1111x1111'), '[redacted]');
+  assert.equal(policy.redactCardNumbers('4111ab1111ab1111ab1111'), '[redacted]');
+
+  const cardStore = tempStore();
+  cardStore.saveThread('+15551119300', {
+    turns: 1,
+    history: [
+      { role: 'user', content: 'ref 4111 1111 1111 1111' },
+      { role: 'assistant', content: 'order 4111111111111111 and ref 3782 822463 10005 exp 04/29' },
+    ],
+  });
+  const storedCards = fs.readFileSync(path.join(cardStore.directory, 'threads.json'), 'utf8');
+  assert.doesNotMatch(storedCards, /4111|3782|822463|10005|04\/29/);
+  assert.match(storedCards, /\[redacted\]/);
+
+  const blocked = [
+    "I'm happy to issue a refund now",
+    "Our team is sorry. I'll refund you now",
+    "Don't worry. We'll refund you",
+    'Never fear — we will refund you',
+    "I've refunded your purchase",
+    'We are refunding your order',
+    'Not only will I refund you',
+    'You will get your credit back',
+  ];
+  for (const phrase of blocked) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /happy to issue|I'll refund|We'll refund|we will refund|refunded your|refunding your|will I refund|credit back/i, phrase);
+  }
+  const policyText = 'A purchase can be refunded only if no manual from it has been delivered: Starter within 30 days of purchase; Pro charges before that billing period ends. I cannot approve or issue a refund. The team will follow up at support@manualos.com.';
+  for (const phrase of [
+    'Only the team can issue a refund',
+    'The team decides whether to issue a refund',
+    'To request a refund, email support…',
+    'To get a refund, email support…',
+    policyText,
+  ]) {
+    assert.equal(policy.promisesRefund(phrase), false, phrase);
+    assert.equal(policy.applyGuardrails(phrase, {}), phrase, phrase);
+  }
+
+  for (const phrase of [
+    "don't text me",
+    'stop texting me',
+    'no more texts',
+    'take me off this list',
+    'remove me',
+    "don't text me, I cancelled my account",
+    'STOP',
+    'STOPALL',
+    'UNSUBSCRIBE',
+    'CANCEL',
+    'END',
+    'QUIT',
+    'OPTOUT',
+    'REVOKE',
+  ]) {
+    assert.equal(isOptOutMessage(phrase), true, phrase);
+  }
+  assert.equal(isOptOutMessage('please stop texting'), false);
+  assert.equal(isOptOutMessage('How do I unsubscribe from Pro?'), false);
+  assert.equal(isOptOutMessage('remove me from the Pro subscription'), false);
+  assert.equal(policy.classify('you billed me again'), 'billing');
+  assert.equal(policy.classify('send me the bill'), 'billing');
+  assert.equal(policy.classify('I want my money back'), 'billing');
+  assert.equal(policy.classify('I cancelled my account'), 'billing');
+  assert.equal(policy.classify('I canceled the plan'), 'billing');
+  assert.equal(policy.classify('I was overcharged'), 'billing');
+  assert.equal(policy.classify('I want to dispute this charge'), 'billing');
+
+  const bills = harness();
+  await withServer(bills.app, async ({ base }) => {
+    bills.env.PUBLIC_BASE_URL = base;
+    const samples = [
+      ['+15551119301', 'unsubscribe, you billed me again', /billed/],
+      ['+15551119302', 'please stop texting me, and I want my money back', /money back/],
+      ['+15551119303', "don't text me, I cancelled my account", /cancelled/],
+    ];
+    for (const [phone, body] of samples) {
+      const res = await postTwilio(base, bills.env, '/api/twilio/sms', {
+        From: phone,
+        Body: body,
+        MessageSid: `SM_${phone}`,
+      });
+      assert.match(await res.text(), /unsubscribed/i, body);
+      assert.equal(bills.store.isOptedOut(phone), true, body);
+    }
+    assert.equal(bills.sent.length, samples.length);
+    for (let i = 0; i < samples.length; i += 1) {
+      assert.equal(bills.sent[i].to, '+15550001111', samples[i][1]);
+      assert.match(bills.sent[i].body, /billing/i, samples[i][1]);
+      assert.match(bills.sent[i].body, samples[i][2], samples[i][1]);
+    }
+    const again = await postTwilio(base, bills.env, '/api/twilio/sms', {
+      From: '+15551119302',
+      Body: 'please stop texting me, and I want my money back',
+      MessageSid: 'SM_MONEY_AGAIN',
+    });
+    assert.match(await again.text(), /unsubscribed/i);
+    assert.equal(bills.sent.length, samples.length);
+
+    const plain = await postTwilio(base, bills.env, '/api/twilio/sms', {
+      From: '+15551119304',
+      Body: 'no more texts',
+      MessageSid: 'SM_NO_MORE',
+    });
+    assert.match(await plain.text(), /unsubscribed/i);
+    assert.equal(bills.store.isOptedOut('+15551119304'), true);
+    assert.equal(bills.sent.length, samples.length);
+    assert.equal(bills.completions.length, 0);
+  });
+
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    let payload = '';
+    h.setComplete(async (request) => {
+      payload = JSON.stringify(request.messages);
+      return answer('Email support@manualos.com and the team can look that up.');
+    });
+    const order = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119310',
+      Body: 'order 4111111111111111',
+      MessageSid: 'SM_ORDER_PAN',
+    });
+    assert.doesNotMatch(await order.text(), /cannot take card numbers/);
+    assert.doesNotMatch(payload, /4111/);
+    assert.match(payload, /\[redacted\]/);
+    const threads = fs.readFileSync(path.join(h.store.directory, 'threads.json'), 'utf8');
+    assert.doesNotMatch(threads, /4111/);
+    const amex = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119311',
+      Body: 'ref 3782 822463 10005 exp 04/29',
+      MessageSid: 'SM_REF_AMEX',
+    });
+    assert.doesNotMatch(await amex.text(), /cannot take card numbers|3782|04\/29/);
+    assert.doesNotMatch(payload, /3782|822463|10005|04\/29/);
+    assert.doesNotMatch(fs.readFileSync(path.join(h.store.directory, 'threads.json'), 'utf8'), /3782|822463|10005|04\/29/);
+    const split = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119312',
+      Body: '4111 x 1111 x 1111 x 1111',
+      MessageSid: 'SM_SPLIT_CARD',
+    });
+    assert.match(await split.text(), /cannot take card numbers/);
+    assert.doesNotMatch(fs.readFileSync(path.join(h.store.directory, 'threads.json'), 'utf8'), /4111/);
+  });
+
+  for (const phrase of [
+    'Claude from your team called',
+    'Ask Schneider in shipping',
+    'A Google search',
+    'gpt partition table',
+    'STEP 7:',
+    'Step 7 - tighten the bolts',
+    'Step 7. Tighten the bolts',
+    'Go to step 7',
+    'Fusion splicing',
+    'fusion welding',
+    'Hi, this is Claude Schneider',
+    'Google it',
+  ]) {
+    assert.equal(policy.applyGuardrails(phrase, env), phrase, phrase);
+  }
+  for (const [phrase, pattern] of [
+    ['step7', /step7/i],
+    ['fusion files from autodesk', /fusion|autodesk/i],
+    ['a model from Open AI', /open\s*ai/i],
+    ['I\'m Claude', /claude/i],
+    ['Schneider Electric', /schneider/i],
+  ]) {
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.notEqual(cleaned, phrase, phrase);
+    assert.doesNotMatch(cleaned, pattern, phrase);
+  }
+  assert.doesNotMatch(policy.applyGuardrails('A Google search', env), /the speech service/);
 });
