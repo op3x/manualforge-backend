@@ -95,17 +95,31 @@ test('starter remaining is credits minus manuals_used', () => {
   assert.equal(suspended.creditStatus, 'suspended');
 });
 
-test('pro is valid only while the subscription is active or trialing', () => {
-  for (const status of ['active', 'trialing']) {
+test('pro stays valid during past_due and ends on unpaid, canceled, or incomplete_expired', () => {
+  for (const status of ['active', 'trialing', 'past_due']) {
     const access = accessFromSession(
       { metadata: { plan: 'pro' }, payment_status: 'paid' },
+      null,
+      { id: 'sub_1', status, customer: 'cus_1' },
+      env
+    );
+    assert.equal(access.valid, true, status);
+    assert.equal(access.plan, 'pro');
+    assert.equal(access.remaining, null);
+    assert.equal(access.billingIssue, status === 'past_due');
+    assert.equal(access.subscriptionId, 'sub_1');
+    assert.equal(access.customerId, 'cus_1');
+  }
+  for (const status of ['unpaid', 'canceled', 'incomplete_expired', 'incomplete', 'paused']) {
+    const ended = accessFromSession(
+      { metadata: { plan: 'pro' } },
       null,
       { id: 'sub_1', status },
       env
     );
-    assert.equal(access.valid, true);
-    assert.equal(access.plan, 'pro');
-    assert.equal(access.remaining, null);
+    assert.equal(ended.valid, false, status);
+    assert.equal(ended.plan, 'pro');
+    assert.equal(ended.billingIssue, false);
   }
   for (const scheduled of [
     { id: 'sub_1', status: 'active', cancel_at: 1792800000, cancel_at_period_end: false },
@@ -118,6 +132,7 @@ test('pro is valid only while the subscription is active or trialing', () => {
       env
     );
     assert.equal(access.valid, true, JSON.stringify(scheduled));
+    assert.equal(access.billingIssue, false);
   }
   const lapsed = accessFromSession(
     { metadata: { plan: 'pro' } },
@@ -125,9 +140,10 @@ test('pro is valid only while the subscription is active or trialing', () => {
     { id: 'sub_1', status: 'past_due', cancel_at_period_end: true },
     env
   );
-  assert.equal(lapsed.valid, false);
+  assert.equal(lapsed.valid, true);
   assert.equal(lapsed.plan, 'pro');
   assert.equal(lapsed.remaining, null);
+  assert.equal(lapsed.billingIssue, true);
 });
 
 test('a refunded or suspended pro period is not valid while the subscription stays active', () => {

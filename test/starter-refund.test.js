@@ -183,9 +183,9 @@ function anthropic() {
   };
 }
 
-async function waitJob(base, id) {
+async function waitJob(base, id, sessionId) {
   for (let i = 0; i < 50; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': sessionId } });
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -232,7 +232,7 @@ test('full refund revokes starter credits and a duplicate event does not write a
     assert.equal(lines.some((line) => /sk_|whsec_|@/.test(line)), false);
 
     const verified = await fetch(base + '/verify-session?session_id=cs_full');
-    assert.deepEqual(await verified.json(), { valid: false, plan: 'starter', remaining: 0 });
+    assert.deepEqual(await verified.json(), { valid: false, plan: 'starter', remaining: 0, billingIssue: false });
 
     const job = await postJob(base, 'cs_full');
     assert.equal(job.status, 402);
@@ -290,11 +290,11 @@ test('partial refund is logged and starter credits still generate', async () => 
     assert.equal(intents.pi_partial.metadata.manuals_used, '1');
 
     const verified = await fetch(base + '/verify-session?session_id=cs_partial');
-    assert.deepEqual(await verified.json(), { valid: true, plan: 'starter', remaining: 2 });
+    assert.deepEqual(await verified.json(), { valid: true, plan: 'starter', remaining: 2, billingIssue: false });
 
     const created = await postJob(base, 'cs_partial');
     assert.equal(created.status, 202);
-    const done = await waitJob(base, (await created.json()).id);
+    const done = await waitJob(base, (await created.json()).id, 'cs_partial');
     assert.equal(done.status, 'succeeded');
     assert.equal(intents.pi_partial.metadata.manuals_used, '2');
     assert.equal(intents.pi_partial.metadata.credit_status, undefined);
@@ -384,6 +384,7 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
       valid: false,
       plan: 'starter',
       remaining: 0,
+      billingIssue: false,
     });
     assert.equal((await postWebhook(base, wonClose)).status, 200);
     assert.equal((await postWebhook(base, wonClose)).status, 200);
@@ -395,10 +396,11 @@ test('a dispute suspends starter credits, a loss revokes them, and a win restore
       valid: true,
       plan: 'starter',
       remaining: 2,
+      billingIssue: false,
     });
     const created = await postJob(base, 'cs_won');
     assert.equal(created.status, 202);
-    const done = await waitJob(base, (await created.json()).id);
+    const done = await waitJob(base, (await created.json()).id, 'cs_won');
     assert.equal(done.status, 'succeeded');
     assert.equal(intents.pi_won.metadata.manuals_used, '2');
   });
@@ -448,7 +450,7 @@ test('unknown charge is acknowledged and does not change credits', async () => {
     // A charge with no PaymentIntent is unknown, so the brand gate does not hand it to the Starter handler.
     assert.equal(lines.filter((line) => line.includes('ignored no Starter entitlement')).length, 2);
     const verified = await fetch(base + '/verify-session?session_id=cs_starter');
-    assert.deepEqual(await verified.json(), { valid: true, plan: 'starter', remaining: 3 });
+    assert.deepEqual(await verified.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
   });
 });
 
@@ -543,9 +545,9 @@ test('a job that already started does not publish after a full refund', async ()
     assert.equal(hook.status, 200);
     assert.equal(intents.pi_live.metadata.credit_status, 'revoked');
     release();
-    const done = await waitJob(base, job.id);
+    const done = await waitJob(base, job.id, 'cs_live');
     assert.equal(done.status, 'failed');
-    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_live' } });
     assert.equal(pdf.status, 409);
     const blocked = await postJob(base, 'cs_live');
     assert.equal(blocked.status, 402);

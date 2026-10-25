@@ -112,9 +112,9 @@ async function withServer(app, fn) {
   }
 }
 
-async function waitJob(base, id) {
+async function waitJob(base, id, sessionId = 'cs_test_starter') {
   for (let i = 0; i < 50; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': sessionId } });
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -206,7 +206,7 @@ test('the first downloadable pdf stamps once and a later success keeps that time
     assert.equal(first.status, 202);
     const done = await waitJob(base, (await first.json()).id);
     assert.equal(done.status, 'succeeded');
-    const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+    const pdf = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal(pdf.status, 200);
     const stamped = paid.meta.first_manual_at;
     assert.match(stamped, /^\d{4}-\d{2}-\d{2}T/);
@@ -294,7 +294,7 @@ test('a stamp failure does not serve the pdf and refunds the credit', async () =
       const created = await postJob(base, 'line.L5X', L5X);
       const done = await waitJob(base, (await created.json()).id);
       assert.equal(done.status, 'failed');
-      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       assert.equal(pdf.status, 409);
       assert.equal(Object.hasOwn(paid.meta, 'first_manual_at'), false);
       assert.equal(paid.meta.manuals_used, '0');
@@ -364,7 +364,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
     form.set('file', new Blob([L5X]), 'line.L5X');
     const created = await fetch(`${base}/jobs`, { method: 'POST', body: form });
     assert.equal(created.status, 202);
-    const done = await waitJob(base, (await created.json()).id);
+    const done = await waitJob(base, (await created.json()).id, 'cs_pro');
     assert.equal(done.status, 'succeeded');
     assert.equal(updates.length, 2);
     assert.equal(updates[0].id, 'ch_current');

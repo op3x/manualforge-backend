@@ -301,7 +301,7 @@ test('a full pro refund blocks the period until a new paid invoice and does not 
     assert.equal(lines.filter((line) => line.includes('subscription period revoked')).length, 1);
 
     const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
-    assert.deepEqual(await verified.json(), { valid: false, plan: 'pro', remaining: null });
+    assert.deepEqual(await verified.json(), { valid: false, plan: 'pro', remaining: null, billingIssue: false });
     const job = await postJob(base);
     assert.equal(job.status, 402);
     assert.equal((await job.json()).error, PRO_REFUNDED_MESSAGE);
@@ -331,7 +331,7 @@ test('a full pro refund blocks the period until a new paid invoice and does not 
     assert.equal(subscription.metadata.period_invoice, 'in_next');
     assert.equal(cancels.length, 0);
     const opened = await fetch(`${base}/verify-session?session_id=cs_pro`);
-    assert.deepEqual(await opened.json(), { valid: true, plan: 'pro', remaining: null });
+    assert.deepEqual(await opened.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
     const generated = await postGenerate(base);
     assert.equal(generated.status, 200);
     assert.equal(Buffer.from(await generated.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
@@ -369,7 +369,7 @@ test('a partial pro refund is logged and does not block generation', async () =>
     assert.match(lines.find((line) => line.includes('partial subscription period unchanged')) || '', /amount_refunded 500 amount 7900/);
     assert.equal(lines.some((line) => /@|sk_|whsec_/.test(line)), false);
     const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
-    assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null });
+    assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
     const created = await postJob(base);
     assert.equal(created.status, 202);
     const createdBody = await created.json();
@@ -485,7 +485,7 @@ test('a refund of an earlier period does not block the current one', async () =>
     assert.equal(subscription.status, 'active');
     assert.equal(cancels.length, 0);
     const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
-    assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null });
+    assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
   });
 });
 

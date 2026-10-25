@@ -93,9 +93,10 @@ async function runJob(base, files) {
   }
   const job = await created.json();
   for (let i = 0; i < 120; i += 1) {
-    const body = await (await fetch(`${base}/jobs/${job.id}`)).json();
+    const headers = { 'X-Session-Id': 'cs_e2e' };
+    const body = await (await fetch(`${base}/jobs/${job.id}`, { headers })).json();
     if (body.status === 'succeeded') {
-      const pdf = Buffer.from(await (await fetch(`${base}/jobs/${job.id}/pdf`)).arrayBuffer());
+      const pdf = Buffer.from(await (await fetch(`${base}/jobs/${job.id}/pdf`, { headers })).arrayBuffer());
       return { pdf, body };
     }
     if (body.status === 'failed') throw new Error(`${job.id} failed: ${body.error}`);

@@ -7,7 +7,7 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 ## Pricing
 
 - **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` is off unless `MANUALOS_LEGACY_GENERATE` is `1`. When that flag is on, it increments `manuals_used` only after a PDF is produced.
-- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`.
+- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active`, `trialing`, or `past_due` (Stripe's retry window). It ends on `unpaid`, `canceled`, or `incomplete_expired`. `past_due` sets `billingIssue` so the site can ask the buyer to update the card.
 
 ## API
 
@@ -62,13 +62,13 @@ Link app steps, for a Sold through Link subscription. Stripe documents subscript
 
 ### `GET /verify-session?session_id=cs_...`
 
-Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | null, "remaining": number | null }`.
+Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | null, "remaining": number | null, "billingIssue": boolean }`.
 
-Starter is valid when the Checkout Session `payment_status` is `paid`. `remaining` is `STARTER_CREDITS` minus `manuals_used`. Pro is valid when the session's subscription status is `active` or `trialing`, and `remaining` is `null` (unlimited). A paid Starter session with zero manuals left is still `valid: true` with `remaining: 0`; generation then returns 402.
+Starter is valid when the Checkout Session `payment_status` is `paid`. `remaining` is `STARTER_CREDITS` minus `manuals_used`. Pro is valid when the session's subscription status is `active`, `trialing`, or `past_due`, and `remaining` is `null` (unlimited). `billingIssue` is `true` only while the subscription is `past_due`. A paid Starter session with zero manuals left is still `valid: true` with `remaining: 0`; generation then returns 402. Send `Authorization: Bearer` from `POST /access-token` instead of `session_id` once the upload page has exchanged the Checkout Session. The query form remains for the current page.
 
 ### `POST /jobs`
 
-Preferred upload. Multipart fields `file` and/or `files` (up to 25), plus `session_id` (form field or `X-Session-Id`). Optional fields: `brand`, `manufacturer_name`, `manufacturer_address`, `product_name`, `model`, `doc_number`, `revision`, `language`.
+Preferred upload. Multipart fields `file` and/or `files` (up to 25), plus `Authorization: Bearer` from `POST /access-token`. For one release the current upload page may still send `session_id` (form field or `X-Session-Id`). Optional fields: `brand`, `manufacturer_name`, `manufacturer_address`, `product_name`, `model`, `doc_number`, `revision`, `language`. Manufacturer, product, model, brand, and address are at most 200 characters. Document number and language are at most 80. Revision and date are at most 40. A longer field is **400** `field_too_long` and does not use a credit. More than 25 files is **400** `too_many_files` and does not use a credit.
 
 `202` JSON:
 
@@ -76,7 +76,7 @@ Preferred upload. Multipart fields `file` and/or `files` (up to 25), plus `sessi
 { "id": "job_…", "status": "queued", "progress": { "stage": "queued", "percent": 0, "message": "…" }, "error": null, "warnings": [], "coverage": null, "createdAt": "…", "expiresAt": "…" }
 ```
 
-Poll `GET /jobs/:id` until `status` is `succeeded` or `failed`. `GET /jobs/:id/pdf` returns `application/pdf` when the job succeeded, `409` when it is not ready, and `404` when the id is unknown or older than 24 hours. Stages are `queued`, `parsing`, `analyzing`, `assembling`, `rendering`, `done`, and `failed`.
+Poll `GET /jobs/:id` with the same bearer token until `status` is `succeeded` or `failed`. `GET /jobs` lists that buyer's ready manuals from the last 24 hours. `GET /jobs/:id/pdf` returns `application/pdf` when the job succeeded. The download name is an ASCII slug of the product or company name, at most 60 characters, then `-manual.pdf` (`manualos-manual.pdf` when the name is empty). A non-ASCII name also sends RFC 5987 `filename*`. A second download does not use another credit. The response is `409` when the manual is not ready, and `404` when the id is unknown, older than 24 hours, or not owned by the caller. Stages are `queued`, `parsing`, `analyzing`, `assembling`, `rendering`, `done`, and `failed`. Job PDFs and their metadata live under `SUPPORT_DATA_DIR/jobs` when that directory is set, and are deleted after 24 hours.
 
 Accepted content, detected from the bytes rather than the extension: Rockwell L5X and L5K, Rockwell ACD (converted to L5X with the vendored Apache-2.0 `acd-tools` package; a routine the converter cannot read is named in the manual), Siemens SIMATIC ML block XML (LAD, FBD, SCL, GRAPH, and statement list), Siemens SCL/ST and DATA_BLOCK source, Siemens STL/AWL (S7-300/400 and S7-200), PLCopen XML, TwinCAT TcPOU, CSV and XLSX tag lists, STEP, IGES, ASCII or binary DXF, and ASCII or binary STL (size and approximate shape only). A Zip may contain those files. `.zap` / `.ap` / `.s7p`, `.dwg`, and SolidWorks `.sldprt` / `.sldasm` / `.slddrw` are rejected with the export to use instead (SCL or SIMATIC ML XML, DXF, or STEP). Unknown or mismatched content returns **415**. A file that parses but contains no equipment data returns **422**. Neither spends a credit. Executable uploads are rejected. Zip entries are checked for path traversal, nesting, file count, and uncompressed size.
 
