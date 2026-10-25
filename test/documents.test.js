@@ -249,6 +249,16 @@ test('schedules and procedures follow the equipment that was found', async () =>
   const fromStop = htmlOf(buildShutdown(named, {}));
   assert.match(fromStop, /Stop/);
   assert.match(fromStop, /Gravity/);
+
+  const conversion = emptyProject();
+  upsertTag(conversion, { name: 'Dint_Conv', description: '' });
+  upsertTag(conversion, { name: 'MathConv', description: '' });
+  addRoutine(conversion, { name: 'R033_ASCII_Conv', units: [{ index: 0, number: 0, text: 'DTOS(Dint_Conv[0],Str_Conv[0]);', comment: '' }], comment: '' });
+  conversion.identity.productName = 'Instruction sample';
+  conversion.identity.productNameFromUser = true;
+  const conversionPm = htmlOf(buildPmSchedule(conversion, {}));
+  assert.equal(/Conveyor/.test(conversionPm), false);
+  assert.match(conversionPm, /no specific device class/);
 });
 
 test('starter extra documents are refused before a credit is reserved', async () => {
