@@ -6,7 +6,7 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 
 ## Pricing
 
-- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). The count lives in the PaymentIntent metadata key `manuals_used` and goes up only after a PDF is produced.
+- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced.
 - **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`.
 
 ## API
@@ -28,11 +28,25 @@ Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | null, "remaining
 
 Starter is valid when the Checkout Session `payment_status` is `paid`. `remaining` is `STARTER_CREDITS` minus `manuals_used`. Pro is valid when the session's subscription status is `active` or `trialing`, and `remaining` is `null` (unlimited). A paid Starter session with zero manuals left is still `valid: true` with `remaining: 0`; generation then returns 402.
 
+### `POST /jobs`
+
+Preferred upload. Multipart fields `file` and/or `files` (up to 25), plus `session_id` (form field or `X-Session-Id`). Optional fields: `brand`, `manufacturer_name`, `manufacturer_address`, `product_name`, `model`, `doc_number`, `revision`, `language`.
+
+`202` JSON:
+
+```json
+{ "id": "job_…", "status": "queued", "progress": { "stage": "queued", "percent": 0, "message": "…" }, "error": null, "warnings": [], "coverage": null, "createdAt": "…", "expiresAt": "…" }
+```
+
+Poll `GET /jobs/:id` until `status` is `succeeded` or `failed`. `GET /jobs/:id/pdf` returns `application/pdf` when the job succeeded, `409` when it is not ready, and `404` when the id is unknown or older than 24 hours. Stages are `queued`, `parsing`, `analyzing`, `assembling`, `rendering`, `done`, and `failed`.
+
+Accepted content, detected from the bytes rather than the extension: Rockwell L5X and L5K, PLCopen XML, TwinCAT TcPOU, IEC ST/SCL, CSV and XLSX tag lists, STEP, IGES, DXF, and a best-effort ACD (the manual then says to export L5X). A Zip may contain those files. Unknown or mismatched content returns **415**. A file that parses but contains no equipment data returns **422**. Neither spends a credit. Executable uploads are rejected. Zip entries are checked for path traversal, nesting, file count, and uncompressed size.
+
+One failed model chunk does not fail the job. The manual is still built from the parsed project, and coverage must account for every rung or statement.
+
 ### `POST /generate-manual`
 
-Send `session_id` as a multipart form field or as the `X-Session-Id` header. The upload field is `file` (`.L5X`, `.XML`, `.ACD`, `.ZIP`). `brand` is optional. JSON `{ "plcContent": "...", "session_id": "..." }` is also accepted.
-
-Success responds with `application/pdf`. A missing, unpaid, or inactive session, and a Starter plan with no manuals left, respond with **402** and JSON `{ "error": "<reason>" }`. The Starter counter increments only after the PDF has been built.
+Kept for the current site. Same body as before (`file`, or JSON `plcContent`, plus `session_id`). Success is `application/pdf` with `Deprecation: true` and `Link: </jobs>; rel="successor-version"`. The Starter counter increments only after the PDF is sent. A missing model key returns **503** and does not spend a credit.
 
 ### `POST /webhook`
 
@@ -61,6 +75,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
+| `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
 
 `STRIPE_PUBLISHABLE_KEY` is not read by this server. Hosted Checkout only needs the URL returned by `/create-checkout-session`. The old `STRIPE_PRICE_ID` variable is unused.
 
@@ -86,7 +101,7 @@ Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax fo
 
 ## Model
 
-The default model is Claude Haiku 5.5, id `claude-haiku-5-5` ([model page](https://platform.claude.com/docs/en/models/haiku-5-5/overview)). `claude-3-5-haiku-20241022` is retired. Haiku 5.5 requests use `output_config.effort: "low"` and `thinking: { "type": "disabled" }` so routine summaries stay cheap, and the server reads `text` content blocks rather than assuming the first block is text. A failed model call returns **502** JSON. It does not fill the PDF with the local template. Override the id with `ANTHROPIC_MODEL` (for example `claude-sonnet-5-5` when you want a larger model).
+The default model is Claude Haiku 5.5, id `claude-haiku-5-5` ([model page](https://platform.claude.com/docs/en/models/haiku-5-5/overview)). `claude-3-5-haiku-20241022` is retired. Haiku 5.5 requests use `output_config.effort: "low"` and `thinking: { "type": "disabled" }` so routine summaries stay cheap, and the server reads `text` content blocks rather than assuming the first block is text. The client is `@anthropic-ai/sdk` 1.3 with Node's native `fetch`. SDK 0.20 bundled `node-fetch` and closed gzip responses early. A failed chunk is retried, then replaced by a deterministic grouping of the parsed rungs. The job still fails, and a reserved credit is refunded, if those groups do not cover every rung. Override the id with `ANTHROPIC_MODEL` (for example `claude-sonnet-5-5` when you want a larger model).
 
 ## Local development
 

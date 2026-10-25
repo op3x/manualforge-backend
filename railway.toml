@@ -1,6 +1,9 @@
 [build]
 builder = "NIXPACKS"
 
+[variables]
+NIXPACKS_PKGS = "chromium liberation_ttf"
+
 [deploy]
 startCommand = "node server.js"
 restartPolicyType = "ON_FAILURE"

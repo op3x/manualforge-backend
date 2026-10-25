@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="32.00">
+  <Controller Use="Target" Name="Line">
+    <Programs>
+      <Program Name="MainProgram" MainRoutineName="Main">
+        <Tags>
+          <Tag Name="Start_PB" TagType="Base" DataType="BOOL">
+            <Description><![CDATA[Operator start button]]></Description>
+          </Tag>
+          <Tag Name="Motor_Run" TagType="Base" DataType="BOOL">
+            <Description><![CDATA[Conveyor motor run command]]></Description>
+          </Tag>
+        </Tags>
+        <Routines>
+          <Routine Name="Main" Type="RLL">
+            <RLLContent>
+              <Rung Number="0" Type="N">
+                <Comment><![CDATA[Start the conveyor when the operator presses start.]]></Comment>
+                <Text>XIC(Start_PB)OTE(Motor_Run);</Text>
+              </Rung>
+            </RLLContent>
+          </Routine>
+        </Routines>
+      </Program>
+    </Programs>
+  </Controller>
+</RSLogix5000Content>

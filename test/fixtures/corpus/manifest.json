@@ -1,0 +1,27 @@
+{
+  "created": "2026-10-24",
+  "purpose": "Committed corpus so CI can run npm test without the private manualos-test-corpus store. files is the small set the corpus walk builds. supporting_files are the redistributable sources for the parser and quality tests that otherwise skip.",
+  "count": 2,
+  "files": [
+    {
+      "file": "plc/line.L5X",
+      "format": "Rockwell L5X",
+      "redistributable": true,
+      "machine": "One-rung conveyor fixture"
+    },
+    {
+      "file": "cad/pulley.stp",
+      "format": "STEP",
+      "redistributable": true,
+      "machine": "Conveyor pulley fixture"
+    }
+  ],
+  "supporting_files": [
+    "plc/acd_ACDTestsWithAOI.L5X",
+    "plc/brewery_Cooker_1_AutoLogic_Program.L5X",
+    "plc/acd_CuteLogix.ACD",
+    "cad/cadzinho_title_a1.dxf",
+    "cad/nist_ftc_08_asme1_rc.stp"
+  ],
+  "notes": "Only MIT, Apache-2.0, public-domain and original ManualOS files are committed. See NOTICE.md. GPL, CC-BY and CERN-OHL files are kept out of the repo; tests that need them skip unless MANUALOS_CORPUS points at the full private corpus."
+}
