@@ -11,7 +11,7 @@ const {
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 
-const PAYMENT_MESSAGE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable.';
+const PAYMENT_MESSAGE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro. Once a manual is delivered, that purchase is no longer refundable.';
 const SUBSCRIPTION_MESSAGE = `${PAYMENT_MESSAGE} Cancel anytime.`;
 
 const STARTER_DESCRIPTION = 'ManualOS Starter: 3 operator and maintenance manuals from your files';
@@ -22,6 +22,26 @@ const INTEGRATOR_YEARLY = 'ManualOS Integrator: 25 manuals per month, billed yea
 const OVERAGE_DESCRIPTION = 'ManualOS Integrator: one extra manual';
 
 const AI_WORD = /\bAI\b/i;
+const CONSENT_KEYS = ['terms_version', 'disclosure_version', 'renewal_consent_at', 'terms_consent_at', 'consent_ip'];
+
+function consentBody(plan) {
+  const body = { plan, termsAccepted: true, termsVersion: 'terms-2026-10-25' };
+  if (plan === 'pro') {
+    body.renewalConsent = true;
+    body.disclosureVersion = 'disclosure-2026-10-25';
+  }
+  return body;
+}
+
+function withoutConsent(params) {
+  const copy = structuredClone(params);
+  for (const slot of ['metadata', 'subscription_data', 'payment_intent_data']) {
+    const record = slot === 'metadata' ? copy.metadata : copy[slot] && copy[slot].metadata;
+    if (!record) continue;
+    for (const key of CONSENT_KEYS) delete record[key];
+  }
+  return copy;
+}
 
 const env = {
   FRONTEND_URL: 'https://manualos.com/',
@@ -74,6 +94,17 @@ function withAttribution(params, raw) {
   }
   return next;
 }
+
+test('live checkout text does not name Integrator', () => {
+  assert.equal(PAYMENT_REFUND_MESSAGE.includes('Integrator'), false);
+  assert.equal(SUBSCRIPTION_REFUND_MESSAGE.includes('Integrator'), false);
+  for (const plan of ['starter', 'pro']) {
+    const result = withCheckoutPolicy(checkoutParams(plan, env), { plan, env });
+    for (const text of customerCopy(result)) {
+      assert.equal(text.includes('Integrator'), false, text);
+    }
+  }
+});
 
 test('submit message is the refund rule and stays within 1200 characters', () => {
   assert.equal(PAYMENT_REFUND_MESSAGE, PAYMENT_MESSAGE);
@@ -244,6 +275,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   assert.equal(result.payment_intent_data.description, STARTER_DESCRIPTION);
   assert.deepEqual(result.payment_intent_data.metadata, {
     plan: 'starter',
+    brand: 'manualos',
     manuals_used: '0',
     credit_hold: 'hold_1',
   });
@@ -258,7 +290,7 @@ test('policy merges nested checkout data and does not overwrite metadata', () =>
   const off = withCheckoutPolicy(pro, { plan: 'pro', env: {} });
   assert.equal(off.subscription_data.description, PRO_MONTHLY);
   assert.equal(off.subscription_data.trial_period_days, 0);
-  assert.deepEqual(off.subscription_data.metadata, { plan: 'pro' });
+  assert.deepEqual(off.subscription_data.metadata, { plan: 'pro', brand: 'manualos' });
   assert.deepEqual(off.consent_collection, { promotions: 'auto' });
 
   const on = withCheckoutPolicy(pro, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
@@ -442,9 +474,9 @@ test('utm metadata and integrator checkout shapes survive aside from policy fiel
   }
 });
 
-test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
-  const calls = [];
-  const stripe = {
+function checkoutStripe(calls, customerCalls, priceLists) {
+  let customers = 0;
+  return {
     checkout: {
       sessions: {
         create: async (params) => {
@@ -453,7 +485,27 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
         },
       },
     },
+    customers: {
+      create: async (params) => {
+        customerCalls.push(params);
+        customers += 1;
+        return { id: `cus_${customers}` };
+      },
+    },
+    prices: {
+      list: async (params) => {
+        priceLists.push(params);
+        return { data: [] };
+      },
+    },
   };
+}
+
+test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
+  const calls = [];
+  const customerCalls = [];
+  const priceLists = [];
+  const stripe = checkoutStripe(calls, customerCalls, priceLists);
   const appEnv = {
     NODE_ENV: 'test',
     FRONTEND_URL: 'https://manualos.com',
@@ -481,19 +533,29 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
     });
     assert.equal(bad.status, 400);
     assert.equal(calls.length, 0);
+    assert.equal(customerCalls.length, 0);
+    assert.equal(priceLists.length, 0);
 
     for (const plan of ['starter', 'pro']) {
       const response = await fetch(base + '/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan }),
+        body: JSON.stringify(consentBody(plan)),
       });
       assert.equal(response.status, 200);
       const body = await response.json();
       assert.deepEqual(Object.keys(body), ['url']);
     }
-    assert.deepEqual(calls[0], withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
-    assert.deepEqual(calls[1], withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
+    assert.deepEqual(withoutConsent(calls[0]), withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
+    assert.deepEqual(withoutConsent(calls[1]), withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
+    assert.equal(calls[0].customer, undefined);
+    assert.equal(calls[0].customer_update, undefined);
+    assert.equal(calls[0].customer_creation, 'always');
+    assert.equal(calls[1].customer, undefined);
+    assert.equal(calls[1].customer_update, undefined);
+    assert.deepEqual(customerCalls, []);
+    assert.deepEqual(priceLists[0], { lookup_keys: ['manualos_starter'], active: true, limit: 1 });
+    assert.deepEqual(priceLists[1], { lookup_keys: ['manualos_pro'], active: true, limit: 1 });
     assert.equal(calls[0].consent_collection, undefined);
     assert.equal(calls[1].consent_collection, undefined);
     for (const params of calls) {
@@ -504,16 +566,7 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
     const tosEnv = { ...appEnv, CHECKOUT_REQUIRE_TOS: '1' };
     const tosApp = createApp({
       env: tosEnv,
-      stripe: {
-        checkout: {
-          sessions: {
-            create: async (params) => {
-              tosCalls.push(params);
-              return { id: 'cs_tos', url: 'https://checkout.stripe.com/c/pay/cs_tos' };
-            },
-          },
-        },
-      },
+      stripe: checkoutStripe(tosCalls, [], []),
       anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
     });
     const tosServer = tosApp.listen(0, '127.0.0.1');
@@ -526,7 +579,7 @@ test('create-checkout-session sends the policy and does not call Stripe for a ba
       const paid = await fetch(tosBase + '/create-checkout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan: 'starter' }),
+        body: JSON.stringify(consentBody('starter')),
       });
       assert.equal(paid.status, 200);
       assert.equal(tosCalls[0].consent_collection.terms_of_service, 'required');

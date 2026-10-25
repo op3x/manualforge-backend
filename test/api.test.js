@@ -21,6 +21,15 @@ const L5X = `<?xml version="1.0" encoding="UTF-8"?>
   </Controller>
 </RSLogix5000Content>`;
 
+function checkoutRequest(plan) {
+  const body = { plan, termsAccepted: true, termsVersion: 'terms-2026-10-25' };
+  if (plan === 'pro') {
+    body.renewalConsent = true;
+    body.disclosureVersion = 'disclosure-2026-10-25';
+  }
+  return JSON.stringify(body);
+}
+
 function baseEnv(extra = {}) {
   return {
     NODE_ENV: 'test',
@@ -50,6 +59,7 @@ function fakePdf() {
 function createHarness() {
   const calls = { create: [], updates: [], modelCalls: 0 };
   let used = 0;
+  let deliveredAt = '';
   const stripe = {
     checkout: {
       sessions: {
@@ -87,15 +97,39 @@ function createHarness() {
       },
     },
     paymentIntents: {
-      retrieve: async () => ({ id: 'pi_1', metadata: { manuals_used: String(used) } }),
+      retrieve: async () => ({
+        id: 'pi_1',
+        created: 1700000000,
+        metadata: {
+          manuals_used: String(used),
+          ...(deliveredAt ? { first_manual_at: deliveredAt } : {}),
+        },
+      }),
       update: async (id, params) => {
         calls.updates.push({ id, params });
-        used = Number(params.metadata.manuals_used);
-        return { id, metadata: params.metadata };
+        if (params.metadata && params.metadata.manuals_used !== undefined) {
+          used = Number(params.metadata.manuals_used);
+        }
+        if (params.metadata && params.metadata.first_manual_at) {
+          deliveredAt = params.metadata.first_manual_at;
+        }
+        return {
+          id,
+          metadata: {
+            manuals_used: String(used),
+            ...(deliveredAt ? { first_manual_at: deliveredAt } : {}),
+          },
+        };
       },
     },
     subscriptions: {
       retrieve: async () => ({ id: 'sub_1', status: 'trialing' }),
+    },
+    customers: {
+      create: async () => ({ id: 'cus_test' }),
+    },
+    prices: {
+      list: async () => ({ data: [] }),
     },
     webhooks: {
       constructEvent(body, signature, secret) {
@@ -162,7 +196,7 @@ test('health, checkout, verify, and webhook', async () => {
     const checkout = await fetch(base + '/create-checkout-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
-      body: JSON.stringify({ plan: 'pro' }),
+      body: checkoutRequest('pro'),
     });
     assert.equal(checkout.status, 200);
     assert.equal(checkout.headers.get('access-control-allow-origin'), 'https://manualos.com');
@@ -195,7 +229,7 @@ test('health, checkout, verify, and webhook', async () => {
       body: JSON.stringify({
         id: 'evt_1',
         type: 'customer.subscription.updated',
-        data: { object: { id: 'sub_1', status: 'active' } },
+        data: { object: { id: 'sub_1', status: 'active', metadata: { plan: 'pro', brand: 'manualos' } } },
       }),
     });
     assert.equal(webhook.status, 200);
@@ -240,8 +274,10 @@ test('generate requires payment, spends one starter credit after success, and hi
     assert.match(ok.headers.get('content-type'), /application\/pdf/);
     const pdf = Buffer.from(await ok.arrayBuffer());
     assert.equal(pdf.subarray(0, 4).toString(), '%PDF');
-    assert.equal(harness.calls.updates.length, 1);
-    assert.equal(harness.calls.updates[0].params.metadata.manuals_used, '1');
+    assert.equal(harness.calls.updates.length, 3);
+    assert.match(harness.calls.updates[0].params.metadata.generation_started_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(harness.calls.updates[1].params.metadata.first_manual_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(harness.calls.updates[2].params.metadata.manuals_used, '1');
     assert.equal(harness.calls.lastModelBody.model, 'claude-haiku-5-5');
     assert.equal(harness.calls.lastModelBody.thinking.type, 'disabled');
     assert.equal(harness.calls.lastModelBody.output_config.effort, 'low');
@@ -260,8 +296,9 @@ test('generate requires payment, spends one starter credit after success, and hi
     const failedPdf = Buffer.from(await viaHeader.arrayBuffer());
     assert.equal(failedPdf.subarray(0, 4).toString(), '%PDF');
     assert.equal(failedPdf.includes(Buffer.from('SUPER_SECRET_MODEL_DETAIL')), false);
-    assert.equal(harness.calls.updates.length, 2);
-    assert.equal(harness.calls.updates[1].params.metadata.manuals_used, '2');
+    assert.equal(harness.calls.updates.length, 4);
+    assert.equal(harness.calls.updates[3].params.metadata.manuals_used, '2');
+    assert.equal(harness.calls.updates.filter((row) => row.params.metadata.first_manual_at).length, 1);
   });
 });
 
@@ -275,7 +312,7 @@ test('pro generation does not touch the starter counter and checkout failures st
     const boom = await fetch(base + '/create-checkout-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan: 'starter' }),
+      body: checkoutRequest('starter'),
     });
     assert.equal(boom.status, 500);
     const boomBody = await boom.json();
