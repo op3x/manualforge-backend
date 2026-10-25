@@ -209,14 +209,14 @@ test('the first downloadable pdf stamps once and a later success keeps that time
   });
 });
 
-test('a stamp failure still leaves the pdf available', async () => {
+test('a stamp failure does not serve the pdf and refunds the credit', async () => {
   const paid = starterStripe();
   const errors = [];
   const original = console.error;
   console.error = (...args) => errors.push(args.map((arg) => String(arg)).join(' '));
   paid.stripe.paymentIntents.update = async (id, params) => {
     paid.calls.updates.push(params.metadata);
-    if (params.metadata.first_manual_at) throw new Error('stamp backend exploded with secret file.L5X');
+    if (params.metadata.first_manual_at) throw new Error('stamp write failed sk_test_secretvalue');
     for (const [key, value] of Object.entries(params.metadata)) {
       if (value === '') delete paid.meta[key];
       else paid.meta[key] = value;
@@ -232,17 +232,21 @@ test('a stamp failure still leaves the pdf available', async () => {
     }), async (base) => {
       const created = await postJob(base, 'line.L5X', L5X);
       const done = await waitJob(base, (await created.json()).id);
-      assert.equal(done.status, 'succeeded');
+      assert.equal(done.status, 'failed');
       const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
-      assert.equal(pdf.status, 200);
-      assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+      assert.equal(pdf.status, 409);
       assert.equal(Object.hasOwn(paid.meta, 'first_manual_at'), false);
+      assert.equal(paid.meta.manuals_used, '0');
+      assert.equal(Object.hasOwn(paid.meta, 'generation_started_at'), false);
     });
   } finally {
     console.error = original;
   }
-  assert.equal(errors.some((line) => line.includes('First manual delivery stamp failed') && line.includes('starter')), true);
-  assert.equal(errors.some((line) => line.includes('secret') || line.includes('file.L5X')), false);
+  const logged = errors.join('\n');
+  assert.match(logged, /First manual delivery stamp failed/);
+  assert.match(logged, /starter/);
+  assert.match(logged, /stamp write failed \[redacted\]/);
+  assert.equal(logged.includes('sk_test_secretvalue'), false);
 });
 
 test('pro stamps the current period charge and skips a mismatched period', async () => {
@@ -301,8 +305,9 @@ test('pro stamps the current period charge and skips a mismatched period', async
     assert.equal(created.status, 202);
     const done = await waitJob(base, (await created.json()).id);
     assert.equal(done.status, 'succeeded');
-    assert.equal(updates.length, 1);
+    assert.equal(updates.length, 2);
     assert.equal(updates[0].id, 'ch_current');
+    assert.equal(updates[1].id, 'ch_current');
     assert.match(charges.ch_current.metadata.first_manual_at, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(charges.ch_old.metadata.first_manual_at, undefined);
     const stamped = charges.ch_current.metadata.first_manual_at;
@@ -312,7 +317,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     assert.equal(again.status, 200);
-    assert.equal(updates.length, 1);
+    assert.equal(updates.filter((row) => row.metadata.first_manual_at).length, 1);
     assert.equal(charges.ch_current.metadata.first_manual_at, stamped);
 
     invoice = {
@@ -328,7 +333,7 @@ test('pro stamps the current period charge and skips a mismatched period', async
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
     });
     assert.equal(mismatched.status, 200);
-    assert.equal(updates.length, 1);
+    assert.equal(updates.filter((row) => row.metadata.first_manual_at).length, 1);
     assert.equal(charges.ch_old.metadata.first_manual_at, undefined);
   });
 });

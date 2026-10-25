@@ -31,18 +31,24 @@ function notFound() {
 }
 
 function createProStripe() {
+  const periodStart = 1700000000;
+  const periodEnd = periodStart + (30 * 24 * 60 * 60);
   const subscription = {
     id: 'sub_pro',
     status: 'active',
+    customer: 'cus_pro',
     latest_invoice: 'in_current',
     metadata: { plan: 'pro' },
   };
+  const customer = { id: 'cus_pro', metadata: {} };
   const invoices = {
     in_current: {
       id: 'in_current',
       status: 'paid',
       subscription: 'sub_pro',
       charge: 'ch_current',
+      period_start: periodStart,
+      period_end: periodEnd,
       metadata: {},
     },
     in_next: {
@@ -50,6 +56,10 @@ function createProStripe() {
       status: 'paid',
       subscription: 'sub_pro',
       charge: 'ch_next',
+      period_start: periodEnd,
+      period_end: periodEnd + (30 * 24 * 60 * 60),
+      billing_reason: 'subscription_cycle',
+      amount_paid: 7900,
       metadata: {},
     },
     in_old: {
@@ -112,8 +122,21 @@ function createProStripe() {
         return { ...invoices[id] };
       },
     },
+    customers: {
+      update: async (id, params) => {
+        if (id !== customer.id) throw notFound();
+        customer.metadata = { ...(customer.metadata || {}), ...(params.metadata || {}) };
+        return { id, metadata: { ...customer.metadata } };
+      },
+    },
     subscriptions: {
-      retrieve: async () => ({ id: subscription.id, status: subscription.status, latest_invoice: subscription.latest_invoice, metadata: { ...subscription.metadata } }),
+      retrieve: async () => ({
+        id: subscription.id,
+        status: subscription.status,
+        customer: subscription.customer,
+        latest_invoice: subscription.latest_invoice,
+        metadata: { ...subscription.metadata },
+      }),
       update: async (id, params) => {
         subUpdates.push(JSON.parse(JSON.stringify(params)));
         for (const [key, value] of Object.entries(params.metadata || {})) {
@@ -122,9 +145,10 @@ function createProStripe() {
         }
         return { id, status: subscription.status, metadata: { ...subscription.metadata } };
       },
-      cancel: async () => {
-        cancels.push('cancel');
-        throw new Error('subscription cancel is not allowed');
+      cancel: async (id, params) => {
+        cancels.push(params);
+        subscription.status = 'canceled';
+        return { id, status: 'canceled' };
       },
     },
     webhooks: {
@@ -134,7 +158,7 @@ function createProStripe() {
       },
     },
   };
-  return { stripe, subscription, subUpdates, cancels, invoices };
+  return { stripe, subscription, subUpdates, cancels, invoices, customer, periodEnd };
 }
 
 function event(id, type, object) {
@@ -282,6 +306,10 @@ test('a full pro refund blocks the period until a new paid invoice and does not 
       id: 'in_next',
       status: 'paid',
       subscription: 'sub_pro',
+      billing_reason: 'subscription_cycle',
+      amount_paid: 7900,
+      period_start: 1700000000 + (30 * 24 * 60 * 60),
+      period_end: 1700000000 + (60 * 24 * 60 * 60),
     }))).status, 200);
     assert.equal(subscription.status, 'active');
     assert.equal(subscription.metadata.period_access, 'active');
@@ -332,8 +360,8 @@ test('a partial pro refund is logged and does not block generation', async () =>
   });
 });
 
-test('pro disputes suspend, restore on won, and revoke on lost until a new invoice', async () => {
-  const { stripe, subscription, subUpdates, cancels } = createProStripe();
+test('pro disputes suspend, restore on won, and revoke permanently on lost', async () => {
+  const { stripe, subscription, subUpdates, cancels, customer } = createProStripe();
   const app = createApp({ env: env(), stripe, anthropic: anthropic(), renderPdf: async () => Buffer.from('%PDF-1.4\n') });
   await withServer(app, async (base) => {
     assert.equal((await postWebhook(base, event('evt_open', 'charge.dispute.created', {
@@ -370,6 +398,10 @@ test('pro disputes suspend, restore on won, and revoke on lost until a new invoi
     }))).status, 200);
     assert.equal(subscription.metadata.period_access, 'revoked');
     assert.equal(subscription.metadata.period_access_reason, 'dispute');
+    assert.equal(subscription.metadata.revoked_dispute_lost, 'true');
+    assert.equal(customer.metadata.revoked_dispute_lost, 'true');
+    assert.equal(subscription.status, 'canceled');
+    assert.deepEqual(cancels, [{ prorate: false, invoice_now: false }]);
     const lost = await postGenerate(base);
     assert.equal(lost.status, 402);
     assert.equal((await lost.json()).error, PRO_DISPUTE_LOST_MESSAGE);
@@ -380,10 +412,15 @@ test('pro disputes suspend, restore on won, and revoke on lost until a new invoi
       status: 'won',
     }))).status, 200);
     assert.equal(subscription.metadata.period_access, 'revoked');
+    assert.equal(subscription.metadata.revoked_dispute_lost, 'true');
     assert.equal((await postWebhook(base, event('evt_same_paid', 'invoice.paid', {
       id: 'in_current',
       status: 'paid',
       subscription: 'sub_pro',
+      billing_reason: 'subscription_cycle',
+      amount_paid: 7900,
+      period_start: 1700000000,
+      period_end: 1700000000 + (30 * 24 * 60 * 60),
     }))).status, 200);
     assert.equal(subscription.metadata.period_access, 'revoked');
     assert.equal((await postJob(base)).status, 402);
@@ -392,13 +429,18 @@ test('pro disputes suspend, restore on won, and revoke on lost until a new invoi
       id: 'in_next',
       status: 'paid',
       subscription: 'sub_pro',
+      billing_reason: 'subscription_cycle',
+      amount_paid: 7900,
+      period_start: 1700000000 + (30 * 24 * 60 * 60),
+      period_end: 1700000000 + (60 * 24 * 60 * 60),
     }))).status, 200);
-    assert.equal(subscription.metadata.period_access, 'active');
-    assert.equal(subscription.metadata.period_invoice, 'in_next');
-    assert.equal(subscription.status, 'active');
-    assert.equal(cancels.length, 0);
+    assert.equal(subscription.metadata.period_access, 'revoked');
+    assert.equal(subscription.metadata.revoked_dispute_lost, 'true');
+    assert.equal(subscription.metadata.period_invoice, 'in_current');
+    assert.equal(subscription.status, 'canceled');
+    assert.equal(cancels.length, 1);
     assertMetadataOnly(subUpdates);
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_pro`).then((res) => res.json())).valid, true);
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_pro`).then((res) => res.json())).valid, false);
   });
 });
 

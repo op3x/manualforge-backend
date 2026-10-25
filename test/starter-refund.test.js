@@ -512,7 +512,7 @@ test('a won dispute does not restore credits a full refund already revoked', asy
   });
 });
 
-test('a job that already started still finishes after a full refund', async () => {
+test('a job that already started does not publish after a full refund', async () => {
   let release;
   const gate = new Promise((resolve) => {
     release = resolve;
@@ -542,13 +542,13 @@ test('a job that already started still finishes after a full refund', async () =
     assert.equal(intents.pi_live.metadata.credit_status, 'revoked');
     release();
     const done = await waitJob(base, job.id);
-    assert.equal(done.status, 'succeeded');
+    assert.equal(done.status, 'failed');
     const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
-    assert.equal(pdf.status, 200);
-    assert.match(pdf.headers.get('content-type'), /pdf/);
+    assert.equal(pdf.status, 409);
     const blocked = await postJob(base, 'cs_live');
     assert.equal(blocked.status, 402);
     assert.equal((await blocked.json()).error, STARTER_REFUNDED_MESSAGE);
-    assert.equal(intents.pi_live.metadata.manuals_used, '1');
+    assert.equal(intents.pi_live.metadata.credit_status, 'revoked');
+    assert.equal(intents.pi_live.metadata.manuals_used, '0');
   });
 });

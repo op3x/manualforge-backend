@@ -9,10 +9,15 @@ function redact(text) {
     .replace(/whsec_[A-Za-z0-9]+/g, '[redacted]');
 }
 
+function recognized(query) {
+  if (/^(pi_|ch_|cs_|in_)/.test(query)) return true;
+  return query.includes('@') && !/\s/.test(query);
+}
+
 async function main() {
   const query = process.argv.slice(2).join(' ').trim();
-  if (!query) {
-    console.error('Usage: npm run support:refund-check -- <payment_intent|charge|checkout_session|email>');
+  if (!query || !recognized(query)) {
+    console.error('Usage: npm run support:refund-check -- <payment_intent|charge|checkout_session|invoice|email>');
     process.exit(1);
   }
   const key = process.env.STRIPE_SECRET_KEY;

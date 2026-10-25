@@ -11,6 +11,7 @@ const {
   isProduction,
 } = require('./lib/config');
 const {
+  accessBlock,
   assertCanGenerate,
   checkoutParams,
   isStripeNotFound,
@@ -23,7 +24,8 @@ const {
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
 const { applyPeriodAccessEvent } = require('./lib/period-access');
-const { markFirstManualDelivered } = require('./lib/delivery');
+const { applyOverageCreditEvent } = require('./lib/overage-credit');
+const { clearGenerationStarted, markFirstManualDelivered, markGenerationStarted } = require('./lib/delivery');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -44,6 +46,10 @@ function sendError(res, err) {
   }
   console.error(redactCustomerLog(err && err.stack ? err.stack : err));
   return res.status(500).json({ error: 'Internal server error' });
+}
+
+function redactSecrets(value) {
+  return String(value || '').replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]');
 }
 
 function readSessionId(req) {
@@ -151,6 +157,7 @@ function createApp({
     try {
       const starterResult = await applyStarterChargeEvent(stripeClient, event);
       await applyPeriodAccessEvent(stripeClient, event, starterResult);
+      await applyOverageCreditEvent(stripeClient, event, starterResult);
     } catch (err) {
       const detail = err && err.message ? String(err.message) : 'error';
       console.error('Webhook handler failed', event.type, detail.replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]'));
@@ -196,12 +203,27 @@ function createApp({
     }
   });
 
-  async function noteFirstManual(access, sessionId) {
+  async function publishManual(access, sessionId) {
     try {
       await markFirstManualDelivered(stripeClient, access, sessionId);
     } catch (err) {
-      console.error('First manual delivery stamp failed', access && access.plan ? access.plan : 'unknown');
+      console.error(
+        'First manual delivery stamp failed',
+        access && access.plan ? access.plan : 'unknown',
+        redactSecrets(err && err.message),
+      );
+      const wrapped = new Error('Manual generation failed. Please try again.');
+      wrapped.status = 500;
+      wrapped.expose = true;
+      throw wrapped;
     }
+  }
+
+  function blockedError(block) {
+    const err = new Error(block.message);
+    err.status = block.status;
+    err.expose = true;
+    return err;
   }
 
   async function runPaid(req, res, { reserveAtStart, respond }) {
@@ -244,7 +266,9 @@ function createApp({
     runPaid(req, res, {
       reserveAtStart: true,
       respond: async (access, files, credit, project) => {
-        const job = store.create();
+        const sessionId = readSessionId(req);
+        await markGenerationStarted(stripeClient, access, sessionId);
+        const job = store.create({ sessionId });
         res.status(202).json(publicJob(job));
         job.status = 'running';
         job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
@@ -261,21 +285,24 @@ function createApp({
               job.progress = { stage, percent, message };
             },
           });
+          const block = await accessBlock(stripeClient, sessionId, env);
+          if (block) throw blockedError(block);
+          if (result.pdf && result.pdf.length) await publishManual(access, sessionId);
           store.savePdf(job.id, result.pdf);
-          if (result.pdf && result.pdf.length) await noteFirstManual(access, readSessionId(req));
           job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
           job.warnings = result.warnings || [];
           job.status = 'succeeded';
           job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
         } catch (err) {
+          await clearGenerationStarted(stripeClient, access, sessionId);
           if (credit) {
             try {
               await refundStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
             } catch (refundErr) {
-              console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
+              console.error('Starter credit refund failed', redactSecrets(refundErr && refundErr.message ? refundErr.message : refundErr));
             }
           }
-          console.error(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message)));
+          console.error(redactSecrets(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message))));
           job.status = 'failed';
           job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
           job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
@@ -293,43 +320,68 @@ function createApp({
     return res.json(publicJob(job));
   });
 
-  app.get('/jobs/:id/pdf', (req, res) => {
-    const job = store.get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
-    if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
-    const pdf = store.readPdf(job.id);
-    if (!pdf) return res.status(404).json({ error: 'Job not found or expired.' });
-    res.set({
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': 'attachment; filename="manual.pdf"',
-      'Content-Length': pdf.length,
-    });
-    return res.send(pdf);
+  app.get('/jobs/:id/pdf', async (req, res) => {
+    try {
+      const job = store.get(req.params.id);
+      if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
+      if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
+      if (job.sessionId) {
+        const block = await accessBlock(stripeClient, job.sessionId, env);
+        if (block) return res.status(block.status).json({ error: block.message });
+      }
+      const pdf = store.readPdf(job.id);
+      if (!pdf) return res.status(404).json({ error: 'Job not found or expired.' });
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': 'attachment; filename="manual.pdf"',
+        'Content-Length': pdf.length,
+      });
+      return res.send(pdf);
+    } catch (err) {
+      return sendError(res, err);
+    }
   });
 
   app.post('/generate-manual', upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
       respond: async (access, files, credit, project) => {
-        const result = await generateManual({
-          files,
-          project,
-          fields: fieldsFrom(req),
-          anthropic: anthropicClient,
-          env,
-          renderPdf,
-        });
-        if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
-        if (result.pdf && result.pdf.length) await noteFirstManual(access, readSessionId(req));
-        res.set({
-          'Content-Type': 'application/pdf',
-          'Content-Disposition': 'attachment; filename="manual.pdf"',
-          'Content-Length': result.pdf.length,
-          Deprecation: 'true',
-          Link: '</jobs>; rel="successor-version"',
-          'X-ManualOS-Replacement': 'POST /jobs',
-        });
-        res.send(result.pdf);
+        const sessionId = readSessionId(req);
+        let stamped = false;
+        try {
+          await markGenerationStarted(stripeClient, access, sessionId);
+          const result = await generateManual({
+            files,
+            project,
+            fields: fieldsFrom(req),
+            anthropic: anthropicClient,
+            env,
+            renderPdf,
+          });
+          const block = await accessBlock(stripeClient, sessionId, env);
+          if (block) throw blockedError(block);
+          if (!result.pdf || !result.pdf.length) {
+            const err = new Error('Manual generation failed. Please try again.');
+            err.status = 500;
+            err.expose = true;
+            throw err;
+          }
+          await publishManual(access, sessionId);
+          stamped = true;
+          if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
+          res.set({
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': 'attachment; filename="manual.pdf"',
+            'Content-Length': result.pdf.length,
+            Deprecation: 'true',
+            Link: '</jobs>; rel="successor-version"',
+            'X-ManualOS-Replacement': 'POST /jobs',
+          });
+          res.send(result.pdf);
+        } catch (err) {
+          if (!stamped) await clearGenerationStarted(stripeClient, access, sessionId);
+          throw err;
+        }
       },
     }).catch(next);
   });

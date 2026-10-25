@@ -259,9 +259,10 @@ test('generate requires payment, spends one starter credit after success, and hi
     assert.match(ok.headers.get('content-type'), /application\/pdf/);
     const pdf = Buffer.from(await ok.arrayBuffer());
     assert.equal(pdf.subarray(0, 4).toString(), '%PDF');
-    assert.equal(harness.calls.updates.length, 2);
-    assert.equal(harness.calls.updates[0].params.metadata.manuals_used, '1');
+    assert.equal(harness.calls.updates.length, 3);
+    assert.match(harness.calls.updates[0].params.metadata.generation_started_at, /^\d{4}-\d{2}-\d{2}T/);
     assert.match(harness.calls.updates[1].params.metadata.first_manual_at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(harness.calls.updates[2].params.metadata.manuals_used, '1');
     assert.equal(harness.calls.lastModelBody.model, 'claude-haiku-5-5');
     assert.equal(harness.calls.lastModelBody.thinking.type, 'disabled');
     assert.equal(harness.calls.lastModelBody.output_config.effort, 'low');
@@ -280,8 +281,8 @@ test('generate requires payment, spends one starter credit after success, and hi
     const failedPdf = Buffer.from(await viaHeader.arrayBuffer());
     assert.equal(failedPdf.subarray(0, 4).toString(), '%PDF');
     assert.equal(failedPdf.includes(Buffer.from('SUPER_SECRET_MODEL_DETAIL')), false);
-    assert.equal(harness.calls.updates.length, 3);
-    assert.equal(harness.calls.updates[2].params.metadata.manuals_used, '2');
+    assert.equal(harness.calls.updates.length, 4);
+    assert.equal(harness.calls.updates[3].params.metadata.manuals_used, '2');
     assert.equal(harness.calls.updates.filter((row) => row.params.metadata.first_manual_at).length, 1);
   });
 });

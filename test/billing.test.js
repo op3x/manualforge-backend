@@ -20,6 +20,7 @@ test('checkout params match the Starter and Pro contract', () => {
   assert.deepEqual(starter.metadata, { plan: 'starter' });
   assert.equal(starter.payment_intent_data.metadata.manuals_used, '0');
   assert.equal(starter.payment_intent_data.metadata.plan, 'starter');
+  assert.equal(starter.customer_creation, 'always');
   assert.equal(starter.payment_method_types, undefined);
   assert.match(starter.integration_identifier, /manualos_starter_[a-z]{8}$/);
 
