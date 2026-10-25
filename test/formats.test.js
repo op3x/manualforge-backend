@@ -6,7 +6,7 @@ const AdmZip = require('adm-zip');
 const { parseUploads } = require('../lib/parsers');
 const { applyAcdLibraryNotes } = require('../lib/parsers/acd');
 const { generateManual } = require('../lib/pipeline');
-const { findChrome } = require('../lib/manual/pdf');
+const { findChrome, closeBrowser } = require('../lib/manual/pdf');
 const { corpusRoot, corpusHas } = require('./corpus-env');
 
 const report = [];
@@ -48,8 +48,9 @@ function remember(row) {
   console.log(JSON.stringify(row));
 }
 
-test.after(() => {
+test.after(async () => {
   console.log(`FORMAT_SUPPORT ${JSON.stringify(report)}`);
+  await closeBrowser();
 });
 
 test('Siemens TIA block XML reads LAD, FBD, SCL, and GRAPH', { timeout: 120000 }, async () => {
@@ -196,7 +197,7 @@ test('binary DXF keeps units, layers, and title text', { timeout: 120000 }, asyn
   assert.equal(project.cad.lengthUnit, 'mm');
   assert.equal(project.cad.layers.includes('TITLE'), true);
   assert.equal(project.cad.titleBlock.includes('Conveyor frame'), true);
-  assert.match(html, /Conveyor frame/);
+  assert.match(html, /Conveyor Frame/);
   remember({ format: 'Binary DXF', file: 'frame.dxf', rungs: 0, pages });
 });
 
