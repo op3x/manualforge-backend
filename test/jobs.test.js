@@ -192,8 +192,29 @@ test('a missing model and an unreadable file do not spend a credit', async () =>
   });
 });
 
-test('two concurrent starter jobs on three credits both deliver or one is refused without losing a credit', async () => {
-  const paid = stripeFor('0');
+function stripeWithStaleConfirm(allowanceStart = '0') {
+  const paid = stripeFor(allowanceStart);
+  let previous = { ...paid.meta };
+  let serveStale = false;
+  const update = paid.stripe.paymentIntents.update;
+  const retrieve = paid.stripe.paymentIntents.retrieve;
+  paid.stripe.paymentIntents.update = async (id, params) => {
+    previous = { ...paid.meta };
+    const result = await update(id, params);
+    serveStale = true;
+    return result;
+  };
+  paid.stripe.paymentIntents.retrieve = async (...args) => {
+    if (serveStale) {
+      serveStale = false;
+      return { id: 'pi_1', metadata: { ...previous } };
+    }
+    return retrieve(...args);
+  };
+  return paid;
+}
+
+async function twoStarterJobs(paid) {
   const app = createApp({
     env: env(),
     stripe: paid.stripe,
@@ -223,18 +244,23 @@ test('two concurrent starter jobs on three credits both deliver or one is refuse
     const failedJobs = finished.filter((job) => job.status === 'failed').length;
     const refused = results.filter((res) => res.status !== 202).length + failedJobs;
     assert.equal(delivered + refused, 2);
-    assert.ok(delivered === 2 || delivered === 1);
+    assert.equal(delivered, 2);
     assert.equal(Number(paid.meta.manuals_used), delivered);
     const verify = await fetch(`${base}/verify-session?session_id=cs_test_starter`);
     assert.equal(verify.status, 200);
     const access = await verify.json();
-    assert.equal(access.remaining, 3 - delivered);
-    if (delivered === 2) {
-      assert.equal(access.remaining, 1);
-      assert.equal(paid.meta.credit_holds || '', '');
-      assert.equal(paid.meta.credit_hold || '', '');
-    }
+    assert.equal(access.remaining, 1);
+    assert.equal(paid.meta.credit_holds || '', '');
+    assert.equal(paid.meta.credit_hold || '', '');
   });
+}
+
+test('two concurrent starter jobs on three credits both deliver and leave one credit', async () => {
+  await twoStarterJobs(stripeFor('0'));
+});
+
+test('two concurrent starter jobs still leave one credit when a confirm read is stale', async () => {
+  await twoStarterJobs(stripeWithStaleConfirm('0'));
 });
 
 test('concurrent starter reserves cannot both spend the last credit', async () => {
