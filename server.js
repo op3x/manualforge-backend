@@ -22,6 +22,7 @@ const {
 } = require('./lib/billing');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
+const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
@@ -324,6 +325,7 @@ function prepareListen(env = process.env, exit = process.exit) {
 
 function start() {
   if (!prepareListen(process.env)) return null;
+  logPythonAvailability();
   const port = process.env.PORT || 3001;
   const app = createApp();
   return app.listen(port, () => {

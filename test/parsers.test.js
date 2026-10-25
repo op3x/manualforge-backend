@@ -122,10 +122,26 @@ test('ACD conversion reads ladder rungs and does not invent routine names', { sk
   assert.equal(project.routines.some((routine) => routine.units.some((unit) => unit.text.includes('XIC(Bits[0].0)OTE(Bits[0].1)'))), true);
 });
 
+test('a spreadsheet archive is not opened as a plain zip', async () => {
+  const XLSX = require('xlsx');
+  const { detectFormat } = require('../lib/parsers');
+  const book = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([['name', 'description'], ['StartButton', 'Start button']]);
+  XLSX.utils.book_append_sheet(book, sheet, 'Tags');
+  const buffer = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' });
+  assert.equal(detectFormat(buffer, 'tags.zip'), 'xlsx');
+  assert.equal(detectFormat(buffer, 'sheet.bin'), 'xlsx');
+  const project = await parseUploads([{ name: 'tags.zip', buffer }]);
+  assert.equal(project.tags.some((tag) => tag.description === 'Start button'), true);
+  const plain = new AdmZip();
+  plain.addFile('notes.txt', Buffer.from('hello from the archive'));
+  assert.equal(detectFormat(plain.toBuffer(), 'notes.zip'), 'zip');
+});
+
 test('an unreadable ACD explains the limit and does not invent routine names', async () => {
   const project = await parseUploads([{ name: 'junk.ACD', buffer: Buffer.from('not a rockwell archive') }]);
   assert.equal(project.acdLimited, true);
   assert.equal(project.acdConverted, false);
   assert.equal(project.routines.some((routine) => /FloatingElement|CommentManager/.test(routine.name)), false);
-  assert.match(project.warnings.join(' '), /L5X/);
+  assert.match(project.warnings.join(' '), /\.l5x/i);
 });

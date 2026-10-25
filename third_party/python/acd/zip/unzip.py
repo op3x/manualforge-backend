@@ -6,6 +6,41 @@ from io import BufferedReader
 from pathlib import Path
 
 
+def safe_member_path(directory: os.PathLike, filename: str) -> Path:
+    """Return a path inside directory for an archive entry name.
+
+    Local ManualOS patch. The archive supplies the name, so this rejects an
+    empty name, a null, an absolute path, a ".." segment, and any path that
+    resolves outside directory. The check happens before the file is opened.
+    """
+    raw = str(filename or "").replace("\\", "/")
+    if not raw or "\x00" in raw:
+        raise RuntimeError("archive entry name is empty or contains a null")
+    if raw.startswith("/") or raw.startswith("//"):
+        raise RuntimeError("archive entry name is absolute")
+    if len(raw) >= 2 and raw[1] == ":":
+        raise RuntimeError("archive entry name is absolute")
+    parts = []
+    for part in raw.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise RuntimeError("archive entry name escapes its folder")
+        parts.append(part)
+    if not parts:
+        raise RuntimeError("archive entry name is empty")
+    root = Path(directory).resolve()
+    dest = root.joinpath(*parts)
+    resolved = dest.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise RuntimeError("archive entry path escapes the output directory")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    parent = resolved.parent
+    if parent != root and root not in parent.parents:
+        raise RuntimeError("archive entry path escapes the output directory")
+    return resolved
+
+
 @dataclass
 class AcdHeader:
     f: BufferedReader
@@ -49,11 +84,14 @@ class Unzip:
         self._read()
 
     def write_files(self, directory: os.PathLike):
+        # Local ManualOS patch: entry names from the archive are untrusted.
+        # Reject absolute paths, ".." segments, and any path that resolves
+        # outside directory before a file is created. See THIRD_PARTY_NOTICES.md.
         Path(directory).mkdir(parents=True, exist_ok=True)
         with open(self._filename, "rb") as f:
             for record in self.records:
                 f.seek(record.file_offset)
-                with open(os.path.join(directory, record.filename), "wb") as out_file:
+                with open(safe_member_path(directory, record.filename), "wb") as out_file:
                     if f.read(2) == b"\x1f\x8b":
                         # Uncompress the files with gzip compression, the magic number is handy here.
                         f.seek(record.file_offset)

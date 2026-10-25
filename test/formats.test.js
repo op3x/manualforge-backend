@@ -85,7 +85,7 @@ test('a Siemens XML shell does not use the PLCopen error', async () => {
   const xml = '<?xml version="1.0"?><Document xmlns="http://www.siemens.com/automation/Openness/SW/v17"></Document>';
   await assert.rejects(
     () => parseUploads([{ name: 'empty-tia.xml', buffer: Buffer.from(xml) }]),
-    (err) => err.status === 422 && /SIMATIC ML/.test(err.message) && !/PLCopen|TwinCAT/.test(err.message),
+    (err) => err.status === 422 && /XML \(\.xml\) block export/.test(err.message) && !/PLCopen|TwinCAT|Siemens|TIA Portal/.test(err.message),
   );
 });
 
@@ -311,8 +311,8 @@ test('ACD ladder reaches a PDF and unread languages are named', { timeout: 18000
     env: { ...process.env, MANUALOS_AI_RETRIES: '0' },
   });
   assert.equal(result.pdf.subarray(0, 4).toString(), '%PDF');
-  assert.match(result.html, /function-block routine is in the ACD file/);
-  assert.match(result.html, /sequential function chart routine is in the ACD file/);
+  assert.match(result.html, /function-block routine is in the \.acd file/);
+  assert.match(result.html, /sequential function chart routine is in the \.acd file/);
   assert.match(result.html, /turns on Pump/i);
   assert.equal(project.routines.find((routine) => routine.name === 'Text').units[0].unread, undefined);
   remember({
@@ -328,13 +328,13 @@ test('proprietary archives name the export to use', async () => {
   zip.addFile('part.xml', Buffer.from('<part/>'));
   const packed = zip.toBuffer();
   const cases = [
-    ['line.zap15', Buffer.from('PK\x03\x04not-really'), /SCL/, /XML/],
-    ['plant.ap17', Buffer.from('TIA'), /SCL/, /XML/],
-    ['cell.s7p', Buffer.from('STEP7'), /SCL/, /XML/],
-    ['layout.dwg', Buffer.from('AC1027\x00\x00\x00binary'), /DXF/],
-    ['pump.sldprt', packed, /STEP/],
-    ['frame.sldasm', packed, /STEP/],
-    ['sheet.slddrw', packed, /STEP/, /DXF/],
+    ['line.zap15', Buffer.from('PK\x03\x04not-really'), /SCL/, /\.xml/],
+    ['plant.ap17', Buffer.from('TIA'), /SCL/, /\.xml/],
+    ['cell.s7p', Buffer.from('STEP7'), /SCL/, /\.xml/],
+    ['layout.dwg', Buffer.from('AC1027\x00\x00\x00binary'), /\.dxf/],
+    ['pump.sldprt', packed, /\.step/],
+    ['frame.sldasm', packed, /\.step/],
+    ['sheet.slddrw', packed, /\.step/, /\.dxf/],
   ];
   for (const [name, buffer, ...patterns] of cases) {
     await assert.rejects(
