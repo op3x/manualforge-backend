@@ -121,6 +121,7 @@ function createApp({
   supportComplete,
   supportNow,
   mailer,
+  markDelivered,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
@@ -194,9 +195,11 @@ function createApp({
     }
   });
 
+  const deliverManual = markDelivered || markDeliveredManual;
+
   async function publishManual(access, sessionId) {
     try {
-      return await markDeliveredManual(stripeClient, access, sessionId);
+      return await deliverManual(stripeClient, access, sessionId);
     } catch (err) {
       console.error('First manual delivery stamp failed', access && access.plan ? access.plan : 'unknown');
       const wrapped = new Error('Manual generation failed. Please try again.');

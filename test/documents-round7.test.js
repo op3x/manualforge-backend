@@ -8,7 +8,9 @@ const { buildDocument, alarmRows } = require('../lib/manual/assemble');
 const { buildPmSchedule, buildShutdown, buildStartup, buildCustomDocument } = require('../lib/documents/content');
 const { fitHeaderLeft } = require('../lib/documents/stamp');
 const { markDeliveredManual } = require('../lib/delivery-hook');
-const { emptyProject, addRoutine } = require('../lib/project');
+const { polishName } = require('../lib/presentation');
+const { sanitizeOutput } = require('../lib/output-sanitize');
+const { emptyProject, addRoutine, upsertTag } = require('../lib/project');
 
 const CELL = path.join(__dirname, 'fixtures/cell.scl');
 const COOKER = path.join(__dirname, 'fixtures/corpus/plc/brewery_Cooker_1_AutoLogic_Program.L5X');
@@ -61,8 +63,7 @@ test('scl shutdown classifies the home request as startup and omits it', async (
   routine.analysis = {
     operatorSteps: [
       { action: LEAK },
-      { action: 'Press the stop button to stop the cycle.' },
-      { action: 'Stop the agitator, or let a shutdown occur.' },
+      { action: 'Press the stop button to stop the cycle then stop the agitator, or let a shutdown occur.' },
     ],
   };
   const shutdown = plain(buildShutdown(cell, {}));
@@ -72,6 +73,7 @@ test('scl shutdown classifies the home request as startup and omits it', async (
   assert.equal((shutdown.match(/Press the stop button to stop the cycle/g) || []).length, 1);
   assert.match(shutdown, /Press the stop button to stop the cycle\./);
   assert.match(shutdown, /Stop the agitator/);
+  assert.equal(/\. stop the agitator/.test(shutdown), false);
   assert.equal(/let a shutdown occur/i.test(shutdown), false);
 
   routine.analysis = { operatorSteps: [{ action: LEAK }] };
@@ -96,11 +98,15 @@ test('scl shutdown classifies the home request as startup and omits it', async (
   acdRoutine.analysis = {
     operatorSteps: [
       { action: 'Confirm run conditions are satisfied before starting Stop the program and leave the controller in program mode.' },
+      { action: 'Confirm the machine is powered and that no maintenance lockout is in effect.' },
+      { action: 'Stop the conveyor and wait until it has stopped before it is started again.' },
     ],
   };
   const acdShutdown = plain(buildShutdown(acd, {}));
   assert.equal(/conditions are satisfied before starting/i.test(acdShutdown), false);
   assert.equal(/leave the controller in program mode/i.test(acdShutdown), false);
+  assert.equal(/no maintenance lockout is in effect/i.test(acdShutdown), false);
+  assert.match(acdShutdown, /before it is started again/);
 });
 
 test('cooker guide alarm codes use the manual message for that code', async () => {
@@ -202,23 +208,31 @@ test('cooker guide alarm codes use the manual message for that code', async () =
 });
 
 test('a routine that declares no alarms does not invent an alarm code', async () => {
-  const project = emptyProject();
-  addRoutine(project, {
-    name: 'Main',
-    units: [],
-    analysis: {
-      alarms: [{ text: 'No alarms are defined for this routine', cause: 'Not applicable', remedy: 'Not applicable' }],
-      groups: [],
-      housekeeping: [],
-    },
-  });
-  const manual = plain(buildDocument(project));
-  const guide = plain(custom(project, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
-  assert.match(manual, /No alarms are defined for this equipment/);
-  assert.match(guide, /No alarms are defined for this equipment/);
-  assert.equal(/ALM-\d/.test(manual), false);
-  assert.equal(/ALM-\d/.test(guide), false);
-  assert.equal(/Not applicable/.test(`${manual} ${guide}`), false);
+  const phrases = [
+    'No alarms are defined for this routine',
+    'No alarms are defined.',
+    'No alarm codes are defined in the supplied program units.',
+  ];
+  for (const phrase of phrases) {
+    const project = emptyProject();
+    addRoutine(project, {
+      name: 'Main',
+      units: [],
+      analysis: {
+        alarms: [{ text: phrase, cause: 'Not applicable', remedy: 'Not applicable' }],
+        groups: [],
+        housekeeping: [],
+      },
+    });
+    const manual = plain(buildDocument(project));
+    const guide = plain(custom(project, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
+    assert.match(manual, /No alarms are defined for this equipment/, phrase);
+    assert.match(guide, /No alarms are defined for this equipment/, phrase);
+    assert.equal(/ALM-\d/.test(manual), false, phrase);
+    assert.equal(/ALM-\d/.test(guide), false, phrase);
+    assert.equal(/Not applicable/.test(`${manual} ${guide}`), false, phrase);
+    assert.equal(/Stop reaction/.test(`${manual} ${guide}`), false, phrase);
+  }
 });
 
 test('a CAD upload with no controller does not get controller maintenance', { skip: fs.existsSync(STEP) ? false : 'private CAD corpus is not in this checkout' }, async () => {
@@ -293,6 +307,79 @@ test('a one-chapter schedule has no contents page and quarterly rows are inferre
   assert.match(htmlOf(buildShutdown(cell, {})), /class="toc"/);
   const css = fs.readFileSync(path.join(__dirname, '../template/style.css'), 'utf8');
   assert.match(css, /table\.signoff td:first-child \.inf \{[^}]*display:\s*block/);
+});
+
+test('real alarm messages stay and tag-shaped rows do not', () => {
+  const project = emptyProject();
+  addRoutine(project, {
+    name: 'Main',
+    units: [],
+    analysis: {
+      alarms: [
+        { text: 'Cooker temperature high-high', cause: 'The cooker temperature is above the high-high setpoint.', remedy: 'Reduce the heat.' },
+        { text: 'Start permissive lost', cause: 'The start permissive is open.', remedy: 'Restore the permissive.' },
+        { text: 'Steam valve failed to open', cause: 'The valve did not leave the closed position before the alarm timer expired.', remedy: 'Open the steam supply.' },
+        { text: 'Conveyor motor overload', cause: 'The motor overload is tripped.', remedy: 'Reset the overload.' },
+        { text: 'Alarm Status To HMI', cause: 'The bit is on.', remedy: 'Clear it.' },
+        { text: 'AOI Device Clear Fault', cause: 'A command bit.', remedy: 'Do not list this as an alarm.' },
+        { text: 'Zone Master Clear Fault Enable', cause: 'A configuration bit.', remedy: 'Leave it.' },
+        { text: 'Sts Fault Alm', cause: 'A status mirror.', remedy: 'Read the device alarm instead.' },
+        { text: 'Module Communication Offline', cause: 'The module is offline.', remedy: 'Restore communication.' },
+        { text: 'Communication to an I/O module is lost.', cause: 'The module does not answer.', remedy: 'Check the cable.' },
+        { text: 'Drive faulted status', cause: 'The drive is faulted.', remedy: 'Reset the drive.' },
+        { text: 'The drive reports a fault condition.', cause: 'A drive fault is present.', remedy: 'Clear the drive fault.' },
+      ],
+      groups: [],
+      housekeeping: [],
+    },
+  });
+  upsertTag(project, { name: 'HMI_Alarmed', dataType: 'BOOL', description: 'Alarm Status To HMI' });
+  upsertTag(project, { name: 'Cmd_ClearFault', dataType: 'BOOL', description: 'AOI Device Clear Fault' });
+  upsertTag(project, { name: 'Sts_FaultAlm', dataType: 'BOOL', description: 'Sts Fault Alm' });
+  upsertTag(project, { name: 'Cfg_ZoneEnable', dataType: 'BOOL', description: 'Zone Master Clear Fault Enable' });
+  const messages = alarmRows(project).map((row) => row[1]);
+  const joined = messages.join('\n');
+  for (const kept of [/temperature high-high/i, /start permissive lost/i, /steam valve failed to open/i, /conveyor motor overload/i]) {
+    assert.equal(messages.some((row) => kept.test(row)), true, String(kept));
+  }
+  assert.equal(/Alarm Status To HMI|AOI Device Clear Fault|Zone Master Clear Fault Enable|Sts Fault Alm/i.test(joined), false);
+  assert.equal(messages.filter((row) => /communication|module/i.test(row)).length, 1);
+  assert.equal(messages.filter((row) => /\bdrive\b/i.test(row)).length, 1);
+  const guide = plain(custom(project, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
+  assert.match(guide, /temperature high-high/i);
+  assert.match(guide, /Start permissive lost/i);
+  assert.match(guide, /Steam valve failed to open/i);
+  assert.match(guide, /Conveyor motor overload/i);
+  assert.equal(/Alarm Status To HMI|Device Clear Fault|Sts Fault Alm/i.test(guide), false);
+});
+
+test('a virtual axis does not get a position-fault row', () => {
+  const project = emptyProject();
+  upsertTag(project, { name: 'VAxis', dataType: 'AXIS_VIRTUAL', description: '' });
+  upsertTag(project, { name: 'InfeedAxis', dataType: 'AXIS_SERVO', description: 'Infeed axis' });
+  project.subsystems = [
+    { name: 'VAxis', purpose: 'A virtual axis used by the program.', components: ['axis'], motions: [], sensors: [] },
+    { name: 'Infeed Axis', purpose: 'The infeed axis moves the product.', components: ['axis'], motions: [], sensors: [] },
+  ];
+  const guide = plain(custom(project, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
+  assert.equal(/VAxis does not reach its position/i.test(guide), false);
+  assert.match(guide, /Infeed Axis does not reach its position/i);
+
+  const onlyVirtual = emptyProject();
+  upsertTag(onlyVirtual, { name: 'VAxis', dataType: 'AXIS_VIRTUAL', description: '' });
+  onlyVirtual.subsystems = [
+    { name: 'Axis', purpose: 'The axis is virtual.', components: ['VAxis'], motions: [], sensors: [] },
+  ];
+  const virtualGuide = plain(custom(onlyVirtual, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
+  assert.equal(/does not reach its position/i.test(virtualGuide), false);
+});
+
+test('a NEMA frame size stays and is spelled NEMA', () => {
+  assert.equal(polishName('Nema 17'), 'NEMA 17');
+  assert.equal(polishName('nema-23 stepper'), 'NEMA 23 Stepper');
+  assert.equal(sanitizeOutput('The frame is Nema 17.'), 'The frame is NEMA 17.');
+  assert.equal(/siemens/i.test(sanitizeOutput('Siemens Nema 17 drive')), false);
+  assert.match(sanitizeOutput('Siemens Nema 17 drive'), /NEMA 17/);
 });
 
 test('extra-document headers use the long-header limit', () => {
