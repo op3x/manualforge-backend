@@ -4,6 +4,7 @@ const path = require('path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp } = require('../server');
+const { revokeAccessToken, signAccessToken } = require('../lib/access-token');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 const {
   EMAIL_LIMIT,
@@ -474,7 +475,7 @@ test('unknown and known emails match, and a token cannot open another customer',
     assert.equal(opened.status, 200);
     assert.deepEqual(Object.keys(await opened.json()), ['method', 'url']);
     assert.equal(created[0].customer, customers[0]);
-    assert.equal(created[0].return_url, 'https://manualos.com/cancel');
+    assert.equal(created[0].return_url, 'https://manualos.com/upload.html');
     assert.equal(created[0].configuration, 'bpc_manualos');
     assert.equal(opened.headers.get('referrer-policy'), 'no-referrer');
 
@@ -584,7 +585,7 @@ test('a portal configuration id is sent and rate limits match the consent route'
     assert.equal((await configured.json()).url, 'https://billing.stripe.com/p/session/configured');
     assert.deepEqual(created[0], {
       customer: 'cus_config',
-      return_url: 'https://manualos.com/cancel',
+      return_url: 'https://manualos.com/upload.html',
       configuration: 'bpc_cancel123',
     });
 
@@ -1602,5 +1603,118 @@ test('a failed cancellation send keeps the send error when the claim cannot be r
     console.error = original;
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('billing portal rejects a raw session id after revoke or sunset and returns to the upload page', async () => exclusive(async () => {
+  const secret = 'test-portal-token-secret-32bytes-min';
+  const sessionId = 'cs_portal_revoke_once';
+  let retrieves = 0;
+  const created = [];
+  const stripe = {
+    checkout: {
+      sessions: {
+        retrieve: async (id) => {
+          retrieves += 1;
+          assert.equal(id, sessionId);
+          return proSession('cus_portalbuyer', { id: sessionId });
+        },
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/portal_buyer' };
+        },
+      },
+    },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
+  };
+  const env = baseEnv({ PORTAL_TOKEN_SECRET: secret });
+  const app = createApp({
+    env,
+    stripe,
+    anthropic: null,
+    mailer: { async sendMail() {} },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const opened = await post(base, '/billing-portal', { session_id: sessionId }, '198.51.100.110');
+    assert.equal(opened.status, 200);
+    assert.equal(retrieves, 1);
+    assert.equal(created[0].return_url, 'https://manualos.com/upload.html');
+    const minted = signAccessToken({ sessionId }, env, FIXED);
+    assert.ok(minted);
+    assert.equal(revokeAccessToken(minted.token, env, FIXED), true);
+    const revoked = await post(base, '/billing-portal', { session_id: sessionId }, '198.51.100.111');
+    assert.equal(revoked.status, 401);
+    assert.deepEqual(await revoked.json(), {
+      error: 'This sign-in was revoked. Exchange a new access token.',
+      code: 'credential_revoked',
+    });
+    assert.equal(retrieves, 1);
+    const token = signPortalToken('cus_portalbuyer', env, FIXED);
+    const byToken = await post(base, '/billing-portal', { token }, '198.51.100.112');
+    assert.equal(byToken.status, 200);
+    assert.equal(retrieves, 1);
+    assert.equal(created[1].customer, 'cus_portalbuyer');
+    assert.equal(created[1].return_url, 'https://manualos.com/upload.html');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  let sunsetRetrieves = 0;
+  const sunsetStripe = {
+    checkout: {
+      sessions: {
+        retrieve: async () => {
+          sunsetRetrieves += 1;
+          return proSession('cus_portalbuyer', { id: sessionId });
+        },
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/sunset' };
+        },
+      },
+    },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
+  };
+  const sunsetEnv = baseEnv({
+    PORTAL_TOKEN_SECRET: secret,
+    LEGACY_SESSION_ID_SUNSET: '2020-01-01',
+  });
+  const sunsetApp = createApp({
+    env: sunsetEnv,
+    stripe: sunsetStripe,
+    anthropic: null,
+    mailer: { async sendMail() {} },
+    now: () => FIXED,
+  });
+  const sunsetListen = await listen(sunsetApp);
+  try {
+    const retired = await post(sunsetListen.base, '/billing-portal', { session_id: sessionId }, '198.51.100.113');
+    assert.equal(retired.status, 401);
+    assert.deepEqual(await retired.json(), {
+      error: 'session_id is no longer accepted.',
+      code: 'session_id_retired',
+    });
+    assert.equal(sunsetRetrieves, 0);
+    const token = signPortalToken('cus_portalbuyer', sunsetEnv, FIXED);
+    const byToken = await post(sunsetListen.base, '/billing-portal', { token }, '198.51.100.114');
+    assert.equal(byToken.status, 200);
+    assert.equal(sunsetRetrieves, 0);
+    assert.equal(created[created.length - 1].return_url, 'https://manualos.com/upload.html');
+  } finally {
+    await new Promise((resolve) => sunsetListen.server.close(resolve));
   }
 }));
