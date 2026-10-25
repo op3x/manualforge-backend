@@ -140,8 +140,12 @@ function safePlan(plan) {
   return typeof plan === 'string' && /^[a-z0-9_-]{1,32}$/i.test(plan) ? plan : 'unknown';
 }
 
+const KNOWN_FAILURE = new Set(['render_failed', 'stamp_failed', 'credit_commit_failed']);
+
 function jobErrorCode(err, timeout) {
   if (timeout) return 'job_timeout';
+  const point = err && err.failureCode;
+  if (typeof point === 'string' && KNOWN_FAILURE.has(point)) return point;
   const code = err && err.publicCode;
   if (typeof code === 'string' && /^[a-z0-9_]+$/.test(code)) return code;
   return 'generation_failed';
@@ -816,11 +820,12 @@ function createApp({
       console.error(
         'First manual delivery stamp failed',
         access && access.plan ? access.plan : 'unknown',
-        redactSecrets(err && err.message),
+        redactSecrets(redactCustomerLog(err && err.message)),
       );
       const wrapped = new Error('Manual generation failed. Please try again.');
       wrapped.status = 500;
       wrapped.expose = true;
+      wrapped.failureCode = 'stamp_failed';
       throw wrapped;
     }
   }
@@ -1069,10 +1074,17 @@ function createApp({
             store.savePdf(job.id, result.pdf);
             if (result.pdf && result.pdf.length) stamp = await publishManual(access, sessionId);
             if (credit) {
-              const committed = await commitStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+              let committed = false;
+              try {
+                committed = await commitStarterCredit(stripeClient, credit.paymentIntentId, credit.token);
+              } catch (err) {
+                if (err && typeof err === 'object' && !err.failureCode) err.failureCode = 'credit_commit_failed';
+                throw err;
+              }
               if (!committed) {
                 const err = new Error('Manual generation failed. Please try again.');
                 err.expose = true;
+                err.failureCode = 'credit_commit_failed';
                 throw err;
               }
               try {

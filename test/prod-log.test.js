@@ -430,6 +430,17 @@ function jobEvents(lines) {
   });
 }
 
+const OUTCOME_KEYS = ['event', 'jobId', 'plan', 'format', 'ms', 'pages', 'modelCalls', 'errorCode'];
+
+function assertOutcome(line, sessionId) {
+  assert.deepEqual(Object.keys(line), OUTCOME_KEYS);
+  const serialized = JSON.stringify(line);
+  assert.equal(serialized.includes('Secret Pump'), false);
+  assert.equal(serialized.includes('customer-line'), false);
+  assert.equal(serialized.includes(sessionId), false);
+  assert.equal(serialized.includes('pi_joblog'), false);
+}
+
 test('a finished job logs one structured line without customer content', async () => {
   const sessionId = 'cs_test_joblog';
   const paid = starterStripe();
@@ -459,12 +470,8 @@ test('a finished job logs one structured line without customer content', async (
   assert.equal(done[0].modelCalls, paid.calls.model);
   assert.ok(done[0].modelCalls >= 1);
   assert.equal(done[0].errorCode, null);
-  const serialized = JSON.stringify(done[0]);
-  assert.equal(serialized.includes('Secret Pump'), false);
-  assert.equal(serialized.includes('customer-line'), false);
-  assert.equal(serialized.includes('.L5X'), false);
-  assert.equal(serialized.includes(sessionId), false);
-  assert.equal(serialized.includes('pi_joblog'), false);
+  assertOutcome(done[0], sessionId);
+  assert.equal(JSON.stringify(done[0]).includes('.L5X'), false);
 
   const failing = starterStripe();
   const failApp = createApp({
@@ -484,12 +491,12 @@ test('a finished job logs one structured line without customer content', async (
   const failed = jobEvents(failLog.lines);
   assert.equal(failed.length, 1);
   assert.equal(failed[0].event, 'job_failed');
-  assert.equal(failed[0].errorCode, 'generation_failed');
+  assert.equal(failed[0].errorCode, 'render_failed');
   assert.equal(failed[0].pages, 0);
   assert.equal(failed[0].plan, 'starter');
   assert.equal(failed[0].format, 'l5x');
+  assertOutcome(failed[0], sessionId);
   assert.equal(JSON.stringify(failed[0]).includes('render exploded'), false);
-  assert.equal(JSON.stringify(failed[0]).includes('customer-line'), false);
 
   const slow = starterStripe();
   const timeoutApp = createApp({
@@ -517,7 +524,79 @@ test('a finished job logs one structured line without customer content', async (
   assert.equal(timedOut.length, 1);
   assert.equal(timedOut[0].event, 'job_failed');
   assert.equal(timedOut[0].errorCode, 'job_timeout');
-  assert.equal(JSON.stringify(timedOut[0]).includes('Secret Pump'), false);
+  assertOutcome(timedOut[0], sessionId);
+
+  const modeling = starterStripe();
+  modeling.anthropic = {
+    messages: {
+      create: async () => {
+        throw new Error('model exploded STAGE_MARKER');
+      },
+    },
+  };
+  const modelLog = await capture('log', () => withServer(createApp({
+    env: env(),
+    stripe: modeling.stripe,
+    anthropic: modeling.anthropic,
+    renderPdf: async () => pdf,
+  }), async (base) => {
+    const job = await postJob(base, sessionId);
+    const finished = await waitJob(base, job.id, sessionId);
+    assert.equal(finished.status, 'failed');
+    assert.equal(JSON.stringify(finished).includes('Secret Pump'), false);
+  }));
+  const modelFailed = jobEvents(modelLog.lines);
+  assert.equal(modelFailed.length, 1);
+  assert.equal(modelFailed[0].errorCode, 'generation_failed');
+  assertOutcome(modelFailed[0], sessionId);
+  assert.equal(JSON.stringify(modelFailed[0]).includes('STAGE_MARKER'), false);
+
+  function failingUpdate(match) {
+    const paid = starterStripe();
+    const update = paid.stripe.paymentIntents.update;
+    paid.stripe.paymentIntents.update = async (id, params) => {
+      if (match(params.metadata || {})) throw new Error('stage exploded STAGE_MARKER');
+      return update(id, params);
+    };
+    return paid;
+  }
+
+  const stamping = failingUpdate((metadata) => Object.prototype.hasOwnProperty.call(metadata, 'first_manual_at'));
+  const stampLog = await capture('log', () => withServer(createApp({
+    env: env(),
+    stripe: stamping.stripe,
+    anthropic: stamping.anthropic,
+    renderPdf: async () => pdf,
+  }), async (base) => {
+    const job = await postJob(base, sessionId);
+    const finished = await waitJob(base, job.id, sessionId);
+    assert.equal(finished.status, 'failed');
+  }));
+  const stamped = jobEvents(stampLog.lines);
+  assert.equal(stamped.length, 1);
+  assert.equal(stamped[0].errorCode, 'stamp_failed');
+  assertOutcome(stamped[0], sessionId);
+  assert.equal(JSON.stringify(stamped[0]).includes('STAGE_MARKER'), false);
+
+  const committing = failingUpdate((metadata) => (
+    Object.prototype.hasOwnProperty.call(metadata, 'credit_generation')
+    && !Object.prototype.hasOwnProperty.call(metadata, 'manuals_used')
+  ));
+  const commitLog = await capture('log', () => withServer(createApp({
+    env: env(),
+    stripe: committing.stripe,
+    anthropic: committing.anthropic,
+    renderPdf: async () => pdf,
+  }), async (base) => {
+    const job = await postJob(base, sessionId);
+    const finished = await waitJob(base, job.id, sessionId);
+    assert.equal(finished.status, 'failed');
+  }));
+  const committed = jobEvents(commitLog.lines);
+  assert.equal(committed.length, 1);
+  assert.equal(committed[0].errorCode, 'credit_commit_failed');
+  assertOutcome(committed[0], sessionId);
+  assert.equal(JSON.stringify(committed[0]).includes('STAGE_MARKER'), false);
 });
 
 test('verify-session reuses a session result for about 10 seconds', async () => {
