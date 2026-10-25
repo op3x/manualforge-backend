@@ -335,6 +335,10 @@ test('a full pro refund blocks the period until a new paid invoice and does not 
     const generated = await postGenerate(base);
     assert.equal(generated.status, 200);
     assert.equal(Buffer.from(await generated.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+    const created = await postJob(base);
+    assert.equal(created.status, 202);
+    const finished = await waitForSettledJob(base, (await created.json()).id);
+    assert.equal(finished.status, 'succeeded');
   });
 });
 

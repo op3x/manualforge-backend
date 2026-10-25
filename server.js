@@ -20,6 +20,7 @@ const {
   publicAccess,
   commitStarterCredit,
   recordStarterManual,
+  recoverAbandonedCredit,
   reserveStarterCredit,
   verifyCheckoutSession,
 } = require('./lib/billing');
@@ -349,7 +350,7 @@ function createApp({
   const store = jobs || createJobStore({
     env,
     onAbandonedCredit(hold) {
-      return ledger.handBack(stripeClient, hold.paymentIntentId, hold.token);
+      return recoverAbandonedCredit(stripeClient, hold, ledger);
     },
   });
   logPortalTokenStatus(env);
@@ -947,6 +948,12 @@ function createApp({
         }
         async function failJob(err, timeout) {
           stopRefresh();
+          // The credit commit already persisted this job as succeeded. A later
+          // throw must not delete that PDF or say the credit was returned.
+          if (job && job.status === 'succeeded') {
+            rememberJob(job);
+            return;
+          }
           if (job && job.status !== 'succeeded') {
             const message = err && err.expose
               ? err.message
@@ -986,6 +993,9 @@ function createApp({
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
           if (credit && credit.paymentIntentId && credit.token) {
             job.creditHold = { paymentIntentId: credit.paymentIntentId, token: credit.token };
+            if (Number.isInteger(credit.manualsUsed) && credit.manualsUsed >= 0) {
+              job.creditHold.manualsUsed = credit.manualsUsed;
+            }
           }
           rememberJob(job);
           const abort = new AbortController();
@@ -1046,12 +1056,16 @@ function createApp({
                 console.error('Open credit hold was not cleared');
               }
             }
-            job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
-            job.warnings = result.warnings || [];
+            // Record success before coverage bookkeeping. A crash after the
+            // commit then reloads a finished job instead of handing the credit back.
             delete job.creditHold;
             job.status = 'succeeded';
+            job.error = null;
             job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
+            rememberJob(job);
             logOutcome(null);
+            job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
+            job.warnings = result.warnings || [];
           } catch (err) {
             await failJob(err, false);
           }

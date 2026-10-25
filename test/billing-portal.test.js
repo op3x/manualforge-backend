@@ -29,6 +29,7 @@ const {
   portalMailText,
   renderCancelOffer,
   sessionOpensPortal,
+  restoreMovedClaim,
   sessionWithinPortalWindow,
   signPortalToken,
   verifyPortalToken,
@@ -1430,7 +1431,8 @@ test('concurrent cancellation deliveries send one confirmation', async () => exc
     assert.equal(started, 1);
     releaseSend();
     const responses = await Promise.all(pending);
-    assert.equal(responses.filter((res) => res.status === 200).length, 2);
+    assert.equal(responses.filter((res) => res.status === 200).length, 1);
+    assert.equal(responses.filter((res) => res.status === 500).length, 1);
     assert.equal(started, 1);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].to, 'buyer@example.com');
@@ -1527,7 +1529,7 @@ function confirmationClaimFile(dir, end) {
   return path.join(dir, 'cancel-confirmations', `sub_os_${end}.claim`);
 }
 
-test('an empty cancellation claim older than 15 minutes can be sent once', async () => exclusive(async () => {
+test('a young empty cancellation claim returns 500 and an older one is sent once', async () => exclusive(async () => {
   const dir = confirmationDir();
   const end = Math.floor(Date.parse('2026-10-25T00:00:00.000Z') / 1000);
   const file = confirmationClaimFile(dir, end);
@@ -1547,7 +1549,8 @@ test('an empty cancellation claim older than 15 minutes can be sent once', async
     const young = new Date(Date.now() - CLAIM_RECLAIM_MS + 60000);
     fs.utimesSync(file, young, young);
     const held = await postConfirmation(base, payload);
-    assert.equal(held.status, 200);
+    assert.equal(held.status, 500);
+    assert.deepEqual(await held.json(), { error: 'Webhook handler failed' });
     assert.equal(sent.length, 0);
     assert.equal(fs.readFileSync(file, 'utf8'), '');
 
@@ -1563,8 +1566,64 @@ test('an empty cancellation claim older than 15 minutes can be sent once', async
     const marked = await postConfirmation(base, payload);
     assert.equal(marked.status, 200);
     assert.equal(sent.length, 1);
+
+    const sentYoung = new Date(Date.now() - 60 * 1000);
+    fs.utimesSync(file, sentYoung, sentYoung);
+    const alreadySent = await postConfirmation(base, payload);
+    assert.equal(alreadySent.status, 200);
+    assert.equal(sent.length, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('restoring a moved claim does not replace a newer claim', async () => exclusive(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-claim-restore-'));
+  const holding = path.join(dir, 'sub.claim.1.reclaim');
+  const file = path.join(dir, 'sub.claim');
+  fs.writeFileSync(holding, 'sent\n', { mode: 0o600 });
+  fs.writeFileSync(file, 'fresh-claim', { mode: 0o600 });
+  try {
+    assert.equal(restoreMovedClaim(holding, file), false);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'fresh-claim');
+    assert.equal(fs.existsSync(holding), false);
+
+    fs.writeFileSync(holding, 'sent\n', { mode: 0o600 });
+    fs.rmSync(file);
+    assert.equal(restoreMovedClaim(holding, file), true);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'sent\n');
+    assert.equal(fs.existsSync(holding), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('claim restore copies and renames when hard links are not supported', async () => exclusive(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-claim-copy-'));
+  const holding = path.join(dir, 'sub.claim.1.reclaim');
+  const file = path.join(dir, 'sub.claim');
+  const original = fs.linkSync;
+  fs.linkSync = () => {
+    const err = new Error('EXDEV: cross-device link not permitted');
+    err.code = 'EXDEV';
+    throw err;
+  };
+  try {
+    fs.writeFileSync(holding, 'sent\n', { mode: 0o600 });
+    assert.equal(restoreMovedClaim(holding, file), true);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'sent\n');
+    assert.equal(fs.existsSync(holding), false);
+    assert.equal(fs.readdirSync(dir).some((name) => name.endsWith('.copy')), false);
+
+    fs.writeFileSync(holding, 'old-claim', { mode: 0o600 });
+    fs.writeFileSync(file, 'fresh-claim', { mode: 0o600 });
+    assert.equal(restoreMovedClaim(holding, file), false);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'fresh-claim');
+    assert.equal(fs.existsSync(holding), false);
+    assert.equal(fs.readdirSync(dir).some((name) => name.endsWith('.copy')), false);
+  } finally {
+    fs.linkSync = original;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }));
