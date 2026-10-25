@@ -100,9 +100,9 @@ function stripeEvent(id, type, object) {
   return { id, type, data: { object } };
 }
 
-async function waitJob(base, id) {
+async function waitJob(base, id, sessionId) {
   for (let i = 0; i < 50; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': sessionId } });
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -449,7 +449,7 @@ test('D5 a generation in progress is not refund eligible', async () => {
       `generation in progress since ${intent.metadata.generation_started_at}; check again after it finishes`,
     );
     release();
-    const done = await waitJob(base, (await created.json()).id);
+    const done = await waitJob(base, (await created.json()).id, sessionId);
     assert.equal(done.status, 'succeeded');
     const after = await refundCheck(stripe, 'pi_d5');
     assert.equal(after.purchases[0].delivered, true);
@@ -483,10 +483,10 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
     }))).status, 200);
     assert.equal(live.intent.metadata.credit_status, 'revoked');
     release();
-    const done = await waitJob(base, job.id);
+    const done = await waitJob(base, job.id, live.sessionId);
     assert.equal(done.status, 'failed');
     assert.equal(done.error, STARTER_REFUNDED_MESSAGE);
-    assert.equal((await fetch(`${base}/jobs/${job.id}/pdf`)).status, 409);
+    assert.equal((await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': live.sessionId } })).status, 409);
     assert.equal(live.intent.metadata.manuals_used, '0');
     assert.equal(live.intent.metadata.credit_status, 'revoked');
   });
@@ -500,9 +500,9 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
   });
   await withServer(keptApp, async (base) => {
     const created = await postJob(base, kept.sessionId);
-    const done = await waitJob(base, (await created.json()).id);
+    const done = await waitJob(base, (await created.json()).id, kept.sessionId);
     assert.equal(done.status, 'succeeded');
-    const first = await fetch(`${base}/jobs/${done.id}/pdf`);
+    const first = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': kept.sessionId } });
     assert.equal(first.status, 200);
     assert.equal(Buffer.from(await first.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
     assert.equal((await signedWebhook(base, stripeEvent('evt_d6_open', 'charge.dispute.created', {
@@ -510,7 +510,7 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
       payment_intent: 'pi_kept',
       status: 'needs_response',
     }))).status, 200);
-    const blocked = await fetch(`${base}/jobs/${done.id}/pdf`);
+    const blocked = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': kept.sessionId } });
     assert.equal(blocked.status, 402);
     assert.equal((await blocked.json()).error, STARTER_SUSPENDED_MESSAGE);
     assert.equal((await signedWebhook(base, stripeEvent('evt_d6_won', 'charge.dispute.closed', {
@@ -518,7 +518,7 @@ test('D6 a refund stops an in-flight job and a later download', async () => {
       payment_intent: 'pi_kept',
       status: 'won',
     }))).status, 200);
-    const restored = await fetch(`${base}/jobs/${done.id}/pdf`);
+    const restored = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': kept.sessionId } });
     assert.equal(restored.status, 200);
     assert.equal(Buffer.from(await restored.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
   });
@@ -608,7 +608,7 @@ test('D9 integrator subscriptions use the same refund and dispute block', async 
   const app = createApp({ env: env(), stripe: world.stripe, anthropic: null });
   await withServer(app, async (base) => {
     const before = await fetch(`${base}/verify-session?session_id=cs_integrator`);
-    assert.deepEqual(await before.json(), { valid: true, plan: 'integrator', remaining: null });
+    assert.deepEqual(await before.json(), { valid: true, plan: 'integrator', remaining: null, billingIssue: false });
     assert.equal((await signedWebhook(base, stripeEvent('evt_d9_open', 'charge.dispute.created', {
       id: 'dp_integrator',
       charge: 'ch_current',
@@ -1463,7 +1463,7 @@ test('N5 a lost dispute revokes only that purchase and a new checkout stays acti
     assert.equal(subscriptions.sub_b.status, 'active');
     assert.equal((await fetch(`${base}/verify-session?session_id=cs_a`).then((res) => res.json())).valid, false);
     const fresh = await fetch(`${base}/verify-session?session_id=cs_b`).then((res) => res.json());
-    assert.deepEqual(fresh, { valid: true, plan: 'integrator', remaining: null });
+    assert.deepEqual(fresh, { valid: true, plan: 'integrator', remaining: null, billingIssue: false });
 
     assert.equal((await signedWebhook(base, stripeEvent('evt_n5_starter', 'charge.dispute.closed', {
       id: 'dp_n5_starter',
@@ -1475,7 +1475,7 @@ test('N5 a lost dispute revokes only that purchase and a new checkout stays acti
     assert.equal(intents.pi_b.metadata.credit_status, undefined);
     assert.equal((await fetch(`${base}/verify-session?session_id=cs_starter_a`).then((res) => res.json())).valid, false);
     const starterFresh = await fetch(`${base}/verify-session?session_id=cs_starter_b`).then((res) => res.json());
-    assert.deepEqual(starterFresh, { valid: true, plan: 'starter', remaining: 3 });
+    assert.deepEqual(starterFresh, { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
     assert.deepEqual(customer.metadata, {});
     assert.equal(customerUpdates.length, 0);
   });

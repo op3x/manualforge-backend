@@ -842,7 +842,7 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
         'X-Forwarded-For': '203.0.113.9, 10.0.0.4',
       },
       body: JSON.stringify({
-        phone: '+15551212000',
+        phone: '+15552342000',
         consentTextVersion: 'checkbox-v3',
         source: 'pricing-footer',
       }),
@@ -851,7 +851,7 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://manualos.com');
     assert.deepEqual(await res.json(), { ok: true });
     const [record] = h.store.listConsents();
-    assert.equal(record.phone, '+15551212000');
+    assert.equal(record.phone, '+15552342000');
     assert.equal(record.consentTextVersion, 'checkbox-v3');
     assert.equal(record.source, 'pricing-footer');
     assert.equal(record.ip, '10.0.0.4');
@@ -863,10 +863,20 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
       body: JSON.stringify({ phone: '5551212', consentTextVersion: 'checkbox-v3' }),
     });
     assert.equal(badPhone.status, 400);
+    for (const phone of ['0000000000', '+10000000000', '000-000-0000', '+1 (000) 000-0000', '+15551212000']) {
+      const rejected = await fetch(`${base}/api/support/sms-consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
+        body: JSON.stringify({ phone, consentTextVersion: 'checkbox-v3' }),
+      });
+      assert.equal(rejected.status, 400, phone);
+      assert.equal((await rejected.json()).error, 'phone must be E.164.');
+    }
+    assert.equal(h.store.listConsents().length, 1);
     const missing = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: '+15551212000' }),
+      body: JSON.stringify({ phone: '+15552342000' }),
     });
     assert.equal(missing.status, 400);
   });

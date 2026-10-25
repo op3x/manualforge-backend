@@ -13,6 +13,7 @@ const {
 const {
   accessBlock,
   assertCanGenerate,
+  blockForAccess,
   checkoutParams,
   isStripeNotFound,
   publicAccess,
@@ -21,6 +22,15 @@ const {
   reserveStarterCredit,
   verifyCheckoutSession,
 } = require('./lib/billing');
+const {
+  revokeAccessToken,
+  signAccessToken,
+  tokenSecret,
+  verifyAccessToken,
+  safeEqual,
+} = require('./lib/access-token');
+const { contentDisposition, downloadFileName, sourceName } = require('./lib/download-name');
+const { FILE_LIMIT, overLengthField } = require('./lib/field-limits');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
 const { withStripeReadCache } = require('./lib/stripe-read-cache');
@@ -63,7 +73,9 @@ function createStripe(env) {
 function sendError(res, err) {
   if (err && err.expose) {
     if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
-    return res.status(err.status || 500).json({ error: err.message });
+    const body = { error: err.message };
+    if (err.publicCode) body.code = err.publicCode;
+    return res.status(err.status || 500).json(body);
   }
   console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
   return res.status(500).json({ error: 'Internal server error' });
@@ -78,6 +90,29 @@ function readSessionId(req) {
   if (fromBody) return fromBody;
   const header = req.get('x-session-id');
   return typeof header === 'string' ? header.trim() : '';
+}
+
+function exposed(status, message, logMessage, publicCode) {
+  const err = new Error(message);
+  err.status = status;
+  err.expose = true;
+  if (logMessage) err.logMessage = logMessage;
+  if (publicCode) err.publicCode = publicCode;
+  return err;
+}
+
+function bearerToken(req) {
+  const header = req.get('authorization');
+  if (!header) return '';
+  const match = /^Bearer\s+(\S+)\s*$/i.exec(String(header).trim());
+  if (!match) throw exposed(401, 'Access token is invalid or expired.', null, 'access_token_invalid');
+  return match[1];
+}
+
+const JOB_NOT_FOUND = { error: 'Job not found or expired.' };
+
+function boundId(value) {
+  return typeof value === 'string' && value.length > 0;
 }
 
 function collectFiles(req) {
@@ -343,9 +378,103 @@ function createApp({
     sendError,
   });
 
+  function verifiedBearer(token) {
+    if (!tokenSecret(env)) {
+      throw exposed(503, 'Access tokens are temporarily unavailable.', 'PORTAL_TOKEN_SECRET is not set');
+    }
+    const caller = verifyAccessToken(token, env);
+    if (!caller) throw exposed(401, 'Access token is invalid or expired.', null, 'access_token_invalid');
+    return caller;
+  }
+
+  // COMPAT(session-id): manualos.com/upload.html still posts session_id and
+  // sends X-Session-Id. Accept that for one release so the current page keeps
+  // working. Authorization: Bearer is the credential after POST /access-token.
+  // A bearer token wins when both are sent. Query session_id is not a download
+  // credential. Remove the compat branch once upload, poll, and download all
+  // send the bearer token.
+  function compatCaller(req) {
+    const sessionId = readSessionId(req);
+    if (!sessionId) return null;
+    return { sessionId, customerId: '', subscriptionId: '', via: 'compat' };
+  }
+
+  function presentedCaller(req) {
+    const token = bearerToken(req);
+    if (token) return verifiedBearer(token);
+    return compatCaller(req);
+  }
+
+  async function generationCaller(req) {
+    const caller = presentedCaller(req);
+    if (caller) return caller;
+    throw exposed(402, 'Payment required. Provide session_id in the form body or the X-Session-Id header.');
+  }
+
+  async function callerOwnsJob(caller, job) {
+    if (!caller || !job) return false;
+    if (boundId(job.sessionId) && safeEqual(caller.sessionId, job.sessionId)) return true;
+    const customerBound = boundId(job.customerId);
+    const subscriptionBound = boundId(job.subscriptionId);
+    if (!customerBound && !subscriptionBound) return false;
+    let customerId = caller.customerId || '';
+    let subscriptionId = caller.subscriptionId || '';
+    if ((customerBound && !customerId) || (subscriptionBound && !subscriptionId)) {
+      if (!stripeClient || !caller.sessionId) return false;
+      try {
+        const access = await verifyCheckoutSession(stripeClient, caller.sessionId, env);
+        customerId = customerId || access.customerId || '';
+        subscriptionId = subscriptionId || access.subscriptionId || '';
+      } catch (err) {
+        if (isStripeNotFound(err)) return false;
+        throw err;
+      }
+    }
+    if (customerBound && customerId && safeEqual(customerId, job.customerId)) return true;
+    if (subscriptionBound && subscriptionId && safeEqual(subscriptionId, job.subscriptionId)) return true;
+    return false;
+  }
+
+  function rememberJob(job) {
+    if (!store || typeof store.persist !== 'function') return;
+    try {
+      store.persist(job);
+    } catch (err) {
+      const code = err && err.code ? err.code : 'unknown';
+      console.error(`Job record save failed (${code})`);
+    }
+  }
+
+  function jobOwnerFields(access, sessionId, project) {
+    const fields = { sessionId, nameSource: sourceName(project).slice(0, 200) };
+    if (access && access.plan && access.plan !== 'starter') {
+      if (access.customerId) fields.customerId = access.customerId;
+      if (access.subscriptionId) fields.subscriptionId = access.subscriptionId;
+    }
+    return fields;
+  }
+
+  function listedJob(job) {
+    const filename = downloadFileName(job.nameSource || '');
+    return {
+      id: job.id,
+      status: job.status,
+      createdAt: job.createdAt,
+      expiresAt: job.expiresAt,
+      filename,
+      download_path: `/jobs/${job.id}/pdf`,
+    };
+  }
+
+  async function sessionForVerify(req) {
+    const token = bearerToken(req);
+    if (token) return verifiedBearer(token).sessionId;
+    return typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+  }
+
   app.get('/verify-session', async (req, res) => {
     try {
-      const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+      const sessionId = await sessionForVerify(req);
       if (!sessionId) return res.status(400).json({ error: 'session_id is required' });
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
@@ -354,7 +483,72 @@ function createApp({
       const access = await verifyCheckoutSession(stripeClient, sessionId, env);
       return res.json(publicAccess(access));
     } catch (err) {
-      if (isStripeNotFound(err)) return res.json({ valid: false, plan: null, remaining: null });
+      if (isStripeNotFound(err)) return res.json({ valid: false, plan: null, remaining: null, billingIssue: false });
+      return sendError(res, err);
+    }
+  });
+
+  app.post('/access-token', async (req, res) => {
+    try {
+      const sessionId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+      if (!sessionId) return res.status(400).json({ error: 'session_id is required.' });
+      if (!stripeClient) {
+        console.error('STRIPE_SECRET_KEY is not set');
+        return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
+      }
+      if (!tokenSecret(env)) {
+        console.error('PORTAL_TOKEN_SECRET is not set');
+        return res.status(503).json({ error: 'Access tokens are temporarily unavailable.' });
+      }
+      let access;
+      try {
+        access = await verifyCheckoutSession(stripeClient, sessionId, env);
+      } catch (err) {
+        if (isStripeNotFound(err)) {
+          return res.status(404).json({ error: 'No purchase was found for this session.', code: 'purchase_not_found' });
+        }
+        throw err;
+      }
+      if (!access || !access.plan) {
+        return res.status(404).json({ error: 'No purchase was found for this session.', code: 'purchase_not_found' });
+      }
+      const blocked = blockForAccess(access);
+      if (blocked || !access.valid) {
+        return res.status(403).json({
+          error: blocked ? blocked.message : 'This purchase is not active.',
+          code: 'purchase_inactive',
+        });
+      }
+      const minted = signAccessToken({
+        sessionId,
+        customerId: access.plan === 'starter' ? '' : (access.customerId || ''),
+        subscriptionId: access.plan === 'starter' ? '' : (access.subscriptionId || ''),
+      }, env);
+      return res.json({
+        access_token: minted.token,
+        token_type: 'Bearer',
+        expires_in: minted.expiresIn,
+        expires_at: minted.expiresAt,
+        ...publicAccess(access),
+      });
+    } catch (err) {
+      return sendError(res, err);
+    }
+  });
+
+  app.post('/access-token/revoke', (req, res) => {
+    try {
+      const token = bearerToken(req);
+      if (!token) return res.status(401).json({ error: 'Access token is invalid or expired.', code: 'access_token_invalid' });
+      if (!tokenSecret(env)) {
+        console.error('PORTAL_TOKEN_SECRET is not set');
+        return res.status(503).json({ error: 'Access tokens are temporarily unavailable.' });
+      }
+      if (!revokeAccessToken(token, env)) {
+        return res.status(401).json({ error: 'Access token is invalid or expired.', code: 'access_token_invalid' });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
       return sendError(res, err);
     }
   });
@@ -422,8 +616,16 @@ function createApp({
   }
 
   async function runPaid(req, res, { reserveAtStart, respond }) {
-    const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
+    const caller = await generationCaller(req);
+    const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
+    const tooLong = overLengthField(req.body);
+    if (tooLong) {
+      throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
+    }
     const files = collectFiles(req);
+    if (files.length > FILE_LIMIT) {
+      throw exposed(400, 'Too many files. Send at most 25.', null, 'too_many_files');
+    }
     if (!files.length) {
       const err = new Error('No file or plcContent provided');
       err.status = 400;
@@ -446,7 +648,7 @@ function createApp({
       });
     }
     try {
-      const result = await respond(access, files, credit, project);
+      const result = await respond(access, files, credit, project, caller);
       return result;
     } catch (err) {
       if (credit) {
@@ -463,8 +665,8 @@ function createApp({
   app.post('/jobs', upload.fields([{ name: 'file', maxCount: 25 }, { name: 'files', maxCount: 25 }]), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: true,
-      respond: async (access, files, credit, project) => {
-        const sessionId = readSessionId(req);
+      respond: async (access, files, credit, project, caller) => {
+        const sessionId = caller.sessionId;
         const runKey = await beginGeneration(access, sessionId);
         const refresh = watchGeneration(access, sessionId);
         let job = null;
@@ -508,7 +710,7 @@ function createApp({
           }
         }
         try {
-          job = store.create({ sessionId });
+          job = store.create(jobOwnerFields(access, sessionId, project));
           res.status(202).json(publicJob(job));
           job.status = 'running';
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
@@ -576,6 +778,7 @@ function createApp({
           } catch (err) {
             await failJob(err, false);
           }
+          rememberJob(job);
         } finally {
           if (timer) cancelTimeout(timer);
           stopRefresh();
@@ -588,26 +791,51 @@ function createApp({
     });
   });
 
-  app.get('/jobs/:id', (req, res) => {
+  async function ownedJob(req) {
+    const caller = presentedCaller(req);
     const job = store.get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
-    return res.json(publicJob(job));
+    if (!caller || !job || !(await callerOwnsJob(caller, job))) return null;
+    return job;
+  }
+
+  app.get('/jobs', async (req, res) => {
+    try {
+      const caller = presentedCaller(req);
+      if (!caller) return res.status(401).json({ error: 'Authorization is required.', code: 'authorization_required' });
+      const jobs = [];
+      for (const job of store.ready()) {
+        if (await callerOwnsJob(caller, job)) jobs.push(listedJob(job));
+      }
+      return res.json({ jobs });
+    } catch (err) {
+      return sendError(res, err);
+    }
+  });
+
+  app.get('/jobs/:id', async (req, res) => {
+    try {
+      const job = await ownedJob(req);
+      if (!job) return res.status(404).json(JOB_NOT_FOUND);
+      return res.json(publicJob(job));
+    } catch (err) {
+      return sendError(res, err);
+    }
   });
 
   app.get('/jobs/:id/pdf', async (req, res) => {
     try {
-      const job = store.get(req.params.id);
-      if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
+      const job = await ownedJob(req);
+      if (!job) return res.status(404).json(JOB_NOT_FOUND);
       if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
       if (job.sessionId) {
         const block = await accessBlock(stripeClient, job.sessionId, env);
         if (block) return res.status(block.status).json({ error: block.message });
       }
       const pdf = store.readPdf(job.id);
-      if (!pdf) return res.status(404).json({ error: 'Job not found or expired.' });
+      if (!pdf) return res.status(404).json(JOB_NOT_FOUND);
       res.set({
         'Content-Type': 'application/pdf',
-        'Content-Disposition': 'attachment; filename="manual.pdf"',
+        'Content-Disposition': contentDisposition(job.nameSource || ''),
         'Content-Length': pdf.length,
       });
       return res.send(pdf);
@@ -624,8 +852,8 @@ function createApp({
   }, upload.single('file'), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
-      respond: async (access, files, credit, project) => {
-        const sessionId = readSessionId(req);
+      respond: async (access, files, credit, project, caller) => {
+        const sessionId = caller.sessionId;
         const runKey = await beginGeneration(access, sessionId);
         const refresh = watchGeneration(access, sessionId);
         let stamp = null;
@@ -650,7 +878,7 @@ function createApp({
           if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
           res.set({
             'Content-Type': 'application/pdf',
-            'Content-Disposition': 'attachment; filename="manual.pdf"',
+            'Content-Disposition': contentDisposition(sourceName(project)),
             'Content-Length': result.pdf.length,
             Deprecation: 'true',
             Link: '</jobs>; rel="successor-version"',
@@ -688,14 +916,20 @@ function createApp({
 
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
-    if (err && err.expose) return sendError(res, err);
-    console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
-    if (err && err.name === 'MulterError') {
-      const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
-      return res.status(400).json({ error: message });
+    if (err && (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400))) {
+      console.error('Invalid request body', redactSecrets(redactCustomerLog(err.message)));
+      return res.status(400).json({ error: 'Invalid request body.' });
     }
-    if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body.' });
+    if (err && err.expose) return sendError(res, err);
+    if (err && err.name === 'MulterError') {
+      if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'File is too large.' });
+      if (err.code === 'LIMIT_FILE_COUNT' || err.code === 'LIMIT_UNEXPECTED_FILE') {
+        return res.status(400).json({ error: 'Too many files. Send at most 25.', code: 'too_many_files' });
+      }
+      return res.status(400).json({ error: 'Upload failed.' });
+    }
     if (err && err.type === 'entity.too.large') return res.status(400).json({ error: 'File is too large.' });
+    console.error(redactSecrets(redactCustomerLog(err && err.stack ? err.stack : err)));
     return res.status(500).json({ error: 'Internal server error' });
   });
   return app;

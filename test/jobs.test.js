@@ -94,9 +94,9 @@ async function withServer(app, fn) {
   }
 }
 
-async function waitJob(base, id) {
+async function waitJob(base, id, sessionId = 'cs_test_starter') {
   for (let i = 0; i < 50; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': sessionId } });
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -115,6 +115,7 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
   await withServer(app, async (base) => {
     const form = new FormData();
     form.set('session_id', 'cs_test_starter');
+    form.set('product_name', 'Infeed Line');
     form.set('file', new Blob([L5X]), 'line.L5X');
     const created = await fetch(`${base}/jobs`, { method: 'POST', body: form });
     assert.equal(created.status, 202);
@@ -122,9 +123,10 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
     const done = await waitJob(base, job.id);
     assert.equal(done.status, 'succeeded');
     assert.equal(done.coverage.percent, 100);
-    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal(pdf.status, 200);
     assert.match(pdf.headers.get('content-type'), /pdf/);
+    assert.equal(pdf.headers.get('content-disposition'), 'attachment; filename="infeed-line-manual.pdf"');
     assert.equal(paid.meta.manuals_used, '1');
     assert.equal(pdf.headers.get('deprecation'), null);
 
