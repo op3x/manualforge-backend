@@ -7,7 +7,24 @@ const twilio = require('twilio');
 const { WebSocket } = require('ws');
 const { createApp } = require('../server');
 const { createSupportStore, removeTestSupportDirectories } = require('../lib/support/store');
-const { CONSENT_LIMIT, createConsentLimiter, isOptOutMessage } = require('../lib/support/http');
+const {
+  ALERT_SCOPE,
+  CONSENT_LIMIT,
+  CONVERSATION_CONSENT_VERSION,
+  CONVERSATION_SCOPE,
+  CONVERSATION_TTL_MS,
+  SMS_CONSENT_LABEL,
+  SMS_CONSENT_VERSION,
+  SMS_OPT_IN_CONFIRMATION,
+  VOICEMAIL_RECORDING_NOTICE,
+  WEB_OPT_IN_LIMIT,
+  WEB_OPT_IN_WINDOW_MS,
+  WELCOME,
+  createConsentLimiter,
+  customerAlertsAllowed,
+  helpReply,
+  isOptOutMessage,
+} = require('../lib/support/http');
 const { createSmtpMailer } = require('../lib/support/mail');
 const policy = require('../lib/support/policy');
 
@@ -442,7 +459,10 @@ test('voice signature, relay TwiML, and inert fallbacks', async () => {
     assert.match(xml, /voice="en-US-Neural2-C"/);
     assert.match(xml, /language="en-US"/);
     assert.match(xml, /transcriptionProvider="Deepgram"/);
-    assert.match(xml, /welcomeGreeting="Thanks for calling ManualOS support\. You're speaking with an AI assistant; say 'representative' any time to reach a person\."/);
+    assert.ok(xml.includes(`welcomeGreeting="${WELCOME}"`));
+    assert.match(xml, /This call is transcribed, and may be recorded/);
+    assert.match(xml, /You're speaking with an AI assistant/);
+    assert.doesNotMatch(xml, /voiceprint|diariz|speakerLabel|identifySpeaker|speakerId/i);
     assert.match(xml, new RegExp(`url="ws://${base.slice('http://'.length)}/api/twilio/relay\\?token=`));
 
     const forged = await signedFetch(`${base}/api/twilio/voice`, 'http://evil.example/api/twilio/voice', params);
@@ -638,6 +658,8 @@ test('handoff dials, voicemail texts the owner, and the keypad works', async () 
     assert.match(missedXml, /transcribeCallback="\/api\/twilio\/voice\/transcription"/);
     assert.match(missedXml, /action="\/api\/twilio\/voice\/recording-done"/);
     assert.match(missedXml, /recordingStatusCallback="\/api\/twilio\/voice\/recording"/);
+    assert.match(missedXml, /This message will be recorded and transcribed/);
+    assert.doesNotMatch(missedXml, /voiceprint|diariz|speakerLabel|identifySpeaker|speakerId/i);
     assert.doesNotMatch(missedXml, /<Gather/);
     const busy = await postTwilio(base, h.env, '/api/twilio/voice/dial-status', { DialCallStatus: 'busy' });
     assert.match(await busy.text(), /<Record /);
@@ -668,11 +690,18 @@ test('handoff dials, voicemail texts the owner, and the keypad works', async () 
     assert.match(await zero.text(), /<Dial timeout="25"/);
     assert.equal(h.sent.length, 3);
     const order = await postTwilio(base, h.env, '/api/twilio/voice/menu', { Digits: '1', CallSid: 'CA_MENU2' });
-    assert.match(await order.text(), /order or manual status/);
+    const orderXml = await order.text();
+    assert.match(orderXml, /order or manual status/);
+    assert.match(orderXml, /the email you used at checkout/);
+    assert.match(orderXml, /This message will be recorded and transcribed/);
+    assert.doesNotMatch(orderXml, /account email/i);
     const billing = await postTwilio(base, h.env, '/api/twilio/voice/menu', { Digits: '2', CallSid: 'CA_MENU3' });
     const billingXml = await billing.text();
     assert.match(billingXml, /billing/i);
+    assert.match(billingXml, /the email you used at checkout/);
+    assert.match(billingXml, /This message will be recorded and transcribed/);
     assert.match(billingXml, /Do not leave a card number/);
+    assert.doesNotMatch(billingXml, /account email/i);
     const status = await postTwilio(base, h.env, '/api/twilio/voice/status', { CallSid: 'CA_MENU', CallStatus: 'completed' });
     assert.equal(status.status, 200);
   });
@@ -688,7 +717,10 @@ test('handoff dials, voicemail texts the owner, and the keypad works', async () 
     });
     const xml = await res.text();
     assert.match(xml, /<Record /);
+    assert.match(xml, /This message will be recorded and transcribed/);
+    assert.match(xml, /could not reach a teammate/);
     assert.doesNotMatch(xml, /<Dial /);
+    assert.doesNotMatch(xml, /voiceprint|diariz|speakerLabel|identifySpeaker|speakerId/i);
     assert.equal(noPhone.sent.length, 0);
   });
 });
@@ -700,9 +732,11 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     const from = '+15551110999';
     const help = await postTwilio(base, h.env, '/api/twilio/sms', { From: from, Body: 'help', MessageSid: 'SM_HELP' });
     const helpXml = await help.text();
-    assert.match(helpXml, /ManualOS Support:/);
-    assert.match(helpXml, /support@manualos\.com/);
-    assert.match(helpXml, /Reply STOP to opt out, HELP for help\. Msg&amp;data rates may apply\./);
+    const helpBody = smsText(helpXml);
+    assert.equal(helpBody, 'ManualOS (Op3x LLC) support: email support@manualos.com or call +1 555-765-4321. Msg&data rates may apply. Reply STOP to cancel.');
+    assert.equal(helpBody, helpReply(h.env));
+    assert.doesNotMatch(helpXml, /ManualOS Support:/);
+    assert.doesNotMatch(helpBody, /Reply STOP to opt out/);
 
     const keywords = ['STOP', 'stop.', 'STOPALL', 'unsubscribe', 'CANCEL', 'END', 'QUIT'];
     for (const [index, body] of keywords.entries()) {
@@ -726,15 +760,20 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.equal(h.store.isOptedOut('+15552009999'), true);
 
     const info = await postTwilio(base, h.env, '/api/twilio/sms', { From: '+15552000000', Body: 'INFO', MessageSid: 'SM_INFO' });
-    assert.match(await info.text(), /ManualOS Support:/);
+    assert.equal(smsText(await info.text()), helpReply(h.env));
 
     const start = await postTwilio(base, h.env, '/api/twilio/sms', { From: '+15552000000', Body: 'START', MessageSid: 'SM_START' });
     const startXml = await start.text();
-    assert.match(startXml, /opted in/);
-    assert.match(startXml, /Msg frequency varies/);
-    assert.match(startXml, /Reply STOP to opt out/);
+    assert.ok(startXml.includes(SMS_OPT_IN_CONFIRMATION.replace(/&/g, '&amp;')));
+    assert.doesNotMatch(startXml, /ManualOS Support:/);
+    assert.doesNotMatch(startXml, /Reply STOP to opt out/);
     assert.equal(h.store.isOptedOut('+15552000000'), false);
-    assert.equal(h.store.listConsents().some((row) => row.phone === '+15552000000' && row.source === 'sms-start'), true);
+    const startConsent = h.store.listConsents().find((row) => row.phone === '+15552000000' && row.source === 'sms-start');
+    assert.equal(startConsent.consentTextVersion, SMS_CONSENT_VERSION);
+    assert.equal(startConsent.consentText, SMS_CONSENT_LABEL);
+    assert.equal(startConsent.scope, ALERT_SCOPE);
+    assert.equal(startConsent.alerts, true);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15552000000', { nowMs: Date.parse('2026-10-25T12:00:00Z') }), true);
 
     const unstop = await postTwilio(base, h.env, '/api/twilio/sms', { From: '+15552000001', Body: 'UNSTOP', MessageSid: 'SM_UNSTOP' });
     assert.match(await unstop.text(), /opted in/);
@@ -747,7 +786,16 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     const pricingXml = await pricing.text();
     assert.match(pricingXml, /ManualOS Support: Starter is \$39/);
     assert.match(pricingXml, /Reply STOP to opt out, HELP for help\. Msg&amp;data rates may apply\./);
-    assert.equal(h.store.listConsents().some((row) => row.phone === '+15551112222' && row.source === 'inbound-sms' && row.consentTextVersion === 'inbound-sms-v1'), true);
+    const inbound = h.store.listConsents().filter((row) => row.phone === '+15551112222');
+    assert.equal(inbound.length, 1);
+    assert.equal(inbound[0].source, 'conversation-only');
+    assert.equal(inbound[0].consentTextVersion, CONVERSATION_CONSENT_VERSION);
+    assert.equal(inbound[0].scope, CONVERSATION_SCOPE);
+    assert.equal(inbound[0].alerts, false);
+    assert.equal(inbound[0].consentTextVersion === SMS_CONSENT_VERSION, false);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551112222', { nowMs: Date.parse('2026-10-25T12:00:00Z') }), false);
+    const optState = JSON.parse(fs.readFileSync(path.join(h.store.directory, 'opt-outs.json'), 'utf8'));
+    assert.equal(Object.hasOwn(optState.optIns, '+15551112222'), false);
     assert.equal(h.completions.length, 1);
 
     const card = await postTwilio(base, h.env, '/api/twilio/sms', {
@@ -843,32 +891,375 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
       },
       body: JSON.stringify({
         phone: '+15551212000',
-        consentTextVersion: 'checkbox-v3',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
         source: 'pricing-footer',
       }),
     });
     assert.equal(res.status, 201);
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://manualos.com');
-    assert.deepEqual(await res.json(), { ok: true });
+    assert.deepEqual(await res.json(), { ok: true, confirmationSent: true, pending: false });
     const [record] = h.store.listConsents();
     assert.equal(record.phone, '+15551212000');
-    assert.equal(record.consentTextVersion, 'checkbox-v3');
+    assert.equal(record.consentTextVersion, SMS_CONSENT_VERSION);
+    assert.equal(record.consentText, SMS_CONSENT_LABEL);
+    assert.equal(record.scope, ALERT_SCOPE);
+    assert.equal(record.alerts, true);
+    assert.equal(/account/i.test(record.scope), false);
+    assert.equal(/account/i.test(record.consentText), false);
     assert.equal(record.source, 'pricing-footer');
     assert.equal(record.ip, '10.0.0.4');
     assert.equal(record.timestamp, '2026-10-25T12:00:00.000Z');
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].to, '+15551212000');
+    assert.equal(h.sent[0].from, '+15557654321');
+    assert.equal(h.sent[0].body, SMS_OPT_IN_CONFIRMATION);
+    assert.equal(h.sent[0].statusCallback, undefined);
+    assert.equal(h.calls.length, 0);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551212000', { nowMs: Date.parse('2026-10-25T12:00:00Z') }), true);
 
     const badPhone = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
-      body: JSON.stringify({ phone: '5551212', consentTextVersion: 'checkbox-v3' }),
+      body: JSON.stringify({ phone: '5551212', consentTextVersion: SMS_CONSENT_VERSION }),
     });
     assert.equal(badPhone.status, 400);
+    const oldVersion = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
+      body: JSON.stringify({ phone: '+15551212001', consentTextVersion: 'support-sms-v2' }),
+    });
+    assert.equal(oldVersion.status, 400);
+    const wrongLabel = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
+      body: JSON.stringify({
+        phone: '+15551212002',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: 'Text me account alerts.',
+      }),
+    });
+    assert.equal(wrongLabel.status, 400);
+    assert.equal(h.sent.length, 1);
+    const missingText = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
+      body: JSON.stringify({ phone: '+15551212003', consentTextVersion: SMS_CONSENT_VERSION, source: 'website' }),
+    });
+    assert.equal(missingText.status, 400);
+    assert.equal(h.store.listConsents().some((row) => row.phone === '+15551212003'), false);
+    assert.equal(h.sent.length, 1);
     const missing = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ phone: '+15551212000' }),
     });
     assert.equal(missing.status, 400);
+  });
+});
+
+test('conversation texts are not alert consent, and a missed confirmation does not call anyone', async () => {
+  const at = Date.parse('2026-10-25T12:00:00Z');
+  let clock = at;
+  const h = harness({ supportNow: () => clock });
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const first = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119001',
+      Body: 'How much is Starter?',
+      MessageSid: 'SM_CONV_1',
+    });
+    assert.match(await first.text(), /\$39/);
+    const second = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119001',
+      Body: 'Thanks, that helps.',
+      MessageSid: 'SM_CONV_2',
+    });
+    assert.match(await second.text(), /ManualOS Support:/);
+    const rows = h.store.listConsents().filter((row) => row.phone === '+15551119001');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].alerts, false);
+    assert.equal(rows[0].scope, CONVERSATION_SCOPE);
+    assert.equal(rows[0].consentTextVersion, CONVERSATION_CONSENT_VERSION);
+    assert.equal(Date.parse(rows[0].expiresAt) - at, CONVERSATION_TTL_MS);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551119001', { nowMs: clock }), false);
+    const optPath = path.join(h.store.directory, 'opt-outs.json');
+    const optState = fs.existsSync(optPath) ? JSON.parse(fs.readFileSync(optPath, 'utf8')) : { optIns: {} };
+    assert.equal(optState.optIns['+15551119001'], undefined);
+
+    clock = at + CONVERSATION_TTL_MS + 1;
+    const third = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119001',
+      Body: 'Still there?',
+      MessageSid: 'SM_CONV_3',
+    });
+    assert.match(await third.text(), /<Message>/);
+    const later = h.store.listConsents().filter((row) => row.phone === '+15551119001');
+    assert.equal(later.length, 2);
+    assert.equal(later.every((row) => row.alerts === false && row.consentTextVersion !== SMS_CONSENT_VERSION), true);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551119001', { nowMs: clock }), false);
+    assert.equal(h.sent.length, 0);
+    assert.equal(h.calls.length, 0);
+
+    h.store.optOut('+15551119002', 'sms');
+    const revived = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
+      body: JSON.stringify({
+        phone: '+15551119002',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'support-page',
+      }),
+    });
+    assert.deepEqual(await revived.json(), { ok: true, confirmationSent: false, pending: true });
+    assert.equal(h.store.isOptedOut('+15551119002'), true);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551119002', { nowMs: clock }), false);
+    const pending = h.store.listConsents().find((row) => row.phone === '+15551119002');
+    assert.equal(pending.pending, true);
+    assert.equal(pending.alerts, false);
+    assert.equal(pending.consentTextVersion, SMS_CONSENT_VERSION);
+    assert.equal(pending.consentText, SMS_CONSENT_LABEL);
+    assert.equal(h.sent.some((message) => message.to === '+15551119002'), false);
+    assert.equal(h.calls.length, 0);
+    const started = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119002',
+      Body: 'START',
+      MessageSid: 'SM_PENDING_START',
+    });
+    assert.ok((await started.text()).includes(SMS_OPT_IN_CONFIRMATION.replace(/&/g, '&amp;')));
+    assert.equal(h.store.isOptedOut('+15551119002'), false);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551119002', { nowMs: clock }), true);
+    assert.equal(h.sent.some((message) => message.to === '+15551119002'), false);
+    assert.equal(h.calls.length, 0);
+
+    const menu = await postTwilio(base, h.env, '/api/twilio/voice/menu', {
+      Digits: '0',
+      CallSid: 'CA_VM0',
+      From: '+15551119003',
+    });
+    assert.match(await menu.text(), /<Dial /);
+  });
+
+  const noPhone = harness({ ESCALATION_PHONE: '' });
+  await withServer(noPhone.app, async ({ base }) => {
+    noPhone.env.PUBLIC_BASE_URL = base;
+    const menu = await postTwilio(base, noPhone.env, '/api/twilio/voice/menu', {
+      Digits: '0',
+      CallSid: 'CA_VM_NOPHONE',
+      From: '+15551119004',
+    });
+    const xml = await menu.text();
+    assert.ok(xml.includes(VOICEMAIL_RECORDING_NOTICE));
+    assert.match(xml, /leave a message after the tone/);
+    assert.doesNotMatch(xml, /account email/i);
+    assert.doesNotMatch(xml, /voiceprint|diariz|speakerLabel|identifySpeaker|speakerId/i);
+  });
+
+  const calls = [];
+  const unsent = tempStore();
+  const failed = createApp({
+    env: {
+      NODE_ENV: 'test',
+      FRONTEND_URL: 'https://manualos.com',
+      TWILIO_AUTH_TOKEN: TOKEN,
+      TWILIO_ACCOUNT_SID: 'AC_test_account',
+      TWILIO_FROM_NUMBER: '+15557654321',
+      ESCALATION_PHONE: '+15550001111',
+      PUBLIC_BASE_URL: 'http://127.0.0.1',
+    },
+    supportStore: unsent,
+    twilioClient: {
+      messages: {
+        create: async () => {
+          const err = new Error('carrier rejected');
+          err.status = 30007;
+          throw err;
+        },
+      },
+      calls: {
+        create: async (params) => {
+          calls.push(params);
+          return { sid: 'CA_should_not_call' };
+        },
+      },
+    },
+    supportNow: () => at,
+  });
+  await withServer(failed, async ({ base }) => {
+    const res = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: '+15551119005',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'website',
+      }),
+    });
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { ok: true, confirmationSent: false, pending: false });
+    assert.equal(unsent.listConsents()[0].consentTextVersion, SMS_CONSENT_VERSION);
+    assert.equal(unsent.listConsents()[0].consentText, SMS_CONSENT_LABEL);
+    assert.equal(calls.length, 0);
+  });
+
+  const skipped = harness({ TWILIO_FROM_NUMBER: '' });
+  await withServer(skipped.app, async ({ base }) => {
+    const res = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: '+15551119006',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+      }),
+    });
+    assert.deepEqual(await res.json(), { ok: true, confirmationSent: false, pending: false });
+    assert.equal(skipped.sent.length, 0);
+    assert.equal(skipped.calls.length, 0);
+    assert.equal(skipped.store.listConsents()[0].scope, ALERT_SCOPE);
+  });
+
+  assert.equal(customerAlertsAllowed([
+    { phone: '+15551119007', consentTextVersion: 'inbound-sms-v1', source: 'inbound-sms', alerts: true, scope: ALERT_SCOPE },
+  ], '+15551119007', { nowMs: at }), false);
+  assert.equal(customerAlertsAllowed([
+    { phone: '+15551119008', consentTextVersion: SMS_CONSENT_VERSION, source: 'website', alerts: true, scope: 'account-alerts', consentText: SMS_CONSENT_LABEL },
+  ], '+15551119008', { nowMs: at }), false);
+  assert.equal(customerAlertsAllowed([
+    { phone: '+15551119009', consentTextVersion: SMS_CONSENT_VERSION, source: 'website', alerts: true, scope: ALERT_SCOPE, consentText: SMS_CONSENT_LABEL },
+  ], '+15551119009', { optedOut: true, nowMs: at }), false);
+});
+
+test('a stopped number stays stopped until it texts, and web opt-ins are capped', async () => {
+  const at = Date.parse('2026-10-25T12:00:00.000Z');
+  let clock = at;
+  const h = harness({ supportNow: () => clock });
+  const consentBody = (phone) => ({
+    phone,
+    consentTextVersion: SMS_CONSENT_VERSION,
+    consentText: SMS_CONSENT_LABEL,
+    source: 'website',
+  });
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const open = '+15551119200';
+    for (let i = 0; i < WEB_OPT_IN_LIMIT; i += 1) {
+      const res = await fetch(`${base}/api/support/sms-consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(consentBody(open)),
+      });
+      assert.equal(res.status, 201, `open ${i}`);
+      assert.deepEqual(await res.json(), { ok: true, confirmationSent: i === 0, pending: false });
+    }
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].to, open);
+    assert.equal(h.sent[0].body, SMS_OPT_IN_CONFIRMATION);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.store.isOptedOut(open), false);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), open, { nowMs: clock }), true);
+    const capped = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(consentBody(open)),
+    });
+    assert.equal(capped.status, 429);
+    assert.equal(h.store.listConsents().filter((row) => row.phone === open).length, WEB_OPT_IN_LIMIT);
+    assert.equal(h.sent.length, 1);
+
+    clock = at + WEB_OPT_IN_WINDOW_MS;
+    const again = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(consentBody(open)),
+    });
+    assert.deepEqual(await again.json(), { ok: true, confirmationSent: true, pending: false });
+    assert.equal(h.sent.length, 2);
+    assert.equal(h.sent[1].to, open);
+
+    const stopped = '+15551119201';
+    h.store.optOut(stopped, 'sms');
+    const before = h.sent.length;
+    for (let i = 0; i < WEB_OPT_IN_LIMIT; i += 1) {
+      const res = await fetch(`${base}/api/support/sms-consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(consentBody(stopped)),
+      });
+      assert.equal(res.status, 201, `stopped ${i}`);
+      assert.deepEqual(await res.json(), { ok: true, confirmationSent: false, pending: true });
+    }
+    assert.equal(h.sent.length, before);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.store.isOptedOut(stopped), true);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), stopped, { nowMs: clock }), false);
+    const blocked = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(consentBody(stopped)),
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(h.store.isOptedOut(stopped), true);
+
+    const yes = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: stopped,
+      Body: 'YES',
+      MessageSid: 'SM_PENDING_YES',
+    });
+    assert.ok((await yes.text()).includes(SMS_OPT_IN_CONFIRMATION.replace(/&/g, '&amp;')));
+    assert.equal(h.store.isOptedOut(stopped), false);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), stopped, { nowMs: clock }), true);
+    assert.equal(h.sent.length, before);
+    assert.equal(h.calls.length, 0);
+  });
+});
+
+const GSM7_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\u001bÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+
+function smsText(xml) {
+  const match = String(xml).match(/<Message>([\s\S]*)<\/Message>/);
+  assert.ok(match, 'expected a Message');
+  return match[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
+test('HELP uses the approved reply, with and without the support number', async () => {
+  assert.equal(GSM7_BASIC.length, 128);
+  const gsm7 = new Set(GSM7_BASIC);
+  const withNumber = harness({ SUPPORT_PHONE: '+13125550198' });
+  const withoutNumber = harness({ SUPPORT_PHONE: '' });
+  const expectedWith = 'ManualOS (Op3x LLC) support: email support@manualos.com or call +1 312-555-0198. Msg&data rates may apply. Reply STOP to cancel.';
+  const expectedWithout = 'ManualOS (Op3x LLC) support: email support@manualos.com. Msg&data rates may apply. Reply STOP to cancel.';
+
+  await withServer(withNumber.app, async ({ base }) => {
+    withNumber.env.PUBLIC_BASE_URL = base;
+    const res = await postTwilio(base, withNumber.env, '/api/twilio/sms', {
+      From: '+15551119300',
+      Body: 'HELP',
+      MessageSid: 'SM_HELP_NUM',
+    });
+    const body = smsText(await res.text());
+    assert.equal(body, expectedWith);
+    assert.equal(body, helpReply(withNumber.env));
+    assert.ok(body.length <= 160, `HELP length ${body.length}`);
+    assert.equal([...body].every((char) => gsm7.has(char)), true);
+    assert.equal(withNumber.calls.length, 0);
+  });
+
+  await withServer(withoutNumber.app, async ({ base }) => {
+    withoutNumber.env.PUBLIC_BASE_URL = base;
+    const res = await postTwilio(base, withoutNumber.env, '/api/twilio/sms', {
+      From: '+15551119301',
+      Body: 'HELP',
+      OptOutType: 'HELP',
+      MessageSid: 'SM_HELP_NONUM',
+    });
+    const body = smsText(await res.text());
+    assert.equal(body, expectedWithout);
+    assert.equal(body.includes(' or call '), false);
+    assert.ok(body.length <= 160);
+    assert.equal([...body].every((char) => gsm7.has(char)), true);
   });
 });
 
@@ -1106,6 +1497,7 @@ test('voicemail goodbye, recording notice, opt-out phrases, and SMS dedupe', asy
     const orderXml = await order.text();
     assert.match(orderXml, /action="\/api\/twilio\/voice\/recording-done"/);
     assert.match(orderXml, /recordingStatusCallback="\/api\/twilio\/voice\/recording"/);
+    assert.match(orderXml, /This message will be recorded and transcribed/);
     assert.doesNotMatch(orderXml, /<Gather/);
 
     const done = await postTwilio(base, h.env, '/api/twilio/voice/recording-done', {
@@ -1251,7 +1643,12 @@ test('consent is rate limited, append-only, and split from the other files', asy
           'X-Real-IP': `203.0.113.${i}`,
           'X-Forwarded-For': `203.0.113.${i}, 198.51.100.10`,
         },
-        body: JSON.stringify({ phone: `+1555400${String(i).padStart(4, '0')}`, consentTextVersion: 'v1', source: 'form' }),
+        body: JSON.stringify({
+          phone: `+1555400${String(i).padStart(4, '0')}`,
+          consentTextVersion: SMS_CONSENT_VERSION,
+          consentText: SMS_CONSENT_LABEL,
+          source: 'form',
+        }),
       });
       assert.equal(res.status, 201, `consent ${i}`);
     }
@@ -1262,7 +1659,12 @@ test('consent is rate limited, append-only, and split from the other files', asy
         'X-Real-IP': '198.51.100.99',
         'X-Forwarded-For': '198.51.100.99, 198.51.100.10',
       },
-      body: JSON.stringify({ phone: '+15554009999', consentTextVersion: 'v1', source: 'form' }),
+      body: JSON.stringify({
+        phone: '+15554009999',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'form',
+      }),
     });
     assert.equal(blocked.status, 429);
     assert.equal(h.store.listConsents().length, CONSENT_LIMIT);
@@ -1274,7 +1676,12 @@ test('consent is rate limited, append-only, and split from the other files', asy
         'X-Real-IP': '203.0.113.50',
         'X-Forwarded-For': '203.0.113.50, 198.51.100.11',
       },
-      body: JSON.stringify({ phone: '+15554008888', consentTextVersion: 'v1', source: 'form' }),
+      body: JSON.stringify({
+        phone: '+15554008888',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'form',
+      }),
     });
     assert.equal(other.status, 201);
     assert.equal(h.store.listConsents().at(-1).ip, '198.51.100.11');
