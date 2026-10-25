@@ -7,7 +7,7 @@ const twilio = require('twilio');
 const { WebSocket } = require('ws');
 const { createApp } = require('../server');
 const { createSupportStore, removeTestSupportDirectories } = require('../lib/support/store');
-const { CONSENT_LIMIT, createConsentLimiter } = require('../lib/support/http');
+const { CONSENT_LIMIT, createConsentLimiter, isOptOutMessage } = require('../lib/support/http');
 const { createSmtpMailer } = require('../lib/support/mail');
 const policy = require('../lib/support/policy');
 
@@ -202,16 +202,17 @@ test('policy facts, budget math, guardrails, and caps', async () => {
   const prompt = policy.systemPrompt({}, 'voice');
   assert.match(prompt, /Starter is \$39 one-time for 3 manuals/);
   assert.match(prompt, /\$79 per month/);
-  assert.match(prompt, /Starter within 30 days of purchase/);
-  assert.match(prompt, /before that billing period ends/);
+  assert.match(prompt, /Starter within 30 days of purchase; Pro charges before that billing period ends/);
   assert.match(prompt, /Never promise a refund/);
   assert.doesNotMatch(prompt, /31-day/);
+  assert.doesNotMatch(prompt, /Pro and Integrator charges/);
   assert.match(prompt, /support@manualos\.com/);
   assert.match(prompt, /not launched/);
   assert.doesNotMatch(prompt, /2,490/);
   const launched = policy.systemPrompt({ SUPPORT_INTEGRATOR_ENABLED: 'true' }, 'sms');
   assert.match(launched, /\$249 per month or \$2,490 per year/);
   assert.match(launched, /\$9 per extra manual/);
+  assert.match(launched, /Pro and Integrator charges before that billing period ends/);
 
   const cost = policy.tokenCost({ prompt_tokens: 1_000_000, completion_tokens: 1_000_000 });
   assert.ok(Math.abs(cost.usd - 0.75) < 1e-8);
@@ -974,6 +975,18 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
     'Your refund has been processed',
     'I am going to approve a refund',
     'The money will be refunded today',
+    "I'm processing your refund",
+    'we can give you a refund',
+    "I'll get that refunded",
+    'your refund has been approved',
+    "I've started a refund",
+    "we'll credit your card",
+    "you'll be reimbursed",
+    "I'll reverse the charge",
+    'consider it refunded',
+    "we'll send your money back",
+    'I can refund that for you',
+    'refund will be issued',
   ];
   assert.ok(refundPromises.length >= 12);
   for (const phrase of refundPromises) {
@@ -982,13 +995,26 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
     assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
     assert.doesNotMatch(cleaned, /I'll refund|we'll refund|issued a refund|on the way|on its way|money back|eligible for a full refund|will be refunded/i, phrase);
   }
-  const policyLine = 'A purchase can be refunded only if no manual from it has been delivered: Starter within 30 days of purchase, Pro and Integrator charges before that billing period ends.';
+  const policyLine = 'A purchase can be refunded only if no manual from it has been delivered: Starter within 30 days of purchase; Pro charges before that billing period ends.';
   assert.equal(policy.promisesRefund(policyLine), false);
+  assert.equal(policy.applyGuardrails(policyLine, {}), policyLine);
   assert.equal(policy.promisesRefund('I cannot approve or issue a refund'), false);
+  assert.equal(policy.applyGuardrails('I cannot approve or issue a refund', {}), 'I cannot approve or issue a refund');
+  for (const safe of [
+    'Your manual has been processed and is ready to download',
+    "I can't issue refunds",
+    'Refunds are handled by a person',
+    'You may be eligible; a person will review it',
+  ]) {
+    assert.equal(policy.promisesRefund(safe), false, safe);
+    assert.equal(policy.applyGuardrails(safe, {}), safe, safe);
+  }
+  assert.doesNotMatch(policy.applyGuardrails("we'll refund you", {}), /Integrator/);
+  assert.match(policy.applyGuardrails("we'll refund you", { SUPPORT_INTEGRATOR_ENABLED: 'true' }), /Pro and Integrator charges/);
   assert.equal(policy.classify('please unsubscribe me'), '');
 
   const branded = policy.applyGuardrails(
-    'Open Studio 5000, RSLogix, ControlLogix, CompactLogix, Logix Designer, Simatic, Step 7, TIA Portal, TwinCAT, Beckhoff, FactoryTalk, Inventor, Fusion 360, Fusion, CODESYS, GX Works, Creo, and CATIA. OpenAI, ChatGPT, GPT, Twilio, Google, Anthropic, and Claude helped. Ask your PLC vendor TIA Portal.',
+    'Open Studio 5000, RSLogix, ControlLogix, CompactLogix, Logix Designer, Simatic, Step 7, TIA Portal, TwinCAT, Beckhoff, FactoryTalk, Inventor, Fusion 360, Fusion, CODESYS, GX Works, Creo, and CATIA. OpenAI, ChatGPT, GPT, Twilio, Google, and Anthropic Claude helped. Ask your PLC vendor TIA Portal.',
     env,
   );
   assert.doesNotMatch(branded, /studio|rslogix|controllogix|compactlogix|logix|simatic|step\s*7|tia|portal|twincat|beckhoff|factorytalk|inventor|fusion|codesys|works|creo|catia|openai|chatgpt|\bgpt\b|twilio|google|anthropic|claude/i);
@@ -1928,6 +1954,109 @@ test('a toll-free STOP reply failure is logged and does not page', async () => {
   const logged = errors.join('\n');
   assert.match(logged, /Twilio message was not delivered/);
   assert.doesNotMatch(logged, /twilio-test-auth-token|sk-test/);
+});
+
+test('card windows, opt-out billing, refund promises, and vendor names', async () => {
+  assert.equal(policy.redactCardNumbers('4111 1111 1111 1111 123'), '[redacted]3');
+  assert.doesNotMatch(policy.redactCardNumbers('4111 1111 1111 1111 123'), /4111/);
+  assert.equal(policy.redactCardNumbers('4111 1111 1111 1111 04 29 cvv 123'), '[redacted] [redacted]');
+  assert.equal(policy.containsCardNumber('4111 1111 1111 1111 123'), true);
+  assert.equal(policy.containsCardNumber('credit card'), false);
+  assert.equal(policy.containsCardNumber('card number'), false);
+  assert.equal(policy.classify('Was my credit card charged twice?'), 'billing');
+  const buried = await policy.triageTurn({
+    channel: 'sms',
+    text: 'I was charged 4111 1111 1111 1111 04 29 cvv 123',
+    state: state(),
+    env: aiEnv(),
+    spentUsd: 0,
+    complete: async () => { throw new Error('should not call'); },
+  });
+  assert.equal(buried.reason, 'billing');
+  assert.equal(buried.escalate, true);
+  assert.doesNotMatch(`${buried.reply} ${buried.summary}`, /4111|cvv\s*123|04\s*29/);
+  const saved = { turns: 0, lowConfidence: 0, history: [] };
+  await policy.triageTurn({
+    channel: 'sms',
+    text: '4111 1111 1111 1111 123',
+    state: saved,
+    env: aiEnv(),
+    spentUsd: 0,
+    complete: async () => { throw new Error('should not call'); },
+  });
+  assert.doesNotMatch(JSON.stringify(saved), /4111/);
+
+  assert.equal(isOptOutMessage('How do I unsubscribe from Pro?'), false);
+  assert.equal(policy.classify('How do I unsubscribe from Pro?'), 'billing');
+  assert.equal(isOptOutMessage('remove me from the Pro subscription'), false);
+  assert.equal(policy.classify('remove me from the Pro subscription'), 'billing');
+  assert.equal(isOptOutMessage('opt me out'), true);
+  assert.equal(isOptOutMessage('please unsubscribe me'), true);
+  assert.equal(isOptOutMessage('unsubscribe'), true);
+
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const before = h.sent.length;
+    const pro = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551118001',
+      Body: 'How do I unsubscribe from Pro?',
+      MessageSid: 'SM_UNSUB_PRO',
+    });
+    assert.doesNotMatch(await pro.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15551118001'), false);
+    assert.equal(h.sent.length, before + 1);
+    const removed = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551118002',
+      Body: 'remove me from the Pro subscription',
+      MessageSid: 'SM_REMOVE_PRO',
+    });
+    assert.doesNotMatch(await removed.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15551118002'), false);
+    assert.equal(h.sent.length, before + 2);
+    const opt = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551118003',
+      Body: 'opt me out',
+      MessageSid: 'SM_OPT_ME',
+    });
+    assert.match(await opt.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15551118003'), true);
+    assert.equal(h.sent.length, before + 2);
+  });
+
+  for (const phrase of [
+    'Go to step 7',
+    'fusion welding',
+    'The inventor of this machine',
+    'Google it',
+    'Hi, this is Claude Schneider',
+    'Inventory stays on the shelf',
+  ]) {
+    assert.equal(policy.applyGuardrails(phrase, aiEnv()), phrase, phrase);
+  }
+  for (const phrase of [
+    'Siemens Step 7',
+    'STEP 7',
+    'Fusion 360',
+    'Autodesk Inventor',
+    'Inventor file',
+    'NX file',
+    'TwinCAT3',
+    'TwinCAT 3',
+    'Allen Bradley',
+    'Allen-Bradley',
+    'Solid Edge',
+    'Siemens NX',
+    'Rockwell',
+    'Mitsubishi',
+    'Omron',
+    'Schneider Electric',
+    'Codesys',
+  ]) {
+    const cleaned = policy.applyGuardrails(phrase, aiEnv());
+    assert.notEqual(cleaned, phrase, phrase);
+    assert.doesNotMatch(cleaned, /step\s*7|fusion|inventor|nx|twincat|allen|bradley|solid\s*edge|siemens|rockwell|mitsubishi|omron|schneider|codesys/i, phrase);
+  }
 });
 
 test('after-hours billing calls and complaint texts escalate', async () => {
