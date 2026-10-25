@@ -195,10 +195,19 @@ function createApp({
       console.error('Unknown event count failed');
     }
     let creditHandbacksPending = 0;
+    let creditHandbacksDead = 0;
+    let creditLedgerOk = true;
     try {
-      creditHandbacksPending = ledger.pending();
+      const ledgerHealth = ledger.health();
+      creditLedgerOk = ledgerHealth.ok === true;
+      creditHandbacksPending = creditLedgerOk ? ledgerHealth.pending : null;
+      creditHandbacksDead = creditLedgerOk ? ledgerHealth.dead : null;
+      if (!creditLedgerOk) console.error('Credit hand-back queue could not be read');
     } catch {
-      console.error('Credit hand-back count failed');
+      creditLedgerOk = false;
+      creditHandbacksPending = null;
+      creditHandbacksDead = null;
+      console.error('Credit hand-back queue could not be read');
     }
     let dataDirOk = false;
     try {
@@ -212,6 +221,8 @@ function createApp({
       aiEnabled: Boolean(anthropicClient),
       unknownEvents,
       creditHandbacksPending,
+      creditHandbacksDead,
+      creditLedgerOk,
       supportDataDirOk: dataDirOk,
     });
   });

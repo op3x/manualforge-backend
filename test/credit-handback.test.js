@@ -109,10 +109,12 @@ function anthropic() {
   };
 }
 
-function starterStripe() {
+function starterStripe({ failReadsAfterClear = 0 } = {}) {
   const calls = { updates: [] };
   const meta = { manuals_used: '0', plan: 'starter', credit_generation: '0', credit_hold: '' };
   const decrements = { count: 0 };
+  let clearArmed = false;
+  let readsLeft = failReadsAfterClear;
   const stripe = {
     checkout: {
       sessions: {
@@ -126,10 +128,17 @@ function starterStripe() {
       },
     },
     paymentIntents: {
-      retrieve: async () => ({ id: 'pi_1', metadata: { ...meta } }),
+      retrieve: async () => {
+        if (clearArmed && readsLeft > 0) {
+          readsLeft -= 1;
+          throw new Error('confirm read failed');
+        }
+        return { id: 'pi_1', metadata: { ...meta } };
+      },
       update: async (id, params) => {
         calls.updates.push(params.metadata);
         applyMeta(meta, params, decrements);
+        if (params.metadata && params.metadata.credit_hold === '') clearArmed = true;
         return { id, metadata: { ...meta } };
       },
     },
@@ -569,6 +578,8 @@ test('health reports only the pending hand-back count', async () => {
       assert.equal(health.status, 200);
       assert.equal(body.creditHandbacksPending, 1);
       assert.equal(typeof body.creditHandbacksPending, 'number');
+      assert.equal(body.creditHandbacksDead, 0);
+      assert.equal(body.creditLedgerOk, true);
       assert.equal(body.supportDataDirOk, true);
       const text = JSON.stringify(body);
       assert.equal(text.includes('pi_'), false);
@@ -577,6 +588,125 @@ test('health reports only the pending hand-back count', async () => {
     });
   } finally {
     ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a confirm read that fails after the hold clear still lets the job succeed once', async () => {
+  const paid = starterStripe({ failReadsAfterClear: 1 });
+  const app = createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: anthropic(),
+    renderPdf: async () => Buffer.from('%PDF-1.4\n%ok\n'),
+  });
+  await withServer(app, async (base) => {
+    const created = await postJob(base, 'cs_test_starter');
+    assert.equal(created.status, 202);
+    const done = await waitJob(base, (await created.json()).id);
+    assert.equal(done.status, 'succeeded');
+    assert.equal(paid.meta.manuals_used, '1');
+    assert.equal(paid.meta.credit_hold, undefined);
+    assert.equal(paid.decrements.count, 0);
+    const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+    assert.equal(pdf.status, 200);
+  });
+});
+
+test('an unreadable hand-back file is not reported as zero', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), '{', { mode: 0o600 });
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  try {
+    const app = createApp({
+      env: env({ SUPPORT_DATA_DIR: dir }),
+      stripe: holdStripe().stripe,
+      anthropic: null,
+      creditLedger: ledger,
+    });
+    await withServer(app, async (base) => {
+      const body = await (await fetch(`${base}/health`)).json();
+      assert.equal(body.creditHandbacksPending, null);
+      assert.equal(body.creditHandbacksDead, null);
+      assert.equal(body.creditLedgerOk, false);
+      assert.equal(logs.some((line) => line.includes('Credit hand-back queue could not be read')), true);
+      assert.equal(JSON.stringify(body).includes('pi_'), false);
+    });
+  } finally {
+    console.error = original;
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a queued hand-back for a missing payment intent is dead-lettered once', async () => {
+  const dir = tempDir();
+  const missing = {
+    paymentIntents: {
+      retrieve: async () => {
+        const err = new Error('No such payment_intent');
+        err.code = 'resource_missing';
+        err.statusCode = 404;
+        throw err;
+      },
+      update: async () => {
+        throw new Error('should not update a missing payment intent');
+      },
+    },
+  };
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([{ paymentIntentId: 'pi_missing', token: TOKEN }])}\n`);
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    await ledger.reconcile(missing, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS });
+    await ledger.reconcile(missing, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS });
+    const pending = JSON.parse(fs.readFileSync(path.join(dir, 'credit-handbacks.json'), 'utf8'));
+    const dead = JSON.parse(fs.readFileSync(path.join(dir, 'credit-handbacks-dead.json'), 'utf8'));
+    assert.deepEqual(pending, []);
+    assert.deepEqual(dead, [{ paymentIntentId: 'pi_missing', token: TOKEN }]);
+    const app = createApp({
+      env: env({ SUPPORT_DATA_DIR: dir }),
+      stripe: missing,
+      anthropic: null,
+      creditLedger: ledger,
+    });
+    await withServer(app, async (base) => {
+      const body = await (await fetch(`${base}/health`)).json();
+      assert.equal(body.creditHandbacksPending, 0);
+      assert.equal(body.creditHandbacksDead, 1);
+      assert.equal(body.creditLedgerOk, true);
+      assert.equal(JSON.stringify(body).includes('pi_'), false);
+      assert.equal(JSON.stringify(body).includes(TOKEN), false);
+    });
+  } finally {
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a credit record is fsynced before it is renamed', () => {
+  const dir = tempDir();
+  const events = [];
+  const origFsync = fs.fsyncSync;
+  const origRename = fs.renameSync;
+  fs.fsyncSync = (fd) => {
+    events.push('fsync');
+    return origFsync(fd);
+  };
+  fs.renameSync = (from, to) => {
+    if (String(to).endsWith('open-holds.json')) events.push('rename');
+    return origRename(from, to);
+  };
+  try {
+    const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+    ledger.note({ paymentIntentId: PI, token: TOKEN, heldAt: '2026-01-01T00:00:00.000Z' });
+    ledger.close();
+    assert.deepEqual(events, ['fsync', 'rename']);
+  } finally {
+    fs.fsyncSync = origFsync;
+    fs.renameSync = origRename;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
