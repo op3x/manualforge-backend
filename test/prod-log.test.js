@@ -532,3 +532,62 @@ test('verify-session reuses a session result for about 10 seconds', async () => 
     assert.equal(retrieves, 2);
   });
 });
+
+test('an unbranded checkout event logs only the last 4 characters of the session id', async () => {
+  const oursId = 'cs_test_nobrandq7n4';
+  const unknownId = 'cs_live_blankm3k8';
+  const stripe = {
+    webhooks: {
+      constructEvent(body) {
+        return JSON.parse(Buffer.isBuffer(body) ? body.toString('utf8') : String(body));
+      },
+    },
+  };
+  const app = createApp({ env: env(), stripe, anthropic: null });
+  const seen = await capture('log', () => capture('error', () => withServer(app, async (base) => {
+    const branded = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_nobrand',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: oursId,
+            object: 'checkout.session',
+            payment_status: 'paid',
+            metadata: { plan: 'starter' },
+          },
+        },
+      }),
+    });
+    assert.equal(branded.status, 200);
+    const blank = await fetch(`${base}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=ok' },
+      body: JSON.stringify({
+        id: 'evt_blank_checkout',
+        type: 'checkout.session.completed',
+        data: {
+          object: {
+            id: unknownId,
+            object: 'checkout.session',
+            payment_status: 'unpaid',
+            metadata: {},
+          },
+        },
+      }),
+    });
+    assert.equal(blank.status, 200);
+    assert.deepEqual(await blank.json(), { received: true });
+  })));
+  const logs = seen.lines.join('\n');
+  const errors = seen.value.lines.join('\n');
+  const combined = `${logs}\n${errors}`;
+  assert.match(logs, /checkout\.session\.completed q7n4 paid/);
+  assert.match(errors, /Webhook brand unknown checkout\.session\.completed evt_blank_checkout m3k8/);
+  assert.equal(combined.includes(oursId), false);
+  assert.equal(combined.includes(unknownId), false);
+  assert.equal(combined.includes('nobrand'), false);
+  assert.equal(combined.includes('blankm'), false);
+});

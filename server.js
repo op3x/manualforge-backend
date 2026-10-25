@@ -39,7 +39,7 @@ const {
   safeEqual,
 } = require('./lib/access-token');
 const { contentDisposition, downloadFileName, shortJobId, sourceName } = require('./lib/download-name');
-const { assertSessionId } = require('./lib/session-id');
+const { assertSessionId, maskSessionId } = require('./lib/session-id');
 const { FILE_LIMIT, overLengthField } = require('./lib/field-limits');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
@@ -259,7 +259,7 @@ function logWebhookEvent(event) {
     case 'checkout.session.completed':
     case 'checkout.session.async_payment_succeeded':
     case 'checkout.session.async_payment_failed':
-      console.log(event.type, object.id, object.payment_status);
+      console.log(event.type, maskSessionId(object.id), object.payment_status);
       break;
     case 'customer.subscription.created':
     case 'customer.subscription.updated':
@@ -283,6 +283,11 @@ function safeLogToken(value) {
   if (typeof value !== 'string') return 'unknown';
   if (!/^[A-Za-z0-9_.]{1,80}$/.test(value)) return 'unknown';
   return value;
+}
+
+function loggedObjectId(value) {
+  if (typeof value === 'string' && value.startsWith('cs_')) return maskSessionId(value);
+  return safeLogToken(value);
 }
 
 function isLoudUnknown(type) {
@@ -444,7 +449,7 @@ function createApp({
           'Webhook brand unknown',
           safeLogToken(event.type),
           safeLogToken(event.id),
-          safeLogToken(object && object.id),
+          loggedObjectId(object && object.id),
         );
         try {
           recordUnknownEvent(env, {
