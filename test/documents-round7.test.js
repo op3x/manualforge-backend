@@ -113,7 +113,7 @@ test('cooker guide alarm codes use the manual message for that code', async () =
   const cooker = await load(COOKER, 'cooker.L5X');
   const manual = alarmRows(cooker);
   const byCode = new Map(manual.map((row) => [row[0], row[1]]));
-  assert.ok(byCode.has('ALM-4'), [...byCode.keys()].join(' '));
+  assert.deepEqual([...byCode.keys()], ['ALM-1', 'ALM-2']);
   const rows = troubleCells(cooker);
   const seen = new Map();
   const causes = new Map();
@@ -290,8 +290,7 @@ test('tia and acd troubleshooting lead with their logic', async () => {
   const acd = await load(ACD, 'CuteLogix.ACD');
   const acdText = troubleCells(acd).map((cells) => cells.join(' ')).join('\n');
   const acdManual = alarmRows(acd).map((row) => `${row[0]} ${row[1]}`).join('\n');
-  assert.match(acdText, /ALM-1/);
-  assert.match(acdText, /First Out Fault/);
+  assert.equal(/First Out Fault/i.test(acdManual), false);
   assert.equal(/I count stuff/i.test(`${acdText}\n${acdManual}`), false);
   assert.match(acdText, /fault counter does not reach its preset/i);
   assert.match(acdText, /first out fault does not update/i);
@@ -328,6 +327,10 @@ test('real alarm messages stay and tag-shaped rows do not', () => {
         { text: 'Communication to an I/O module is lost.', cause: 'The module does not answer.', remedy: 'Check the cable.' },
         { text: 'Drive faulted status', cause: 'The drive is faulted.', remedy: 'Reset the drive.' },
         { text: 'The drive reports a fault condition.', cause: 'A drive fault is present.', remedy: 'Clear the drive fault.' },
+        { text: 'pH probe failed', cause: 'The pH probe does not answer.', remedy: 'Check the probe.' },
+        { text: 'MixTank level high', cause: 'The mix tank level is high.', remedy: 'Stop the fill.' },
+        { text: 'Motor overload on ConveyorA', cause: 'The conveyor motor overload is tripped.', remedy: 'Reset the overload.' },
+        { text: 'CookerTemp', cause: 'A tag name.', remedy: 'Do not list this as an alarm.' },
       ],
       groups: [],
       housekeeping: [],
@@ -339,10 +342,10 @@ test('real alarm messages stay and tag-shaped rows do not', () => {
   upsertTag(project, { name: 'Cfg_ZoneEnable', dataType: 'BOOL', description: 'Zone Master Clear Fault Enable' });
   const messages = alarmRows(project).map((row) => row[1]);
   const joined = messages.join('\n');
-  for (const kept of [/temperature high-high/i, /start permissive lost/i, /steam valve failed to open/i, /conveyor motor overload/i]) {
+  for (const kept of [/temperature high-high/i, /start permissive lost/i, /steam valve failed to open/i, /conveyor motor overload/i, /pH probe failed/i, /MixTank level high/i, /Motor overload on ConveyorA/i]) {
     assert.equal(messages.some((row) => kept.test(row)), true, String(kept));
   }
-  assert.equal(/Alarm Status To HMI|AOI Device Clear Fault|Zone Master Clear Fault Enable|Sts Fault Alm/i.test(joined), false);
+  assert.equal(/Alarm Status To HMI|AOI Device Clear Fault|Zone Master Clear Fault Enable|Sts Fault Alm|\bCookerTemp\b/i.test(joined), false);
   assert.equal(messages.filter((row) => /communication|module/i.test(row)).length, 1);
   assert.equal(messages.filter((row) => /\bdrive\b/i.test(row)).length, 1);
   const guide = plain(custom(project, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
@@ -351,6 +354,39 @@ test('real alarm messages stay and tag-shaped rows do not', () => {
   assert.match(guide, /Steam valve failed to open/i);
   assert.match(guide, /Conveyor motor overload/i);
   assert.equal(/Alarm Status To HMI|Device Clear Fault|Sts Fault Alm/i.test(guide), false);
+  assert.match(guide, /pH probe failed/i);
+  assert.match(guide, /MixTank level high/i);
+  assert.match(guide, /Motor overload on ConveyorA/i);
+});
+
+test('cooker setpoints, acknowledgements, and permissive bits are not alarm rows', async () => {
+  const cooker = await load(COOKER, 'cooker.L5X');
+  const manual = alarmRows(cooker).map((row) => row.join(' ')).join('\n');
+  const guide = troubleCells(cooker).map((cells) => cells.join(' ')).join('\n');
+  const joined = `${manual}\n${guide}`;
+  for (const banned of [
+    /Over Range Fault Setpoint/i,
+    /Under Range Fault Setpoint/i,
+    /Alarm Acknowledge/i,
+    /Permissive OK/i,
+    /L_ORFaultSetpoint/,
+    /L_URFaultSetpoint/,
+    /\bALM_ACK\b/,
+    /\bDevice_OK\b/,
+  ]) {
+    assert.equal(banned.test(joined), false, String(banned));
+  }
+  const project = emptyProject();
+  upsertTag(project, { name: 'L_ORFaultSetpoint', dataType: 'REAL', description: 'Over Range Fault Setpoint' });
+  upsertTag(project, { name: 'L_URFaultSetpoint', dataType: 'REAL', description: 'Under Range Fault Setpoint' });
+  upsertTag(project, { name: 'SpeedSP', dataType: 'REAL', description: 'Auto Speed SP' });
+  upsertTag(project, { name: 'FaultPreset', dataType: 'DINT', description: 'Fault Preset' });
+  upsertTag(project, { name: 'FirstOutFault', dataType: 'DINT', description: 'First Out Fault' });
+  upsertTag(project, { name: 'ALM_ACK', dataType: 'BOOL', description: 'Alias to Zone Master Alarm Acknowledge' });
+  upsertTag(project, { name: 'Device_OK', dataType: 'BOOL', description: 'Device Energize Permissive OK and Not in Alarm State for Auto Control' });
+  upsertTag(project, { name: 'TankAlarm', dataType: 'BOOL', description: 'Tank level high' });
+  const rows = alarmRows(project).map((row) => row[1]);
+  assert.deepEqual(rows, ['Tank level high']);
 });
 
 test('a virtual axis does not get a position-fault row', () => {

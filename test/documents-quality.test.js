@@ -155,8 +155,10 @@ test('a valve actuator is pneumatic, and empty logic is skipped', async () => {
   assert.equal(skipped.skipped, undefined);
   assert.notEqual(skipped.skipped, TROUBLE_SKIP);
   const acdGuide = htmlOf(skipped);
-  assert.match(acdGuide, /ALM-[12]/);
-  assert.equal(/did not include alarm text/i.test(acdGuide), false);
+  assert.equal(/ALM-\d+/.test(acdGuide), false);
+  assert.match(acdGuide, /did not include alarm text/i);
+  assert.match(acdGuide, /fault counter does not reach its preset/i);
+  assert.match(acdGuide, /first out fault does not update/i);
   assert.equal(/Not determinable/i.test(acdGuide), false);
 });
 

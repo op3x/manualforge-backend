@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseUploads } = require('../lib/parsers');
 const { renderHtml } = require('../lib/manual/html');
-const { buildDocument } = require('../lib/manual/assemble');
+const { buildDocument, alarmRows } = require('../lib/manual/assemble');
 const { readablePartName } = require('../lib/presentation');
 const { buildPmSchedule, buildShutdown, buildStartup, buildCustomDocument } = require('../lib/documents/content');
 const { emptyProject, upsertTag, addRoutine } = require('../lib/project');
@@ -98,8 +98,8 @@ test('controller maintenance and manual alarms fill a project with no field devi
   assert.equal(/steam trap/i.test(schedule), false);
 
   const guide = htmlOf(custom(acd, 'troubleshooting', 'Alarm and Troubleshooting Guide'));
-  assert.match(guide, /ALM-1/);
-  assert.match(guide, /First Out Fault/);
+  const acdManual = alarmRows(acd).map((row) => row[1]).join('\n');
+  assert.equal(/First Out Fault/i.test(acdManual), false);
   assert.equal(/I count stuff/.test(guide), false);
   assert.match(guide, /fault counter does not reach its preset/i);
   assert.match(guide, /first out fault does not update/i);

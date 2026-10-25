@@ -293,8 +293,10 @@ test('troubleshooting and spare parts are still delivered when alarm text or par
     assert.match(partsHtml, /Parts in this upload/);
     assert.match(partsHtml, /Add part numbers/);
     if (name === 'acd') {
-      assert.match(guideHtml, /ALM-[12]/);
-      assert.equal(/did not include alarm text/i.test(guideHtml), false);
+      assert.equal(/ALM-\d+/.test(guideHtml), false);
+      assert.match(guideHtml, /did not include alarm text/i);
+      assert.match(guideHtml, /fault counter does not reach its preset/i);
+      assert.match(guideHtml, /first out fault does not update/i);
     } else if (name !== 'tia') assert.match(guideHtml, /did not include alarm text/i);
   }
 
