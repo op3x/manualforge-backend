@@ -22,6 +22,15 @@ const {
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { generateManual } = require('./lib/pipeline');
+const { generatePackage } = require('./lib/documents/generate');
+const { resolveDocumentBranding } = require('./lib/documents/branding');
+const {
+  selectionFromRequest,
+  requestsExtras,
+  planAllowsExtraDocuments,
+  UPGRADE_MESSAGE,
+} = require('./lib/documents/selection');
+const { safeFileName } = require('./lib/documents/files');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
@@ -184,7 +193,7 @@ function createApp({
     }
   });
 
-  async function runPaid(req, res, { reserveAtStart, respond }) {
+  async function runPaid(req, res, { reserveAtStart, respond, documents }) {
     const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
     const files = collectFiles(req);
     if (!files.length) {
@@ -194,6 +203,21 @@ function createApp({
       throw err;
     }
     const project = await parseUploads(files, fieldsFrom(req), env);
+    let selection = null;
+    if (documents) {
+      selection = selectionFromRequest(req);
+      if (selection.requestsExtras && !planAllowsExtraDocuments(access.plan)) {
+        const err = new Error(UPGRADE_MESSAGE);
+        err.status = 403;
+        err.expose = true;
+        throw err;
+      }
+    } else if (requestsExtras(req)) {
+      const err = new Error('Additional documents are available from POST /jobs.');
+      err.status = 400;
+      err.expose = true;
+      throw err;
+    }
     if (!anthropicClient) {
       const err = new Error('Manual generation is temporarily unavailable.');
       err.status = 503;
@@ -206,7 +230,7 @@ function createApp({
       credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env);
     }
     try {
-      const result = await respond(access, files, credit, project);
+      const result = await respond(access, files, credit, project, selection);
       return result;
     } catch (err) {
       if (credit) {
@@ -223,29 +247,48 @@ function createApp({
   app.post('/jobs', upload.fields([{ name: 'file', maxCount: 25 }, { name: 'files', maxCount: 25 }]), (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: true,
-      respond: async (access, files, credit, project) => {
+      documents: true,
+      respond: async (access, files, credit, project, selection) => {
         const job = store.create();
+        job.documents = selection.entries.map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          kind: entry.kind,
+          status: entry.status,
+          reason: entry.reason,
+        }));
         res.status(202).json(publicJob(job));
         job.status = 'running';
         job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
         try {
-          const result = await generateManual({
+          const result = await generatePackage({
             files,
             project,
             fields: fieldsFrom(req),
             anthropic: anthropicClient,
             env,
             renderPdf,
+            branding: resolveDocumentBranding(access),
+            selection,
             onProgress(stage, percent, message) {
               job.status = 'running';
               job.progress = { stage, percent, message };
             },
           });
-          store.savePdf(job.id, result.pdf);
-          job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
+          for (const output of result.outputs) store.saveArtifact(job.id, output.id, output.pdf);
+          if (result.combined) store.saveArtifact(job.id, 'combined', result.combined);
+          if (result.zip) store.saveArtifact(job.id, 'zip', result.zip);
+          job.documents = result.documents;
+          job.coverage = result.coverage
+            ? { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent }
+            : null;
           job.warnings = result.warnings || [];
           job.status = 'succeeded';
-          job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
+          job.progress = {
+            stage: 'done',
+            percent: 100,
+            message: selection.requestsExtras ? 'Documents are ready' : 'Manual is ready',
+          };
         } catch (err) {
           if (credit) {
             try {
@@ -272,18 +315,69 @@ function createApp({
     return res.json(publicJob(job));
   });
 
+  function sendFile(res, body, type, filename) {
+    res.set({
+      'Content-Type': type,
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Length': body.length,
+    });
+    return res.send(body);
+  }
+
+  function readyJob(req, res) {
+    const job = store.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: 'Job not found or expired.' });
+      return null;
+    }
+    if (job.status !== 'succeeded') {
+      res.status(409).json({ error: 'Document is not ready.' });
+      return null;
+    }
+    return job;
+  }
+
   app.get('/jobs/:id/pdf', (req, res) => {
     const job = store.get(req.params.id);
     if (!job) return res.status(404).json({ error: 'Job not found or expired.' });
     if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
     const pdf = store.readPdf(job.id);
-    if (!pdf) return res.status(404).json({ error: 'Job not found or expired.' });
-    res.set({
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': 'attachment; filename="manual.pdf"',
-      'Content-Length': pdf.length,
-    });
-    return res.send(pdf);
+    if (!pdf) return res.status(404).json({ error: 'This job does not include the operating manual.' });
+    return sendFile(res, pdf, 'application/pdf', 'manual.pdf');
+  });
+
+  app.get('/jobs/:id/combined.pdf', (req, res) => {
+    const job = readyJob(req, res);
+    if (!job) return undefined;
+    const pdf = store.readArtifact(job.id, 'combined');
+    if (!pdf) return res.status(404).json({ error: 'Combined document is not available.' });
+    return sendFile(res, pdf, 'application/pdf', 'all-documents.pdf');
+  });
+
+  app.get('/jobs/:id/documents.zip', (req, res) => {
+    const job = readyJob(req, res);
+    if (!job) return undefined;
+    const zip = store.readArtifact(job.id, 'zip');
+    if (!zip) return res.status(404).json({ error: 'Document archive is not available.' });
+    return sendFile(res, zip, 'application/zip', 'documents.zip');
+  });
+
+  app.get('/jobs/:id/documents/:docId', (req, res) => {
+    const job = readyJob(req, res);
+    if (!job) return undefined;
+    const docId = String(req.params.docId || '');
+    if (!/^[a-z][a-z0-9_]{0,47}$/.test(docId)) return res.status(404).json({ error: 'Document not found.' });
+    const listed = (job.documents || []).find((doc) => doc.id === docId);
+    if (!listed || listed.status !== 'ready') return res.status(404).json({ error: 'That document was not generated.' });
+    let pdf;
+    try {
+      pdf = store.readArtifact(job.id, docId);
+    } catch (err) {
+      if (err && err.expose) return res.status(404).json({ error: 'Document not found.' });
+      throw err;
+    }
+    if (!pdf) return res.status(404).json({ error: 'Document not found or expired.' });
+    return sendFile(res, pdf, 'application/pdf', safeFileName(listed.title, docId));
   });
 
   app.post('/generate-manual', upload.single('file'), (req, res, next) => {
@@ -297,6 +391,7 @@ function createApp({
           anthropic: anthropicClient,
           env,
           renderPdf,
+          branding: resolveDocumentBranding(access),
         });
         if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
         res.set({

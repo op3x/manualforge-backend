@@ -1,0 +1,32 @@
+FUNCTION_BLOCK CellSequence
+VAR
+  StartButton : BOOL; // Operator start button
+  StopButton : BOOL; // Normal stop button
+  EmergencyStop : BOOL; // Emergency stop circuit
+  GuardDoor : BOOL; // Guard door interlock
+  ResetButton : BOOL; // Fault reset button
+  HomeRequest : BOOL; // Axis homing request
+  PartSensor : BOOL; // Part present sensor
+  AirSupply : BOOL; // Compressed air supply healthy
+  ConveyorMotor : BOOL; // Conveyor motor run command
+  CylinderValve : BOOL; // Pneumatic cylinder valve
+  HydraulicPump : BOOL; // Hydraulic pump enable
+  LiftBrake : BOOL; // Vertical lift brake
+  GearboxLube : BOOL; // Gearbox lubrication point
+  ReturnFilter : BOOL; // Hydraulic return filter
+END_VAR
+(* Start the conveyor when the guard is closed and the emergency stop is healthy. *)
+IF GuardDoor AND EmergencyStop AND StartButton AND NOT StopButton THEN
+  ConveyorMotor := TRUE;
+END_IF;
+IF StopButton OR NOT EmergencyStop OR NOT GuardDoor THEN
+  ConveyorMotor := FALSE;
+  CylinderValve := FALSE;
+END_IF;
+IF HomeRequest AND EmergencyStop THEN
+  LiftBrake := FALSE;
+END_IF;
+IF AirSupply AND PartSensor THEN
+  CylinderValve := TRUE;
+END_IF;
+END_FUNCTION_BLOCK
