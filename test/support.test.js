@@ -17,6 +17,8 @@ const {
   SMS_CONSENT_VERSION,
   SMS_OPT_IN_CONFIRMATION,
   VOICEMAIL_RECORDING_NOTICE,
+  WEB_OPT_IN_LIMIT,
+  WEB_OPT_IN_WINDOW_MS,
   WELCOME,
   createConsentLimiter,
   customerAlertsAllowed,
@@ -893,7 +895,7 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
     });
     assert.equal(res.status, 201);
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://manualos.com');
-    assert.deepEqual(await res.json(), { ok: true, confirmationSent: true });
+    assert.deepEqual(await res.json(), { ok: true, confirmationSent: true, pending: false });
     const [record] = h.store.listConsents();
     assert.equal(record.phone, '+15551212000');
     assert.equal(record.consentTextVersion, SMS_CONSENT_VERSION);
@@ -935,6 +937,14 @@ test('website SMS consent stores phone, version, time, IP, and source', async ()
       }),
     });
     assert.equal(wrongLabel.status, 400);
+    assert.equal(h.sent.length, 1);
+    const missingText = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
+      body: JSON.stringify({ phone: '+15551212003', consentTextVersion: SMS_CONSENT_VERSION, source: 'website' }),
+    });
+    assert.equal(missingText.status, 400);
+    assert.equal(h.store.listConsents().some((row) => row.phone === '+15551212003'), false);
     assert.equal(h.sent.length, 1);
     const missing = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
@@ -992,13 +1002,32 @@ test('conversation texts are not alert consent, and a missed confirmation does n
     const revived = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: 'https://manualos.com' },
-      body: JSON.stringify({ phone: '+15551119002', consentTextVersion: SMS_CONSENT_VERSION, source: 'support-page' }),
+      body: JSON.stringify({
+        phone: '+15551119002',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'support-page',
+      }),
     });
-    assert.deepEqual(await revived.json(), { ok: true, confirmationSent: true });
+    assert.deepEqual(await revived.json(), { ok: true, confirmationSent: false, pending: true });
+    assert.equal(h.store.isOptedOut('+15551119002'), true);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551119002', { nowMs: clock }), false);
+    const pending = h.store.listConsents().find((row) => row.phone === '+15551119002');
+    assert.equal(pending.pending, true);
+    assert.equal(pending.alerts, false);
+    assert.equal(pending.consentTextVersion, SMS_CONSENT_VERSION);
+    assert.equal(pending.consentText, SMS_CONSENT_LABEL);
+    assert.equal(h.sent.some((message) => message.to === '+15551119002'), false);
+    assert.equal(h.calls.length, 0);
+    const started = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119002',
+      Body: 'START',
+      MessageSid: 'SM_PENDING_START',
+    });
+    assert.ok((await started.text()).includes(SMS_OPT_IN_CONFIRMATION.replace(/&/g, '&amp;')));
     assert.equal(h.store.isOptedOut('+15551119002'), false);
     assert.equal(customerAlertsAllowed(h.store.listConsents(), '+15551119002', { nowMs: clock }), true);
-    assert.equal(h.sent.at(-1).body, SMS_OPT_IN_CONFIRMATION);
-    assert.equal(h.sent.at(-1).to, '+15551119002');
+    assert.equal(h.sent.some((message) => message.to === '+15551119002'), false);
     assert.equal(h.calls.length, 0);
 
     const menu = await postTwilio(base, h.env, '/api/twilio/voice/menu', {
@@ -1058,10 +1087,15 @@ test('conversation texts are not alert consent, and a missed confirmation does n
     const res = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: '+15551119005', consentTextVersion: SMS_CONSENT_VERSION, source: 'website' }),
+      body: JSON.stringify({
+        phone: '+15551119005',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'website',
+      }),
     });
     assert.equal(res.status, 201);
-    assert.deepEqual(await res.json(), { ok: true, confirmationSent: false });
+    assert.deepEqual(await res.json(), { ok: true, confirmationSent: false, pending: false });
     assert.equal(unsent.listConsents()[0].consentTextVersion, SMS_CONSENT_VERSION);
     assert.equal(unsent.listConsents()[0].consentText, SMS_CONSENT_LABEL);
     assert.equal(calls.length, 0);
@@ -1072,9 +1106,13 @@ test('conversation texts are not alert consent, and a missed confirmation does n
     const res = await fetch(`${base}/api/support/sms-consent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: '+15551119006', consentTextVersion: SMS_CONSENT_VERSION }),
+      body: JSON.stringify({
+        phone: '+15551119006',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+      }),
     });
-    assert.deepEqual(await res.json(), { ok: true, confirmationSent: false });
+    assert.deepEqual(await res.json(), { ok: true, confirmationSent: false, pending: false });
     assert.equal(skipped.sent.length, 0);
     assert.equal(skipped.calls.length, 0);
     assert.equal(skipped.store.listConsents()[0].scope, ALERT_SCOPE);
@@ -1089,6 +1127,90 @@ test('conversation texts are not alert consent, and a missed confirmation does n
   assert.equal(customerAlertsAllowed([
     { phone: '+15551119009', consentTextVersion: SMS_CONSENT_VERSION, source: 'website', alerts: true, scope: ALERT_SCOPE, consentText: SMS_CONSENT_LABEL },
   ], '+15551119009', { optedOut: true, nowMs: at }), false);
+});
+
+test('a stopped number stays stopped until it texts, and web opt-ins are capped', async () => {
+  const at = Date.parse('2026-10-25T12:00:00.000Z');
+  let clock = at;
+  const h = harness({ supportNow: () => clock });
+  const consentBody = (phone) => ({
+    phone,
+    consentTextVersion: SMS_CONSENT_VERSION,
+    consentText: SMS_CONSENT_LABEL,
+    source: 'website',
+  });
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const open = '+15551119200';
+    for (let i = 0; i < WEB_OPT_IN_LIMIT; i += 1) {
+      const res = await fetch(`${base}/api/support/sms-consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(consentBody(open)),
+      });
+      assert.equal(res.status, 201, `open ${i}`);
+      assert.deepEqual(await res.json(), { ok: true, confirmationSent: i === 0, pending: false });
+    }
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].to, open);
+    assert.equal(h.sent[0].body, SMS_OPT_IN_CONFIRMATION);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.store.isOptedOut(open), false);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), open, { nowMs: clock }), true);
+    const capped = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(consentBody(open)),
+    });
+    assert.equal(capped.status, 429);
+    assert.equal(h.store.listConsents().filter((row) => row.phone === open).length, WEB_OPT_IN_LIMIT);
+    assert.equal(h.sent.length, 1);
+
+    clock = at + WEB_OPT_IN_WINDOW_MS;
+    const again = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(consentBody(open)),
+    });
+    assert.deepEqual(await again.json(), { ok: true, confirmationSent: true, pending: false });
+    assert.equal(h.sent.length, 2);
+    assert.equal(h.sent[1].to, open);
+
+    const stopped = '+15551119201';
+    h.store.optOut(stopped, 'sms');
+    const before = h.sent.length;
+    for (let i = 0; i < WEB_OPT_IN_LIMIT; i += 1) {
+      const res = await fetch(`${base}/api/support/sms-consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(consentBody(stopped)),
+      });
+      assert.equal(res.status, 201, `stopped ${i}`);
+      assert.deepEqual(await res.json(), { ok: true, confirmationSent: false, pending: true });
+    }
+    assert.equal(h.sent.length, before);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.store.isOptedOut(stopped), true);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), stopped, { nowMs: clock }), false);
+    const blocked = await fetch(`${base}/api/support/sms-consent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(consentBody(stopped)),
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(h.store.isOptedOut(stopped), true);
+
+    const yes = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: stopped,
+      Body: 'YES',
+      MessageSid: 'SM_PENDING_YES',
+    });
+    assert.ok((await yes.text()).includes(SMS_OPT_IN_CONFIRMATION.replace(/&/g, '&amp;')));
+    assert.equal(h.store.isOptedOut(stopped), false);
+    assert.equal(customerAlertsAllowed(h.store.listConsents(), stopped, { nowMs: clock }), true);
+    assert.equal(h.sent.length, before);
+    assert.equal(h.calls.length, 0);
+  });
 });
 
 function spokenCard() {
@@ -1471,7 +1593,12 @@ test('consent is rate limited, append-only, and split from the other files', asy
           'X-Real-IP': `203.0.113.${i}`,
           'X-Forwarded-For': `203.0.113.${i}, 198.51.100.10`,
         },
-        body: JSON.stringify({ phone: `+1555400${String(i).padStart(4, '0')}`, consentTextVersion: SMS_CONSENT_VERSION, source: 'form' }),
+        body: JSON.stringify({
+          phone: `+1555400${String(i).padStart(4, '0')}`,
+          consentTextVersion: SMS_CONSENT_VERSION,
+          consentText: SMS_CONSENT_LABEL,
+          source: 'form',
+        }),
       });
       assert.equal(res.status, 201, `consent ${i}`);
     }
@@ -1482,7 +1609,12 @@ test('consent is rate limited, append-only, and split from the other files', asy
         'X-Real-IP': '198.51.100.99',
         'X-Forwarded-For': '198.51.100.99, 198.51.100.10',
       },
-      body: JSON.stringify({ phone: '+15554009999', consentTextVersion: SMS_CONSENT_VERSION, source: 'form' }),
+      body: JSON.stringify({
+        phone: '+15554009999',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'form',
+      }),
     });
     assert.equal(blocked.status, 429);
     assert.equal(h.store.listConsents().length, CONSENT_LIMIT);
@@ -1494,7 +1626,12 @@ test('consent is rate limited, append-only, and split from the other files', asy
         'X-Real-IP': '203.0.113.50',
         'X-Forwarded-For': '203.0.113.50, 198.51.100.11',
       },
-      body: JSON.stringify({ phone: '+15554008888', consentTextVersion: SMS_CONSENT_VERSION, source: 'form' }),
+      body: JSON.stringify({
+        phone: '+15554008888',
+        consentTextVersion: SMS_CONSENT_VERSION,
+        consentText: SMS_CONSENT_LABEL,
+        source: 'form',
+      }),
     });
     assert.equal(other.status, 201);
     assert.equal(h.store.listConsents().at(-1).ip, '198.51.100.11');
