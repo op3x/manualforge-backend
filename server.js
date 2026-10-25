@@ -23,6 +23,7 @@ const {
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
+const { redactCustomerLog } = require('./lib/redact-log');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
@@ -31,10 +32,10 @@ function createStripe(env) {
 
 function sendError(res, err) {
   if (err && err.expose) {
-    if (err.logMessage) console.error(err.logMessage);
+    if (err.logMessage) console.error(redactCustomerLog(err.logMessage));
     return res.status(err.status || 500).json({ error: err.message });
   }
-  console.error(err && err.stack ? err.stack : err);
+  console.error(redactCustomerLog(err && err.stack ? err.stack : err));
   return res.status(500).json({ error: 'Internal server error' });
 }
 
@@ -236,7 +237,7 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
               console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
             }
           }
-          console.error(err && err.logMessage ? err.logMessage : (err && err.message));
+          console.error(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message)));
           job.status = 'failed';
           job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
           job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
@@ -297,7 +298,7 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err && err.expose) return sendError(res, err);
-    console.error(err && err.stack ? err.stack : err);
+    console.error(redactCustomerLog(err && err.stack ? err.stack : err));
     if (err && err.name === 'MulterError') {
       const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
       return res.status(400).json({ error: message });
