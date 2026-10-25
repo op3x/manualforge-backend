@@ -42,6 +42,29 @@ function answer(reply, extra = {}) {
   };
 }
 
+function allowVerdict() {
+  return { choices: [{ message: { content: '{"refund":false,"leak":false}' } }] };
+}
+
+function isStrictVerdict(result) {
+  const content = result && result.choices && result.choices[0] && result.choices[0].message
+    ? result.choices[0].message.content
+    : '';
+  if (typeof content !== 'string') return false;
+  const text = content.trim();
+  if (text === 'allow' || text === 'block') return true;
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const keys = Object.keys(value);
+    if (keys.length === 1 && (value.verdict === 'allow' || value.verdict === 'block')) return true;
+    return keys.length === 2 && typeof value.refund === 'boolean' && typeof value.leak === 'boolean'
+      && keys.every((key) => key === 'refund' || key === 'leak');
+  } catch {
+    return false;
+  }
+}
+
 function harness(extra = {}) {
   const sent = [];
   const calls = [];
@@ -83,7 +106,9 @@ function harness(extra = {}) {
     },
     supportComplete: async (request) => {
       completions.push(request);
-      return completeImpl(request);
+      const result = await completeImpl(request);
+      if (request && request.maxTokens === 60 && !isStrictVerdict(result)) return allowVerdict();
+      return result;
     },
     supportNow: now,
   });
@@ -255,7 +280,10 @@ test('policy facts, budget math, guardrails, and caps', async () => {
     state: state(),
     env,
     spentUsd: 0,
-    complete: async () => answer('Open the Rockwell project in Siemens software.'),
+    complete: async (request) => {
+      if (request.maxTokens === 60) return allowVerdict();
+      return answer('Open the Rockwell project in Siemens software.');
+    },
   });
   assert.doesNotMatch(brand.reply, /rockwell|siemens/i);
   assert.match(brand.reply, /PLC vendor/);
@@ -761,7 +789,9 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     assert.match(cardXml, /https:\/\/manualos\.com/);
     assert.doesNotMatch(cardXml, /4111/);
     assert.equal(h.completions.length, 2);
-    assert.equal(h.sent.length, 0);
+    assert.equal(h.sent.length, 1);
+    assert.match(h.sent[0].body, /billing/i);
+    assert.match(h.sent[0].body, /CANCEL/);
 
     const angry = await postTwilio(base, h.env, '/api/twilio/sms', {
       From: '+15551114444',
@@ -769,8 +799,8 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
       MessageSid: 'SM_ANGRY',
     });
     assert.match(await angry.text(), /person will follow up/);
-    assert.equal(h.sent.length, 1);
-    assert.match(h.sent[0].body, /furious/);
+    assert.equal(h.sent.length, 2);
+    assert.match(h.sent[1].body, /furious/);
     assert.equal(h.completions.length, 2);
 
     h.store.saveThread('+15551115555', { turns: policy.SMS_TURN_CAP, lowConfidence: 0, history: [], updatedAt: '2026-10-25T00:00:00.000Z' });
@@ -781,7 +811,7 @@ test('SMS keywords, opt-in, escalation, budget, and card refusal', async () => {
     });
     assert.match(await capped.text(), /person/);
     assert.equal(h.completions.length, 2);
-    assert.equal(h.sent.length, 2);
+    assert.equal(h.sent.length, 3);
   });
 
   const budget = harness({ LLM_MONTHLY_BUDGET_USD: '0.5' });
@@ -1029,7 +1059,10 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
     state: session,
     env,
     spentUsd: 0,
-    complete: async () => answer('Noted 4111111111111111 already.'),
+    complete: async (request) => {
+      if (request.maxTokens === 60) return allowVerdict();
+      return answer('Noted 4111111111111111 already.');
+    },
   });
   let payload = '';
   await policy.triageTurn({
@@ -1059,8 +1092,9 @@ test('review guardrails: cards, handoff words, refunds, brands, and idle threads
     env,
     spentUsd: 0,
     now: clock,
-    complete: async () => {
+    complete: async (request) => {
       called += 1;
+      if (request.maxTokens === 60) return allowVerdict();
       return answer('Starter is $39 one-time for 3 manuals.');
     },
   });
@@ -2849,4 +2883,348 @@ test('round 6 cards, split history, refund promises, opt-out, billing, and ident
     const cleaned = policy.applyGuardrails(phrase, env);
     assert.doesNotMatch(cleaned, /schneider|claude|open-?ai|gpt\s*4|gemini|llama|\bmeta\b|mistral|\bgoogle\b/i, phrase);
   }
+});
+
+test('round 7 review: cards, guard, refunds, opt-out, and timeouts', async () => {
+  const env = aiEnv();
+  assert.equal(policy.MODEL_TIMEOUT_MS, 9000);
+  assert.equal(policy.GUARD_TIMEOUT_MS, 4000);
+  assert.ok(policy.MODEL_TIMEOUT_MS + policy.GUARD_TIMEOUT_MS < 15000);
+
+  for (const phrase of ['😀 4111', 'hi 😀 there 12', 'I love it 👍 ok 5']) {
+    assert.doesNotThrow(() => policy.classify(phrase), phrase);
+    assert.equal(policy.classify(phrase), '', phrase);
+    const decision = await policy.triageTurn({
+      channel: 'sms',
+      text: phrase,
+      state: state(),
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        if (request.maxTokens === 60) return allowVerdict();
+        return answer('Starter is $39 one-time for 3 manuals.');
+      },
+    });
+    assert.doesNotMatch(decision.reply, /Something went wrong/i, phrase);
+    assert.match(decision.reply, /\$39/, phrase);
+  }
+
+  const siemens = 'Siemens 6ES7 315-2EH14-0AB0 and 6ES7 214-1AG40-0XB0';
+  const serial = 'Serial 6011 2004 5531 0027';
+  assert.equal(policy.containsCardNumber(siemens), false);
+  assert.equal(policy.redactCardNumbers(siemens), siemens);
+  assert.equal(policy.containsCardNumber(serial), false);
+  assert.equal(policy.redactCardNumbers(serial), serial);
+  assert.equal(policy.applyGuardrails(`Installed ${serial}.`, env), `Installed ${serial}.`);
+
+  const adjacent = [
+    ['call 815 555 0123, card 4111 1111 1111 1111', /815 555 0123/],
+    ['qty 2 card 4111 1111 1111 1111', /qty 2/],
+    ['4111 1111 1111 1111 and 5555 5555 5555 4444', null],
+    ['card 4111 1111 1111 1111 04 29 123', null],
+    ['visa 1 of 2: 4111 1111 1111 1111', /visa 1 of 2/],
+    ['Order 77 card 4111 1111 1111 1111 exp 12 28', /Order 77/],
+    ['ref 998841111111111111117788', /9988/],
+    ['order #A-20261025-4111111111111111-77', /20261025/],
+    ['4222222222222', null],
+    ['30569309025904', null],
+    ['675900000000', null],
+    ['6759000000000000005', null],
+    ['tarjeta cuatro uno uno uno uno uno uno uno uno uno uno uno uno uno uno uno', /tarjeta/],
+    ['forty one eleven eleven eleven eleven eleven eleven eleven', null],
+    ['4lll llll llll llll', null],
+    ['6O11111111111117', null],
+  ];
+  for (const [phrase, keep] of adjacent) {
+    const redacted = policy.redactCardNumbers(phrase);
+    assert.doesNotMatch(redacted, /4111|4222|3056|5555|6759|4lll|6O11|cuatro|forty/i, phrase);
+    assert.doesNotMatch(redacted, /\u20E3/, phrase);
+    if (keep) assert.match(redacted, keep, phrase);
+    const decision = await policy.triageTurn({
+      channel: 'sms',
+      text: phrase,
+      state: state(),
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        assert.equal(request.maxTokens, 60, phrase);
+        return { choices: [{ message: { content: '{"refund":false,"leak":false}' } }] };
+      },
+    });
+    assert.doesNotMatch(`${decision.reply} ${decision.summary}`, /4111|4222|3056|5555|6759|cuatro uno|forty one/i, phrase);
+  }
+  const keycaps = ['4', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1'].map((digit) => `${digit}\uFE0F\u20E3`).join(' ');
+  assert.equal(policy.containsCardNumber(keycaps), true);
+  assert.doesNotMatch(policy.redactCardNumbers(keycaps), /4111|\u20E3|\uFE0F/);
+
+  async function script(parts) {
+    const session = state();
+    let mainCalls = 0;
+    let leaked = false;
+    for (const text of parts) {
+      await policy.triageTurn({
+        channel: 'sms',
+        text,
+        state: session,
+        env,
+        spentUsd: 0,
+        complete: async (request) => {
+          if (request.maxTokens === 200) {
+            mainCalls += 1;
+            const blob = JSON.stringify(request.messages);
+            if (/4111/.test(blob) && /1111 1111/.test(blob)) leaked = true;
+            if (/3782/.test(blob) && /10005/.test(blob)) leaked = true;
+          }
+          if (request.maxTokens === 60) return { choices: [{ message: { content: '{"refund":false,"leak":false}' } }] };
+          return answer('Noted.');
+        },
+      });
+    }
+    return { session, mainCalls, leaked };
+  }
+  const four = await script(['4111', 'thanks for waiting', '1111', 'got it', '1111', 'one moment', '1111']);
+  assert.equal(four.mainCalls, 6);
+  assert.equal(four.leaked, false);
+  assert.doesNotMatch(JSON.stringify(four.session.history), /4111/);
+  const five = await script(['4111', 'ok', '1111', 'sure', '1111', 'yep', '11', 'almost', '11']);
+  assert.equal(five.mainCalls, 8);
+  assert.doesNotMatch(JSON.stringify(five.session.history), /4111/);
+  const amex = await script(['3782', 'hang on', '822463', 'still here', '10005']);
+  assert.equal(amex.mainCalls, 4);
+  assert.equal(amex.leaked, false);
+  assert.doesNotMatch(JSON.stringify(amex.history || amex.session.history), /3782|822463|10005/);
+  const wide = await script(['４１１１', 'notes', '１１１１', 'more', '１１１１', 'end', '１１１１']);
+  assert.equal(wide.mainCalls, 6);
+  assert.doesNotMatch(JSON.stringify(wide.session.history), /4111|４１１１/);
+  for (const chatter of ["it's the 2nd card", 'brb at 3pm', 'zip 60601']) {
+    const split = await script(['4111 1111', chatter, '1111 1111']);
+    assert.equal(split.mainCalls, 2, chatter);
+    assert.equal(split.leaked, false, chatter);
+    assert.doesNotMatch(JSON.stringify(split.session.history), /4111/, chatter);
+  }
+
+  const shaped = await policy.triageTurn({
+    channel: 'sms',
+    text: 'Where is my manual?',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) {
+        return { choices: [{ message: { content: '{"reply":"We\'ll take care of your bill, don\'t worry.","confidence":"high","handoff":false}' } }] };
+      }
+      return answer('The drawing is ready for you.');
+    },
+  });
+  assert.match(shaped.reply, /support@manualos\.com/);
+  assert.doesNotMatch(shaped.reply, /take care of your bill|drawing is ready/i);
+  for (const bad of [null, { choices: [] }, { choices: [{ message: { content: '' } }] }, { choices: [{ message: { content: '["allow"]' } }] }, { choices: [{ message: { content: '{"refund":false}' } }] }]) {
+    const closed = await policy.triageTurn({
+      channel: 'sms',
+      text: 'Where is my manual?',
+      state: state(),
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        if (request.maxTokens === 60) return bad;
+        return answer('The drawing is ready for you.');
+      },
+    });
+    assert.match(closed.reply, /support@manualos\.com/);
+    assert.doesNotMatch(closed.reply, /drawing is ready/);
+  }
+  let guardPrompt = '';
+  const allowed = await policy.triageTurn({
+    channel: 'sms',
+    text: 'Where is my manual?',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) {
+        guardPrompt = request.messages[0].content;
+        return { choices: [{ message: { content: 'allow' } }] };
+      }
+      return answer('The drawing is ready for you.');
+    },
+  });
+  assert.match(allowed.reply, /drawing is ready/);
+  assert.match(guardPrompt, /any language/i);
+  assert.match(guardPrompt, /on us|implied credit|next invoice/i);
+  const echoed = await policy.triageTurn({
+    channel: 'sms',
+    text: 'Can you repeat that number?',
+    state: state(),
+    env,
+    spentUsd: 0,
+    complete: async (request) => {
+      if (request.maxTokens === 60) {
+        assert.doesNotMatch(request.messages[1].content, /4111/);
+        return { choices: [{ message: { content: '{"refund":false,"leak":false}' } }] };
+      }
+      return answer('call 815 555 0123, card 4111 1111 1111 1111');
+    },
+  });
+  assert.doesNotMatch(echoed.reply, /4111/);
+  assert.match(echoed.reply, /815 555 0123|\[redacted\]/);
+
+  const refunds = [
+    'Next month is on us.',
+    "we'll credit your next invoice",
+    "we'll take care of the charge",
+    "we'll make it right on your bill",
+    'No se preocupe, ya le devolví los $39.',
+    'no se le cobrará',
+    'Nous vous remboursons les 39 dollars.',
+    'Vamos reembolsar o valor.',
+    'O próximo mês é por nossa conta.',
+    'Wir erstatten Ihnen den Betrag.',
+    'Le rimborsiamo i 39 euro.',
+    '我们会退款。',
+    '下个月免费。',
+  ];
+  for (const phrase of refunds) {
+    assert.equal(policy.promisesRefund(phrase), true, phrase);
+    const cleaned = policy.applyGuardrails(phrase, env);
+    assert.match(cleaned, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(cleaned, /on us|devolví|rembours|erstatten|rimbors|退款|cobrará/i, phrase);
+  }
+  for (const phrase of ['Next month is on us.', 'No se preocupe, ya le devolví los $39.']) {
+    const decision = await policy.triageTurn({
+      channel: 'voice',
+      text: 'Can you help with the last invoice?',
+      state: state(),
+      env,
+      spentUsd: 0,
+      complete: async (request) => {
+        if (request.maxTokens === 60) return { choices: [{ message: { content: '{"refund":false,"leak":false}' } }] };
+        return answer(phrase);
+      },
+    });
+    assert.match(decision.reply, /cannot approve or issue a refund/i, phrase);
+    assert.doesNotMatch(decision.reply, /on us|devolví|\$39/i, phrase);
+  }
+
+  for (const phrase of [
+    'Stop bit setting for the Modbus RTU port?',
+    'Stop category 0 vs 1',
+    'Stop time on conveyor 3',
+    'STOP instruction in my ladder logic',
+    'Stop/Start pushbutton wiring',
+    'Stop button broken',
+    'stop light flashing',
+    'STOP mode after power cycle on the 1756-L83E',
+  ]) {
+    assert.equal(isOptOutMessage(phrase), false, phrase);
+  }
+  for (const phrase of ['STOP', 'stop texting me', 'Stop please', 'Please stop']) {
+    assert.equal(isOptOutMessage(phrase), true, phrase);
+  }
+  assert.equal(policy.classify('cancel'), 'billing');
+  assert.equal(policy.classify('unsubscribe from premium tier'), 'billing');
+  assert.equal(isOptOutMessage('remove me from the service, you billed me again'), true);
+  assert.equal(policy.classify('remove me from the service, you billed me again'), 'billing');
+
+  let refused = 0;
+  for (let i = 0; i < 2000; i += 1) {
+    const day = String((i % 28) + 1).padStart(2, '0');
+    const variants = [
+      `Siemens 6ES7 ${300 + (i % 80)}-2EH${i % 10}${i % 10}-0AB0 is faulting on rack ${i % 8}`,
+      `1756-L${80 + (i % 9)}E slot ${i % 16} channel ${i % 8} reads ${i % 20} mA`,
+      `Stop bit setting for port ${i % 8} on the Modbus RTU master`,
+      `serial ${1000 + (i % 9000)} ${2000 + (i % 8000)} ${3000 + (i % 7000)} ${4000 + (i % 6000)} on the drive`,
+      `job ran at 2026-10-${day} ${i % 24}:${String(i % 60).padStart(2, '0')}:00 and finished`,
+      `IP 192.168.${i % 256}.${(i * 3) % 256} timed out after ${i % 30} seconds`,
+      `Modbus register 4${String(10000 + (i % 9000))} reads ${i % 65535}`,
+      `error F${String(i % 9999).padStart(4, '0')} on conveyor ${i % 12}`,
+      `order ${20260000 + i} is waiting on the panel`,
+      `6ES7 214-1AG40-0XB0 and 6ES7 315-2EH14-0AB0 both online`,
+      'STOP mode after power cycle on the 1756-L83E',
+      `the stop time on conveyor ${i % 6} is ${i % 40} seconds`,
+      `firmware 2.${i % 9}.${i % 20} build ${1000 + (i % 5000)}`,
+    ];
+    if (policy.containsCardNumber(variants[i % variants.length])) refused += 1;
+  }
+  assert.ok(refused / 2000 < 0.005, `false refusal rate ${refused}/2000`);
+
+  const slowStarted = Date.now();
+  const slow = await policy.triageTurn({
+    channel: 'sms',
+    text: 'How much is Pro?',
+    state: state(),
+    env: aiEnv({ LLM_TIMEOUT_MS: '40' }),
+    spentUsd: 0,
+    complete: () => new Promise(() => {}),
+  });
+  assert.ok(Date.now() - slowStarted < 1000);
+  assert.match(slow.reply, /not sure|try once more/i);
+
+  const h = harness();
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const emoji = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119701',
+      Body: '😀 4111',
+      MessageSid: 'SM_EMOJI',
+    });
+    const emojiXml = await emoji.text();
+    assert.doesNotMatch(emojiXml, /Something went wrong/i);
+    assert.match(emojiXml, /ManualOS Support/);
+    const stop = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119702',
+      Body: 'STOP 🙏',
+      MessageSid: 'SM_STOP_EMOJI',
+    });
+    const stopXml = await stop.text();
+    assert.match(stopXml, /unsubscribed/i);
+    assert.doesNotMatch(stopXml, /Something went wrong/i);
+    assert.equal(h.store.isOptedOut('+15551119702'), true);
+    const cancel = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119703',
+      Body: 'cancel',
+      MessageSid: 'SM_CANCEL_BARE',
+    });
+    assert.match(await cancel.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15551119703'), true);
+    const premium = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119704',
+      Body: 'unsubscribe from premium tier',
+      MessageSid: 'SM_PREMIUM',
+    });
+    assert.match(await premium.text(), /unsubscribed/i);
+    const removed = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119705',
+      Body: 'remove me from the service, you billed me again',
+      MessageSid: 'SM_REMOVE_SERVICE',
+    });
+    assert.match(await removed.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15551119705'), true);
+    const owner = h.sent.map((message) => message.body).join('\n');
+    assert.match(owner, /cancel/i);
+    assert.match(owner, /premium/i);
+    assert.match(owner, /billed/i);
+    const plc = await postTwilio(base, h.env, '/api/twilio/sms', {
+      From: '+15551119706',
+      Body: 'Stop button broken',
+      MessageSid: 'SM_STOP_BUTTON',
+    });
+    assert.doesNotMatch(await plc.text(), /unsubscribed/i);
+    assert.equal(h.store.isOptedOut('+15551119706'), false);
+
+    const thread = h.store.getThread('+15551119707');
+    const pieces = ['4111 1111', "it's the 2nd card", '1111 1111'];
+    for (const [index, body] of pieces.entries()) {
+      const res = await postTwilio(base, h.env, '/api/twilio/sms', {
+        From: '+15551119707',
+        Body: body,
+        MessageSid: `SM_SPLIT_${index}`,
+      });
+      if (index === pieces.length - 1) assert.match(await res.text(), /cannot take card numbers/);
+    }
+    void thread;
+    const threads = fs.readFileSync(path.join(h.store.directory, 'threads.json'), 'utf8');
+    const splitThread = JSON.parse(threads)['+15551119707'];
+    assert.doesNotMatch(JSON.stringify(splitThread), /4111/);
+    assert.doesNotMatch(threads, /4111 1111|4111111111111111/);
+  });
 });
