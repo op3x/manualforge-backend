@@ -110,7 +110,8 @@ function assertNoticePdf(pdf) {
   assert.equal(bodies.slice(0, -1).some((body) => body.includes(DISCLAIMER_TEXT)), false);
   assert.equal(bodies[0].includes(COVER_NOTICE_LINE), true);
   assert.equal(bodies[0].includes(DISCLAIMER_TEXT), false);
-  const full = pages.join('\n');
+  const full = bodies.join('\n');
+  assert.ok(full.lastIndexOf('Sign-off.') >= 0);
   assert.ok(full.lastIndexOf(DISCLAIMER_TEXT) > full.lastIndexOf('Sign-off.'));
 }
 

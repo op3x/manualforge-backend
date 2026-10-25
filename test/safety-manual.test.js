@@ -142,6 +142,7 @@ test('cover, revision, and lockout sequence use the draft wording and lock befor
   assert.equal(/Declaration of conformity and applied standards/.test(html), false);
   assert.match(html, /is not a declaration of conformity/);
   const sequence = html.slice(html.indexOf('Generic lockout sequence — template only'));
+  const prepare = sequence.indexOf('Prepare.');
   const shut = sequence.indexOf('Tell affected people that the equipment will be shut down');
   const isolate = sequence.indexOf('Isolate each energy source');
   const lock = sequence.indexOf('Apply your lock');
@@ -150,8 +151,9 @@ test('cover, revision, and lockout sequence use the draft wording and lock befor
   const clear = sequence.indexOf('Clear the area');
   const remove = sequence.indexOf('Remove each lock');
   const notify = sequence.indexOf('Tell affected people that the lockout is over');
-  for (const index of [shut, isolate, lock, vent, verify, clear, remove, notify]) assert.ok(index > 0);
-  assert.ok(shut < isolate && isolate < lock && lock < vent && vent < verify && verify < clear && clear < remove && remove < notify);
+  for (const index of [prepare, shut, isolate, lock, vent, verify, clear, remove, notify]) assert.ok(index >= 0);
+  assert.ok(prepare < shut && shut < isolate && isolate < lock && lock < vent && vent < verify && verify < clear && clear < remove && remove < notify);
+  assert.match(html, /<td>Language<\/td><td>English<\/td>/);
   assert.match(html, /Device ID: __________/);
   assert.match(html, /Location: __________/);
   const startup = between(html, 'Daily start-up</h2>', 'Normal operation and production</h2>');
