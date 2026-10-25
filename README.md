@@ -54,7 +54,7 @@ Kept for the current site. Same body as before (`file`, or JSON `plcContent`, pl
 
 ### `POST /webhook`
 
-Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` and logs the event. Requests with a bad or missing signature get `400`.
+Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` and logs the event. Requests with a bad or missing signature get `400`. Starter refund and dispute events update the PaymentIntent before the handler returns. A handler failure returns `500` so Stripe retries it. The same event id is not applied twice.
 
 Each generate call re-reads the Checkout Session, PaymentIntent, and Subscription, so access stays correct even if a webhook is delayed. The endpoint is still required: subscription renewals, cancellations, and delayed payment methods are asynchronous, and the signature is what shows the call came from Stripe.
 
@@ -143,11 +143,22 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 2. Create a separate Product named **ManualOS Pro** with one recurring Price of **$79 USD** billed **monthly**. Copy that price id into `STRIPE_PRICE_PRO`. Separate products keep the Checkout line item names distinct.
 3. Add a webhook endpoint:
    `https://manualforge-backend-production.up.railway.app/webhook`
-   Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and `radar.early_fraud_warning.created`.
+   Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
 4. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, and read Subscriptions. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode.
 
-Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
+Starter stays valid while the Checkout Session is `paid` and the PaymentIntent `credit_status` is not `revoked` or `suspended`. Stripe does not change `payment_status` when a charge is refunded later. `/webhook` does, by writing `credit_status` on the Starter PaymentIntent.
+
+- A full `charge.refunded` (`refunded` is true, or `amount_refunded` is at least `amount`) sets `credit_status` to `revoked`. Remaining Starter credits can no longer generate manuals.
+- A partial refund is logged and does not change `credit_status` or the credits. Stripe sends `charge.refunded` again if later partial refunds add up to the full amount, and that later event revokes them.
+- `charge.dispute.created` sets `credit_status` to `suspended` unless the purchase is already revoked.
+- `charge.dispute.closed` with status `won` (the charge stands) sets `credit_status` back to `active`. Status `lost` sets `credit_status` to `revoked` permanently, and a later `won` does not restore those credits. `warning_closed` does not restore and does not newly suspend. A purchase that is already `revoked` stays revoked.
+- The handled event id is appended to PaymentIntent `credit_events`. A second delivery of that id does not write again.
+- A charge that is not a Starter PaymentIntent is logged and ignored. The handler reads `payment_intent` on the charge or dispute, and if the PaymentIntent has no `plan` it lists Checkout Sessions for that PaymentIntent. Pro cancellation is unchanged: access follows the live subscription status and ends on the next generate call once that status is no longer `active` or `trialing`.
+
+`POST /jobs` and `POST /generate-manual` reject a refunded purchase with **402** and `This purchase was refunded, so it can no longer generate manuals. Contact support@manualos.com.` A lost dispute returns **402** and `This purchase was lost in a payment dispute, so it can no longer generate manuals. Contact support@manualos.com.` A suspended purchase returns **402** and `This purchase is suspended because of a payment dispute, so it can no longer generate manuals. Contact support@manualos.com.` A job that already reserved a credit runs to completion. `GET /verify-session` reports `valid: false` and `remaining: 0` while credits are revoked or suspended.
+
+The restricted key needs Charges Read so a dispute that only includes a charge id can be mapped to the PaymentIntent, and Checkout Sessions Read so a Starter purchase is recognized when the PaymentIntent metadata has no `plan`. PaymentIntents Read and Write are already required.
 
 Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md) only after the account has an active registration. Turning on automatic tax without a registration collects no tax and returns no error.
 

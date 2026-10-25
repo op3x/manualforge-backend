@@ -21,6 +21,7 @@ const {
   verifyCheckoutSession,
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
+const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -92,6 +93,7 @@ function logWebhookEvent(event) {
     case 'invoice.payment_failed':
     case 'charge.refunded':
     case 'charge.dispute.created':
+    case 'charge.dispute.closed':
     case 'radar.early_fraud_warning.created':
       console.log(event.type, object.id);
       break;
@@ -131,7 +133,7 @@ function createApp({
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'manualos-backend', aiEnabled: Boolean(anthropicClient) });
   });
-  app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     const secret = env.STRIPE_WEBHOOK_SECRET;
     if (!stripeClient || !secret) {
       console.error('Webhook rejected: STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET is not set');
@@ -143,6 +145,13 @@ function createApp({
     } catch (err) {
       console.error('Webhook signature verification failed:', err && err.message ? err.message : err);
       return res.status(400).send('Webhook signature verification failed');
+    }
+    try {
+      await applyStarterChargeEvent(stripeClient, event);
+    } catch (err) {
+      const detail = err && err.message ? String(err.message) : 'error';
+      console.error('Starter webhook handler failed', event.type, detail.replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]'));
+      return res.status(500).json({ error: 'Webhook handler failed' });
     }
     logWebhookEvent(event);
     return res.json({ received: true });

@@ -69,6 +69,26 @@ test('starter remaining is credits minus manuals_used', () => {
   );
   assert.equal(exhausted.valid, true);
   assert.equal(exhausted.remaining, 0);
+
+  const revoked = accessFromSession(
+    { metadata: { plan: 'starter' }, payment_status: 'paid' },
+    { id: 'pi_1', metadata: { manuals_used: '1', credit_status: 'revoked' } },
+    null,
+    env
+  );
+  assert.equal(revoked.valid, false);
+  assert.equal(revoked.remaining, 0);
+  assert.equal(revoked.creditStatus, 'revoked');
+
+  const suspended = accessFromSession(
+    { metadata: { plan: 'starter' }, payment_status: 'paid' },
+    { id: 'pi_1', metadata: { manuals_used: '1', credit_status: 'suspended' } },
+    null,
+    env
+  );
+  assert.equal(suspended.valid, false);
+  assert.equal(suspended.remaining, 0);
+  assert.equal(suspended.creditStatus, 'suspended');
 });
 
 test('pro is valid only while the subscription is active or trialing', () => {
