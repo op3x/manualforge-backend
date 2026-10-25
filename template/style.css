@@ -38,6 +38,7 @@ p { margin: 0 0 2.2mm; orphans: 3; widows: 3; }
 .toc .tp { width: 8mm; text-align:right; flex:none; }
 .toc a .tp::after { content: target-counter(attr(href), page); }
 .chapter { page-break-before: always; }
+.legal-disclaimer { page-break-before: always; break-before: page; }
 h1 { font-size: 19pt; color:#13314f; margin: 0 0 5mm; padding-bottom: 2.5mm; border-bottom: 2pt solid #13314f; }
 h1 .num { display:inline-block; background:#13314f; color:#fff; min-width: 10mm; text-align:center; margin-right: 4mm; padding: 0 2mm; border-radius: 1mm; }
 h2 { font-size: 12pt; color:#13314f; margin: 6mm 0 2.5mm; break-after: avoid; page-break-after: avoid; }
