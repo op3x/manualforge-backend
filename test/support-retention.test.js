@@ -5,8 +5,10 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { installShutdown } = require('../server');
-const { acquireSupportLock, releaseSupportLock } = require('../lib/support/lock');
+const { acquireSupportLock, LOCK_STALE_MS, LOCK_WAIT_MS, releaseSupportLock } = require('../lib/support/lock');
+const { THREAD_IDLE_MS } = require('../lib/support/policy');
 const { createSupportStore } = require('../lib/support/store');
+const { SMS_CONSENT_LABEL, SMS_OPT_IN_CONFIRMATION, helpReply } = require('../lib/support/http');
 const {
   DAY_MS,
   RETENTION_INTERVAL_MS,
@@ -116,8 +118,16 @@ function mockTwilio(recordings, transcriptions, hooks = {}) {
   const removed = { recordings: [], transcriptions: [] };
   const attempted = { recordings: [], transcriptions: [] };
   const lists = [];
-  function collection(bucket, items) {
-    const fn = (sid) => ({
+  const support = hooks.support || '+15557650000';
+  const calls = hooks.calls || [
+    { sid: 'CA_support', to: support, from: '+15551110001', startTime: new Date(NOW - (91 * DAY_MS)) },
+    { sid: 'CA_other', to: '+15550000000', from: '+15550000001', startTime: new Date(NOW - (91 * DAY_MS)) },
+  ];
+  const defaultCall = 'CA_support';
+  const defaultRecording = recordings[0] && recordings[0].sid;
+
+  function removeBody(bucket, sid) {
+    return {
       async remove() {
         attempted[bucket].push(sid);
         if (hooks.gone && hooks.gone.has(sid)) {
@@ -134,21 +144,44 @@ function mockTwilio(recordings, transcriptions, hooks = {}) {
         }
         removed[bucket].push(sid);
       },
-    });
+    };
+  }
+
+  function listable(bucket, select) {
+    const fn = (sid) => removeBody(bucket, sid);
     fn.list = async (params) => {
       lists.push({ bucket, params });
-      return items.map((item) => ({ ...item }));
+      return select(params).map((item) => ({ ...item }));
     };
     return fn;
   }
+
+  const callFn = (sid) => ({
+    recordings: listable('recordings', () => recordings.filter((item) => (item.callSid || defaultCall) === sid)),
+  });
+  callFn.list = async (params) => {
+    lists.push({ bucket: 'calls', params });
+    return calls.map((item) => ({ ...item }));
+  };
+  const recordingFn = (sid) => ({
+    transcriptions: listable('transcriptions', () => transcriptions.filter((item) => (item.recordingSid || defaultRecording) === sid)),
+  });
+  const messageFn = (sid) => removeBody('recordings', sid);
+  messageFn.list = async (params) => {
+    lists.push({ bucket: 'messages', params });
+    return [];
+  };
+
   return {
     client: {
-      recordings: collection('recordings', recordings),
-      transcriptions: collection('transcriptions', transcriptions),
+      calls: callFn,
+      recordings: recordingFn,
+      messages: messageFn,
     },
     removed,
     attempted,
     lists,
+    support,
   };
 }
 
@@ -420,6 +453,7 @@ test('twilio deletion is skipped without credentials and filters by instant', as
   assert.equal(skipped.lines.join('\n').includes('SECRET_SHOULD_NOT_CALL'), false);
 
   const cutoff = NOW - (90 * DAY_MS);
+  const support = '+15557650000';
   const twilio = mockTwilio([
     { sid: 'RE_old', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'completed' },
     { sid: 'RE_exact', dateCreated: new Date(cutoff), status: 'completed' },
@@ -428,11 +462,14 @@ test('twilio deletion is skipped without credentials and filters by instant', as
     { sid: 'RE_processing', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'processing' },
     { sid: 'RE_gone', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'completed' },
     { sid: 'RE_fail', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'completed' },
+    { sid: 'RE_other_brand', callSid: 'CA_other', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'completed' },
   ], [
-    { sid: 'TR_old', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'completed', transcriptionText: 'SECRET_TWILIO_TRANSCRIPT' },
-    { sid: 'TR_young', dateCreated: new Date(NOW - DAY_MS), status: 'completed', transcriptionText: 'YOUNG_TWILIO_TRANSCRIPT' },
-    { sid: 'TR_live', dateCreated: new Date(NOW - (100 * DAY_MS)), status: 'in-progress' },
+    { sid: 'TR_old', recordingSid: 'RE_old', dateCreated: new Date(NOW - (91 * DAY_MS)), status: 'completed', transcriptionText: 'SECRET_TWILIO_TRANSCRIPT' },
+    { sid: 'TR_young', recordingSid: 'RE_young', dateCreated: new Date(NOW - DAY_MS), status: 'completed', transcriptionText: 'YOUNG_TWILIO_TRANSCRIPT' },
+    { sid: 'TR_live', recordingSid: 'RE_old', dateCreated: new Date(NOW - (100 * DAY_MS)), status: 'in-progress' },
+    { sid: 'TR_other', recordingSid: 'RE_other_brand', dateCreated: new Date(NOW - (100 * DAY_MS)), status: 'completed' },
   ], {
+    support,
     gone: new Set(['RE_gone']),
     fail: new Set(['RE_fail']),
   });
@@ -444,6 +481,7 @@ test('twilio deletion is skipped without credentials and filters by instant', as
       SUPPORT_RETENTION_DAYS: '90',
       TWILIO_ACCOUNT_SID: 'AC_test_account',
       TWILIO_AUTH_TOKEN: 'not-a-real-token',
+      TWILIO_SUPPORT_NUMBER: support,
     },
     now: () => NOW,
     twilioClient: twilio.client,
@@ -455,6 +493,14 @@ test('twilio deletion is skipped without credentials and filters by instant', as
   assert.equal(value.transcriptions, 1);
   assert.equal(value.twilio, 'on');
   assert.equal(value.errors, 1);
+  const callLists = twilio.lists.filter((entry) => entry.bucket === 'calls');
+  assert.equal(callLists.length, 2);
+  assert.equal(callLists[0].params.to, support);
+  assert.equal(callLists[0].params.from, undefined);
+  assert.equal(callLists[1].params.from, support);
+  assert.equal(callLists[1].params.to, undefined);
+  assert.equal(callLists[0].params.pageSize, 200);
+  assert.equal(callLists[0].params.startTimeBefore.getTime(), cutoff + DAY_MS);
   const recordingList = twilio.lists.find((entry) => entry.bucket === 'recordings');
   assert.equal(recordingList.params.pageSize, 200);
   assert.equal(recordingList.params.includeSoftDeleted, undefined);
@@ -463,6 +509,8 @@ test('twilio deletion is skipped without credentials and filters by instant', as
   assert.equal(recordingList.params.from, undefined);
   const transcriptionList = twilio.lists.find((entry) => entry.bucket === 'transcriptions');
   assert.equal(transcriptionList.params.dateCreatedBefore, undefined);
+  assert.equal(twilio.attempted.recordings.includes('RE_other_brand'), false);
+  assert.equal(twilio.attempted.transcriptions.includes('TR_other'), false);
   const log = lines.join('\n');
   assert.match(log, /twilio=on errors=1/);
   assert.equal(log.includes('SECRET_TWILIO_TRANSCRIPT'), false);
@@ -594,6 +642,8 @@ test('missing timestamps use file mtime and durable names survive at any depth',
   });
   const futureFile = path.join(dir, 'future-loose.json');
   writeJson(futureFile, [{ body: 'FUTURE_MTIME' }]);
+  const futureBin = path.join(dir, 'future.bin');
+  fs.writeFileSync(futureBin, 'FUTURE_BIN');
   fs.mkdirSync(path.join(dir, 'lost+found'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'lost+found', 'old.txt'), 'LOST_SECRET');
   fs.writeFileSync(path.join(dir, 'stale.tmp'), 'OLD_TMP_SECRET');
@@ -617,6 +667,7 @@ test('missing timestamps use file mtime and durable names survive at any depth',
   age(path.join(dir, 'fresh.tmp'), NOW - (30 * 60 * 1000));
   age(path.join(dir, 'hour.tmp'), NOW - hour);
   age(futureFile, NOW + (10 * DAY_MS));
+  age(futureBin, NOW + (10 * DAY_MS));
 
   const nestedBefore = fs.readFileSync(path.join(dir, 'nested', 'opt-outs.json'));
   const bakBefore = fs.readFileSync(path.join(dir, 'opt-outs.json.bak'));
@@ -657,7 +708,9 @@ test('missing timestamps use file mtime and durable names survive at any depth',
   assert.equal(messages.later.body, 'FUTURE_BODY');
   const futureLoose = JSON.parse(fs.readFileSync(futureFile, 'utf8'));
   assert.equal(futureLoose[0].body, 'FUTURE_MTIME');
-  assert.ok(fs.statSync(futureFile).mtimeMs <= NOW + 2000);
+  assert.equal(futureLoose[0].updatedAt, iso(NOW));
+  assert.equal(fs.readFileSync(futureBin, 'utf8'), 'FUTURE_BIN');
+  assert.ok(fs.statSync(futureBin).mtimeMs <= NOW + 2000);
 
   assert.equal(value.threads, 0);
   assert.equal(value.messages, 0);
@@ -684,21 +737,21 @@ test('a symlinked data directory is swept through its real path', async () => {
   assert.equal(lines.join('\n').includes('LINKED_SECRET'), false);
 });
 
-test('the sweep refuses to overlap and a stale lock can be taken over', async () => {
+test('the sweep refuses a busy lock and a stale lock can be taken over', async () => {
+  assert.ok(LOCK_STALE_MS >= 20 * 1000);
+  assert.ok(LOCK_STALE_MS <= 30 * 1000);
   const dir = tempDir();
   const artifact = path.join(dir, 'stray.txt');
   fs.writeFileSync(artifact, 'LOCKED_SECRET');
   age(artifact, NOW - (100 * DAY_MS));
+  const env = { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' };
   const held = acquireSupportLock(dir);
   try {
-    assert.throws(
-      () => sweepSupportRetention({
-        directory: dir,
-        env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
-        now: () => NOW,
-      }),
-      (err) => err && err.code === 'EBUSY',
-    );
+    let pending;
+    assert.doesNotThrow(() => {
+      pending = sweepSupportRetention({ directory: dir, env, now: () => NOW });
+    });
+    await assert.rejects(pending, (err) => err && err.code === 'EBUSY');
     assert.equal(fs.readFileSync(artifact, 'utf8'), 'LOCKED_SECRET');
   } finally {
     releaseSupportLock(held);
@@ -708,11 +761,7 @@ test('the sweep refuses to overlap and a stale lock can be taken over', async ()
   const staleAt = new Date(Date.now() - (2 * 60 * 60 * 1000));
   fs.utimesSync(stale.path, staleAt, staleAt);
   try {
-    const { value } = await capture(() => sweepSupportRetention({
-      directory: dir,
-      env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
-      now: () => NOW,
-    }));
+    const { value } = await capture(() => sweepSupportRetention({ directory: dir, env, now: () => NOW }));
     assert.equal(value.files, 1);
     assert.equal(value.errors, 0);
     assert.equal(fs.existsSync(artifact), false);
@@ -721,7 +770,66 @@ test('the sweep refuses to overlap and a stale lock can be taken over', async ()
   }
 });
 
-test('a sweep in progress blocks another sweep and still allows a store write', async () => {
+test('a live lock older than 30 seconds is taken and a foreign host is not', async () => {
+  const dir = tempDir();
+  const artifact = path.join(dir, 'stray.txt');
+  const env = { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' };
+  fs.writeFileSync(artifact, 'LIVE_LOCK_SECRET');
+  age(artifact, NOW - (100 * DAY_MS));
+  const held = acquireSupportLock(dir);
+  const aged = new Date(Date.now() - (31 * 1000));
+  fs.utimesSync(held.path, aged, aged);
+  try {
+    const { value } = await capture(() => sweepSupportRetention({ directory: dir, env, now: () => NOW }));
+    assert.equal(value.files, 1);
+    assert.equal(fs.existsSync(artifact), false);
+  } finally {
+    releaseSupportLock(held);
+  }
+
+  const foreign = tempDir();
+  const foreignFile = path.join(foreign, 'stray.txt');
+  fs.writeFileSync(foreignFile, 'FOREIGN_SECRET');
+  age(foreignFile, NOW - (100 * DAY_MS));
+  fs.writeFileSync(path.join(foreign, '.support.lock'), JSON.stringify({
+    pid: 2147483646,
+    hostname: 'other-host',
+    at: Date.now(),
+  }), { mode: 0o600 });
+  await assert.rejects(
+    sweepSupportRetention({
+      directory: foreign,
+      env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: foreign, SUPPORT_RETENTION_DAYS: '90' },
+      now: () => NOW,
+    }),
+    (err) => err && err.code === 'EBUSY',
+  );
+  assert.equal(fs.readFileSync(foreignFile, 'utf8'), 'FOREIGN_SECRET');
+});
+
+test('a dead holder on this host is reclaimed immediately', async () => {
+  const dir = tempDir();
+  const artifact = path.join(dir, 'stray.txt');
+  fs.writeFileSync(artifact, 'DEAD_LOCK_SECRET');
+  age(artifact, NOW - (100 * DAY_MS));
+  fs.writeFileSync(path.join(dir, '.support.lock'), JSON.stringify({
+    pid: 2147483646,
+    hostname: os.hostname(),
+    at: Date.now(),
+  }), { mode: 0o600 });
+  const started = Date.now();
+  const { value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+  }));
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(value.files, 1);
+  assert.equal(fs.existsSync(artifact), false);
+  assert.equal(fs.existsSync(path.join(dir, '.support.lock')), false);
+});
+
+test('an in-flight sweep skips the next tick and does not hold the lock during Twilio', async () => {
   const dir = tempDir();
   const oldFile = path.join(dir, 'stray.txt');
   fs.writeFileSync(oldFile, 'OVERLAP_SECRET');
@@ -729,55 +837,65 @@ test('a sweep in progress blocks another sweep and still allows a store write', 
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   let listed = 0;
-  const recordings = (sid) => ({ async remove() { return sid; } });
-  recordings.list = async () => {
+  const support = '+15557650000';
+  const calls = (sid) => ({
+    recordings: { list: async () => [], ...(sid ? {} : {}) },
+  });
+  calls.list = async () => {
     listed += 1;
     await gate;
-    return [];
+    return [{ sid: 'CA_support', to: support, from: '+15551110001', startTime: new Date(NOW - (100 * DAY_MS)) }];
   };
-  const transcriptions = { list: async () => [], calls: 0 };
-  transcriptions.list = async () => {
-    transcriptions.calls += 1;
-    return [];
-  };
+  const messages = { list: async () => [] };
   const env = {
     NODE_ENV: 'test',
     SUPPORT_DATA_DIR: dir,
     SUPPORT_RETENTION_DAYS: '90',
     TWILIO_ACCOUNT_SID: 'AC_test',
     TWILIO_AUTH_TOKEN: 'token',
+    TWILIO_SUPPORT_NUMBER: support,
   };
   const store = createSupportStore({ directory: dir, env, now: () => NOW });
   const first = sweepSupportRetention({
     directory: dir,
     env,
     now: () => NOW,
-    twilioClient: { recordings, transcriptions },
+    twilioClient: { calls, messages },
   });
-  assert.equal(listed, 1);
-  assert.throws(
-    () => sweepSupportRetention({
+  try {
+    const waitStart = Date.now();
+    while (listed < 1) {
+      if (Date.now() - waitStart > 2000) throw new Error('twilio list did not start');
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(fs.existsSync(path.join(dir, '.support.lock')), false);
+    const second = await sweepSupportRetention({
       directory: dir,
       env,
       now: () => NOW,
-      twilioClient: { recordings, transcriptions },
-    }),
-    (err) => err && err.code === 'EBUSY',
-  );
-  store.saveThread('+15551110077', {
-    turns: 1,
-    history: [{ role: 'user', content: 'DURING_SWEEP' }],
-    startedAt: iso(NOW),
-  });
-  release();
+      twilioClient: { calls, messages },
+    });
+    assert.equal(second.skipped, true);
+    assert.equal(listed, 1);
+    const optStart = Date.now();
+    store.optOut('+15551110077', 'sms');
+    assert.ok(Date.now() - optStart < 1000);
+    store.saveThread('+15551110077', {
+      turns: 1,
+      history: [{ role: 'user', content: 'DURING_SWEEP' }],
+      startedAt: iso(NOW),
+    });
+  } finally {
+    release();
+  }
   const { lines, value } = await capture(() => first);
-  assert.equal(transcriptions.calls, 1);
   assert.equal(value.errors, 0);
   assert.equal(fs.existsSync(oldFile), false);
   assert.equal(lines.join('\n').includes('OVERLAP_SECRET'), false);
   assert.equal(lines.join('\n').includes('DURING_SWEEP'), false);
   const threads = JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'));
   assert.equal(threads['+15551110077'].history[0].content, 'DURING_SWEEP');
+  assert.equal(store.isOptedOut('+15551110077'), true);
 });
 
 test('the npm script exits when the support lock is held', () => {
@@ -867,8 +985,8 @@ test('twilio messages to and from the support number are deleted with the same e
   const twilio = mockTwilio([
     { sid: 'RE_old', dateCreated: old, status: 'completed' },
   ], [
-    { sid: 'TR_old', dateCreated: old, status: 'completed', transcriptionText: 'SECRET_TWILIO_TRANSCRIPT' },
-  ]);
+    { sid: 'TR_old', recordingSid: 'RE_old', dateCreated: old, status: 'completed', transcriptionText: 'SECRET_TWILIO_TRANSCRIPT' },
+  ], { support });
   const removed = [];
   const attempted = [];
   const lists = [];
@@ -945,8 +1063,9 @@ test('twilio messages to and from the support number are deleted with the same e
 test('a surfaced 429 stops the rest of the twilio pass', async () => {
   const dir = tempDir();
   const old = new Date(NOW - (100 * DAY_MS));
+  const support = '+15557650000';
   const removed = [];
-  let transcriptions = 0;
+  const transcribed = [];
   let messages = 0;
   const recordings = (sid) => ({
     async remove() {
@@ -964,7 +1083,19 @@ test('a surfaced 429 stops the rest of the twilio pass', async () => {
     { sid: 'RE_slow', dateCreated: old, status: 'completed' },
     { sid: 'RE_later', dateCreated: old, status: 'completed' },
   ];
-  const transcriptionList = { list: async () => { transcriptions += 1; return []; } };
+  const transcriptions = (sid) => ({
+    transcriptions: {
+      list: async () => {
+        transcribed.push(sid);
+        return [];
+      },
+    },
+  });
+  const calls = (sid) => ({ recordings });
+  calls.list = async (params) => {
+    if (params.from) return [];
+    return [{ sid: 'CA_support', to: support, from: '+15551110001', startTime: old }];
+  };
   const messageList = { list: async () => { messages += 1; return []; } };
   const { lines, value } = await capture(() => sweepSupportRetention({
     directory: dir,
@@ -974,13 +1105,13 @@ test('a surfaced 429 stops the rest of the twilio pass', async () => {
       SUPPORT_RETENTION_DAYS: '90',
       TWILIO_ACCOUNT_SID: 'AC_test',
       TWILIO_AUTH_TOKEN: 'token',
-      TWILIO_SUPPORT_NUMBER: '+15557650000',
+      TWILIO_SUPPORT_NUMBER: support,
     },
     now: () => NOW,
-    twilioClient: { recordings, transcriptions: transcriptionList, messages: messageList },
+    twilioClient: { calls, recordings: transcriptions, messages: messageList },
   }));
   assert.deepEqual(removed, ['RE_ok']);
-  assert.equal(transcriptions, 0);
+  assert.deepEqual(transcribed, ['RE_ok', 'RE_slow']);
   assert.equal(messages, 0);
   assert.equal(value.recordings, 1);
   assert.equal(value.sms, 0);
@@ -990,11 +1121,12 @@ test('a surfaced 429 stops the rest of the twilio pass', async () => {
   assert.equal(log.includes('SECRET_RATE'), false);
 });
 
-test('a 429 on the next recording page stops before transcriptions', async () => {
+test('a 429 on the next recording page stops after the current page', async () => {
   const dir = tempDir();
   const old = new Date(NOW - (100 * DAY_MS));
+  const support = '+15557650000';
   const removed = [];
-  let transcriptions = 0;
+  let messages = 0;
   const recordings = (sid) => ({
     async remove() { removed.push(sid); },
   });
@@ -1014,6 +1146,11 @@ test('a 429 on the next recording page stops before transcriptions', async () =>
   recordings.list = async () => {
     throw new Error('list should not be used when page exists');
   };
+  const calls = () => ({ recordings });
+  calls.list = async (params) => {
+    if (params.from) return [];
+    return [{ sid: 'CA_support', to: support, from: '+15551110001', startTime: old }];
+  };
   const { lines, value } = await capture(() => sweepSupportRetention({
     directory: dir,
     env: {
@@ -1022,15 +1159,17 @@ test('a 429 on the next recording page stops before transcriptions', async () =>
       SUPPORT_RETENTION_DAYS: '90',
       TWILIO_ACCOUNT_SID: 'AC_test',
       TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_SUPPORT_NUMBER: support,
     },
     now: () => NOW,
     twilioClient: {
-      recordings,
-      transcriptions: { list: async () => { transcriptions += 1; return []; } },
+      calls,
+      recordings: () => ({ transcriptions: { list: async () => [] } }),
+      messages: { list: async () => { messages += 1; return []; } },
     },
   }));
   assert.deepEqual(removed, ['RE_page']);
-  assert.equal(transcriptions, 0);
+  assert.equal(messages, 0);
   assert.equal(value.recordings, 1);
   assert.equal(value.errors, 1);
   assert.match(lines.join('\n'), /Support retention failed 20429/);
@@ -1040,9 +1179,9 @@ test('a 429 on the next recording page stops before transcriptions', async () =>
 test('the retention twilio client enables autoRetry', async () => {
   const dir = tempDir();
   let seen = null;
-  const recordings = () => ({ async remove() {} });
-  recordings.list = async () => [];
-  const transcriptions = { list: async () => [] };
+  const calls = () => ({ recordings: { list: async () => [] } });
+  calls.list = async () => [];
+  const messages = { list: async () => [] };
   const { value } = await capture(() => sweepSupportRetention({
     directory: dir,
     env: {
@@ -1050,11 +1189,12 @@ test('the retention twilio client enables autoRetry', async () => {
       SUPPORT_DATA_DIR: dir,
       TWILIO_ACCOUNT_SID: 'AC_factory',
       TWILIO_AUTH_TOKEN: 'factory-token',
+      TWILIO_SUPPORT_NUMBER: '+15557650000',
     },
     now: () => NOW,
     twilioFactory(sid, token, opts) {
       seen = { sid, token, opts };
-      return { recordings, transcriptions };
+      return { calls, messages };
     },
   }));
   assert.equal(seen.sid, 'AC_factory');
@@ -1064,4 +1204,543 @@ test('the retention twilio client enables autoRetry', async () => {
   assert.equal(value.twilio, 'on');
   assert.equal(value.sms, 0);
   assert.equal(value.errors, 0);
+});
+
+test('a non-directory and a busy lock do not throw into boot', async () => {
+  const dir = tempDir();
+  const file = path.join(dir, 'not-a-dir');
+  fs.writeFileSync(file, 'x');
+  const clock = fakeClock(NOW);
+  const retention = startSupportRetention({
+    directory: file,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: file, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+    setInterval: (fn, ms) => clock.setInterval(fn, ms),
+    clearInterval: (timer) => clock.clearInterval(timer),
+  });
+  await retention.started;
+  retention.stop();
+
+  let pending;
+  assert.doesNotThrow(() => {
+    pending = sweepSupportRetention({
+      directory: file,
+      env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: file },
+      now: () => NOW,
+    });
+  });
+  assert.equal(typeof pending.then, 'function');
+  await assert.rejects(pending, (err) => err && (err.code === 'EEXIST' || err.code === 'ENOTDIR'));
+
+  const locked = tempDir();
+  const artifact = path.join(locked, 'stray.txt');
+  fs.writeFileSync(artifact, 'BOOT_SECRET');
+  age(artifact, NOW - (100 * DAY_MS));
+  const held = acquireSupportLock(locked);
+  const bootClock = fakeClock(NOW);
+  const boot = startSupportRetention({
+    directory: locked,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: locked, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+    setInterval: (fn, ms) => bootClock.setInterval(fn, ms),
+    clearInterval: (timer) => bootClock.clearInterval(timer),
+  });
+  try {
+    await boot.started;
+    assert.equal(fs.readFileSync(artifact, 'utf8'), 'BOOT_SECRET');
+  } finally {
+    boot.stop();
+    releaseSupportLock(held);
+  }
+});
+
+test('a timer tick during Twilio does not start a second pass', async () => {
+  const dir = tempDir();
+  const clock = fakeClock(NOW);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let listed = 0;
+  const calls = () => ({ recordings: { list: async () => [] } });
+  calls.list = async () => {
+    listed += 1;
+    await gate;
+    return [];
+  };
+  const retention = startSupportRetention({
+    directory: dir,
+    env: {
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      SUPPORT_RETENTION_DAYS: '90',
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_SUPPORT_NUMBER: '+15557650000',
+    },
+    now: () => clock.now(),
+    setInterval: (fn, ms) => clock.setInterval(fn, ms),
+    clearInterval: (timer) => clock.clearInterval(timer),
+    twilioClient: { calls, messages: { list: async () => [] } },
+  });
+  try {
+    const waitStart = Date.now();
+    while (listed < 1) {
+      if (Date.now() - waitStart > 2000) throw new Error('twilio list did not start');
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await clock.advance(RETENTION_INTERVAL_MS);
+    assert.equal(listed, 1);
+  } finally {
+    release();
+    await retention.started;
+    retention.stop();
+  }
+});
+
+test('shutdown releases a held support lock', async () => {
+  const dir = tempDir();
+  const clock = fakeClock(NOW);
+  const retention = startSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir },
+    now: () => clock.now(),
+    setInterval: (fn, ms) => clock.setInterval(fn, ms),
+    clearInterval: (timer) => clock.clearInterval(timer),
+  });
+  await retention.started;
+  const held = acquireSupportLock(dir);
+  assert.equal(fs.existsSync(held.path), true);
+  retention.stop();
+  assert.equal(fs.existsSync(held.path), false);
+});
+
+test('the store waits a few seconds instead of blocking on the lock', () => {
+  assert.ok(LOCK_WAIT_MS >= 1000);
+  assert.ok(LOCK_WAIT_MS <= 5000);
+  const dir = tempDir();
+  const env = { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir };
+  const store = createSupportStore({ directory: dir, env, now: () => NOW });
+  const held = acquireSupportLock(dir);
+  try {
+    const started = Date.now();
+    assert.throws(
+      () => store.optOut('+15551110001', 'sms'),
+      (err) => err && err.status === 500,
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= LOCK_WAIT_MS - 250, `elapsed ${elapsed}`);
+    assert.ok(elapsed < 20000, `elapsed ${elapsed}`);
+    assert.equal(fs.existsSync(path.join(dir, 'opt-outs.json')), false);
+  } finally {
+    releaseSupportLock(held);
+  }
+});
+
+test('a killed holder is reclaimed on the next sweep', async () => {
+  const dir = tempDir();
+  const artifact = path.join(dir, 'stray.txt');
+  fs.writeFileSync(artifact, 'KILLED_SECRET');
+  age(artifact, NOW - (100 * DAY_MS));
+  const script = `
+    const { acquireSupportLock } = require('./lib/support/lock');
+    acquireSupportLock(process.env.SUPPORT_DATA_DIR);
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ['-e', script], {
+    cwd: ROOT,
+    env: {
+      PATH: process.env.PATH,
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+    },
+    stdio: 'ignore',
+  });
+  const lockPath = path.join(dir, '.support.lock');
+  try {
+    const waitStart = Date.now();
+    while (!fs.existsSync(lockPath)) {
+      if (child.exitCode != null) throw new Error('child exited before locking');
+      if (Date.now() - waitStart > 5000) throw new Error('child lock did not appear');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    child.kill('SIGKILL');
+    await new Promise((resolve) => child.on('close', resolve));
+    assert.equal(fs.existsSync(lockPath), true);
+    const started = Date.now();
+    const { lines, value } = await capture(() => sweepSupportRetention({
+      directory: dir,
+      env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+      now: () => NOW,
+    }));
+    assert.ok(Date.now() - started < 5000);
+    assert.equal(value.files, 1);
+    assert.equal(value.errors, 0);
+    assert.equal(fs.existsSync(artifact), false);
+    assert.equal(lines.join('\n').includes('KILLED_SECRET'), false);
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+  }
+});
+
+test('the lock is released before Twilio and a killed sweep can be restarted', async () => {
+  const dir = tempDir();
+  const script = `
+    const fs = require('fs');
+    const path = require('path');
+    const { sweepSupportRetention } = require('./lib/support/retention');
+    const root = process.env.SUPPORT_DATA_DIR;
+    const calls = () => ({ recordings: { list: async () => [] } });
+    calls.list = () => {
+      fs.writeFileSync(path.join(root, 'twilio-started'), '1');
+      // A pending promise does not keep the process alive. The interval does,
+      // so the parent can observe the lock after this list starts.
+      setInterval(() => {}, 1000);
+      return new Promise(() => {});
+    };
+    sweepSupportRetention({
+      directory: root,
+      env: process.env,
+      twilioClient: { calls, messages: { list: async () => [] } },
+    });
+  `;
+  const child = spawn(process.execPath, ['-e', script], {
+    cwd: ROOT,
+    env: {
+      PATH: process.env.PATH,
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      SUPPORT_RETENTION_DAYS: '90',
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_SUPPORT_NUMBER: '+15557650000',
+    },
+    stdio: 'ignore',
+  });
+  const closed = new Promise((resolve) => child.on('close', resolve));
+  const startedFile = path.join(dir, 'twilio-started');
+  try {
+    const waitStart = Date.now();
+    while (!fs.existsSync(startedFile)) {
+      if (child.exitCode != null) throw new Error('child exited before Twilio');
+      if (Date.now() - waitStart > 5000) throw new Error('twilio list did not start');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(fs.existsSync(path.join(dir, '.support.lock')), false);
+    child.kill('SIGKILL');
+    await closed;
+    const artifact = path.join(dir, 'stray.txt');
+    fs.writeFileSync(artifact, 'RESTART_SECRET');
+    age(artifact, NOW - (100 * DAY_MS));
+    const { value } = await capture(() => sweepSupportRetention({
+      directory: dir,
+      env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+      now: () => NOW,
+    }));
+    assert.equal(value.files, 1);
+    assert.equal(fs.existsSync(artifact), false);
+    assert.equal(fs.existsSync(path.join(dir, '.support.lock')), false);
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+  }
+});
+
+test('corrupt and oversized JSON follow the file modification time', async () => {
+  const dir = tempDir();
+  const old = NOW - (100 * DAY_MS);
+  const young = NOW - (2 * DAY_MS);
+  const big = 'x'.repeat((8 * 1024 * 1024) + 1);
+  fs.writeFileSync(path.join(dir, 'old-bad.json'), '{');
+  fs.writeFileSync(path.join(dir, 'young-bad.json'), '{');
+  fs.writeFileSync(path.join(dir, 'old-big.json'), big);
+  fs.writeFileSync(path.join(dir, 'young-big.json'), big);
+  age(path.join(dir, 'old-bad.json'), old);
+  age(path.join(dir, 'old-big.json'), old);
+  age(path.join(dir, 'young-bad.json'), young);
+  age(path.join(dir, 'young-big.json'), young);
+  const { value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+  }));
+  assert.equal(value.errors, 0);
+  assert.equal(fs.existsSync(path.join(dir, 'old-bad.json')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'old-big.json')), false);
+  assert.equal(fs.readFileSync(path.join(dir, 'young-bad.json'), 'utf8'), '{');
+  assert.equal(fs.existsSync(path.join(dir, 'young-big.json')), true);
+});
+
+test('a stampless record is stamped on first sight and later expires', async () => {
+  const dir = tempDir();
+  const young = NOW - (2 * DAY_MS);
+  writeJson(path.join(dir, 'threads.json'), {
+    '+15551110042': { history: [{ role: 'user', content: 'STAMP_ME' }] },
+  });
+  age(path.join(dir, 'threads.json'), young);
+  const env = { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' };
+  const first = await capture(() => sweepSupportRetention({ directory: dir, env, now: () => NOW }));
+  const threads = JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'));
+  const stamped = Date.parse(threads['+15551110042'].updatedAt);
+  assert.ok(Math.abs(stamped - young) < 2000);
+  assert.equal(threads['+15551110042'].history[0].content, 'STAMP_ME');
+  assert.equal(first.value.threads, 0);
+  assert.equal(first.lines.join('\n').includes('STAMP_ME'), false);
+  const later = NOW + (100 * DAY_MS);
+  const second = await capture(() => sweepSupportRetention({ directory: dir, env, now: () => later }));
+  assert.equal(second.value.threads, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8')), {});
+});
+
+test('durable names match files only and directories are still entered', async () => {
+  const dir = tempDir();
+  const old = NOW - (100 * DAY_MS);
+  fs.mkdirSync(path.join(dir, 'opt-outs-dir'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'consents'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'opt-outs-dir', 'old.txt'), 'DIR_SECRET');
+  writeJson(path.join(dir, 'consents', 'consents.json'), { phone: '+15551110001', body: 'KEEP_CONSENT' });
+  writeJson(path.join(dir, 'consents', 'note.json'), { body: 'NESTED_OLD' });
+  writeJson(path.join(dir, 'consent.json'), { body: 'NOT_A_PREFIX' });
+  for (const name of ['opt-outs-dir/old.txt', 'consents/consents.json', 'consents/note.json', 'consent.json']) {
+    age(path.join(dir, name), old);
+  }
+  const kept = fs.readFileSync(path.join(dir, 'consents', 'consents.json'));
+  const keptMtime = fs.statSync(path.join(dir, 'consents', 'consents.json')).mtimeMs;
+  const { lines } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+  }));
+  assert.equal(fs.existsSync(path.join(dir, 'opt-outs-dir', 'old.txt')), false);
+  assert.equal(fs.readFileSync(path.join(dir, 'consents', 'consents.json')).equals(kept), true);
+  assert.equal(fs.statSync(path.join(dir, 'consents', 'consents.json')).mtimeMs, keptMtime);
+  assert.equal(fs.existsSync(path.join(dir, 'consents', 'note.json')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'consent.json')), false);
+  const log = lines.join('\n');
+  assert.equal(log.includes('DIR_SECRET'), false);
+  assert.equal(log.includes('KEEP_CONSENT'), false);
+  assert.equal(log.includes('NESTED_OLD'), false);
+  assert.equal(log.includes('+15551110001'), false);
+});
+
+test('opt-outs and consents are never opened by the 63-day sweep', async () => {
+  const dir = tempDir();
+  const ancient = NOW - (6 * 365 * DAY_MS);
+  writeJson(path.join(dir, 'opt-outs.json'), {
+    optOuts: { '+15551110001': { at: iso(ancient), source: 'sms' } },
+    optIns: {},
+  });
+  const consent = `${JSON.stringify({ phone: '+15551110001', timestamp: iso(ancient), consentText: 'SECRET_CONSENT' })}\n`;
+  fs.writeFileSync(path.join(dir, 'consents.jsonl'), consent, { mode: 0o600 });
+  writeJson(path.join(dir, 'nested', 'opt-outs.json.bak'), { at: iso(ancient) });
+  age(path.join(dir, 'opt-outs.json'), ancient);
+  age(path.join(dir, 'consents.jsonl'), ancient);
+  age(path.join(dir, 'nested', 'opt-outs.json.bak'), ancient);
+  const optBefore = fs.readFileSync(path.join(dir, 'opt-outs.json'));
+  const consentBefore = fs.readFileSync(path.join(dir, 'consents.jsonl'));
+  const bakBefore = fs.readFileSync(path.join(dir, 'nested', 'opt-outs.json.bak'));
+  const optMtime = fs.statSync(path.join(dir, 'opt-outs.json')).mtimeMs;
+  const consentMtime = fs.statSync(path.join(dir, 'consents.jsonl')).mtimeMs;
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '63' },
+    now: () => NOW,
+  }));
+  assert.equal(fs.readFileSync(path.join(dir, 'opt-outs.json')).equals(optBefore), true);
+  assert.equal(fs.readFileSync(path.join(dir, 'consents.jsonl')).equals(consentBefore), true);
+  assert.equal(fs.readFileSync(path.join(dir, 'nested', 'opt-outs.json.bak')).equals(bakBefore), true);
+  assert.equal(fs.statSync(path.join(dir, 'opt-outs.json')).mtimeMs, optMtime);
+  assert.equal(fs.statSync(path.join(dir, 'consents.jsonl')).mtimeMs, consentMtime);
+  assert.equal(value.errors, 0);
+  assert.equal(lines.join('\n').includes('SECRET_CONSENT'), false);
+  assert.equal(lines.join('\n').includes('+15551110001'), false);
+});
+
+test('second-resolution timestamps are aged as milliseconds and sub-second skew is kept', async () => {
+  const dir = tempDir();
+  writeJson(path.join(dir, 'messages.json'), {
+    oldSec: { at: Math.floor((NOW - (100 * DAY_MS)) / 1000), body: 'SEC_OLD' },
+    skew: { at: NOW + 500, body: 'SKEW_BODY' },
+    futureSec: { at: Math.floor(NOW / 1000) + 5, body: 'FUT_SEC' },
+  });
+  const { lines } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir, SUPPORT_RETENTION_DAYS: '90' },
+    now: () => NOW,
+  }));
+  const messages = JSON.parse(fs.readFileSync(path.join(dir, 'messages.json'), 'utf8'));
+  assert.equal(messages.oldSec, undefined);
+  assert.equal(messages.skew.at, NOW + 500);
+  assert.equal(messages.skew.body, 'SKEW_BODY');
+  assert.equal(messages.futureSec.at, Math.floor(NOW / 1000));
+  assert.equal(messages.futureSec.body, 'FUT_SEC');
+  const log = lines.join('\n');
+  assert.equal(log.includes('SEC_OLD'), false);
+  assert.equal(log.includes('SKEW_BODY'), false);
+  assert.equal(log.includes('FUT_SEC'), false);
+});
+
+test('escalation texts are deleted only for this app prefix to the escalation phone', async () => {
+  const dir = tempDir();
+  const support = '+15557650000';
+  const from = '+15557651111';
+  const recipient = '+15557652222';
+  const old = new Date(NOW - (91 * DAY_MS));
+  const rows = [
+    { sid: 'SM_esc', from, to: recipient, dateSent: old, body: 'ManualOS Support: SECRET_ESC' },
+    { sid: 'SM_plain', from, to: recipient, dateSent: old, body: 'hello SECRET_PLAIN' },
+    { sid: 'SM_other', from, to: '+15550001111', dateSent: old, body: 'ManualOS Support: nope' },
+  ];
+  const removed = [];
+  const lists = [];
+  const messageFn = (sid) => ({
+    async remove() { removed.push(sid); },
+  });
+  messageFn.list = async (params) => {
+    lists.push({ ...params });
+    return rows.map((item) => ({ ...item }));
+  };
+  const calls = () => ({ recordings: { list: async () => [] } });
+  calls.list = async () => [];
+  const baseEnv = {
+    NODE_ENV: 'test',
+    SUPPORT_DATA_DIR: dir,
+    SUPPORT_RETENTION_DAYS: '90',
+    TWILIO_ACCOUNT_SID: 'AC_test',
+    TWILIO_AUTH_TOKEN: 'token',
+    TWILIO_SUPPORT_NUMBER: support,
+    TWILIO_FROM_NUMBER: from,
+  };
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: { ...baseEnv, ESCALATION_PHONE: recipient },
+    now: () => NOW,
+    twilioClient: { calls, messages: messageFn },
+  }));
+  assert.deepEqual(removed, ['SM_esc']);
+  assert.equal(lists.length, 3);
+  assert.equal(lists[2].from, from);
+  assert.equal(lists[2].to, recipient);
+  assert.equal(value.sms, 1);
+  assert.equal(value.errors, 0);
+  assert.equal(lines.join('\n').includes('SECRET_ESC'), false);
+  assert.equal(lines.join('\n').includes(from), false);
+
+  removed.length = 0;
+  const warned = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: baseEnv,
+    now: () => NOW,
+    twilioClient: { calls, messages: messageFn },
+  }));
+  assert.deepEqual(removed, []);
+  assert.match(warned.lines.join('\n'), /Support retention skipped escalation texts: ESCALATION_PHONE is not set/);
+  assert.equal(warned.lines.join('\n').includes('SECRET_PLAIN'), false);
+});
+
+test('an unset support number skips every Twilio delete', async () => {
+  const dir = tempDir();
+  let calls = 0;
+  const client = {
+    calls: {
+      list() {
+        calls += 1;
+        return [];
+      },
+    },
+    messages: {
+      list() {
+        calls += 1;
+        return [];
+      },
+    },
+  };
+  const { lines, value } = await capture(() => sweepSupportRetention({
+    directory: dir,
+    env: {
+      NODE_ENV: 'test',
+      SUPPORT_DATA_DIR: dir,
+      TWILIO_ACCOUNT_SID: 'AC_test',
+      TWILIO_AUTH_TOKEN: 'token',
+    },
+    now: () => NOW,
+    twilioClient: client,
+  }));
+  assert.equal(calls, 0);
+  assert.equal(value.twilio, 'off');
+  assert.equal(value.recordings, 0);
+  assert.equal(value.sms, 0);
+  assert.match(lines.join('\n'), /Support retention skipped Twilio deletion: TWILIO_SUPPORT_NUMBER is not set/);
+});
+
+test('the approved HELP reply and consent record stay intact', () => {
+  const withNumber = helpReply({ SUPPORT_PHONE: '+15557654321' });
+  const withoutNumber = helpReply({});
+  assert.equal(withNumber, 'ManualOS (Op3x LLC) support: email support@manualos.com or call +1 555-765-4321. Msg&data rates may apply. Reply STOP to cancel.');
+  assert.equal(withoutNumber, 'ManualOS (Op3x LLC) support: email support@manualos.com. Msg&data rates may apply. Reply STOP to cancel.');
+  const source = fs.readFileSync(path.join(ROOT, 'lib/support/http.js'), 'utf8');
+  assert.equal(source.includes(SMS_CONSENT_LABEL), true);
+  assert.equal(source.includes(SMS_OPT_IN_CONFIRMATION), true);
+  assert.equal(SMS_OPT_IN_CONFIRMATION, "ManualOS (Op3x LLC): You're opted in to support & order-status texts. Msg frequency varies. Msg&data rates may apply. Reply HELP for help, STOP to cancel.");
+  assert.match(SMS_CONSENT_LABEL, /^Yes, text me at this number\. I agree to receive support replies and order\/manual-status texts from ManualOS \(Op3x LLC\)\./);
+
+  const dir = tempDir();
+  const store = createSupportStore({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir },
+    now: () => NOW,
+  });
+  store.addConsent({
+    phone: '+15551110001',
+    consentTextVersion: 'support-sms-v3',
+    timestamp: iso(NOW),
+    source: 'sms',
+    consentText: SMS_CONSENT_LABEL,
+    scope: 'support-replies,order-status',
+    alerts: true,
+    pending: false,
+    webOptIn: true,
+    confirmationSent: true,
+    expiresAt: iso(NOW),
+  });
+  const row = store.listConsents()[0];
+  assert.equal(row.consentText, SMS_CONSENT_LABEL);
+  assert.equal(row.scope, 'support-replies,order-status');
+  assert.equal(row.alerts, true);
+  assert.equal(row.pending, false);
+  assert.equal(row.webOptIn, true);
+  assert.equal(row.confirmationSent, true);
+  assert.equal(row.expiresAt, iso(NOW));
+});
+
+test('digit groups are stored inside the thread lock and cleared after idle', () => {
+  const dir = tempDir();
+  let t = NOW;
+  const store = createSupportStore({
+    directory: dir,
+    env: { NODE_ENV: 'test', SUPPORT_DATA_DIR: dir },
+    now: () => t,
+  });
+  const phone = '+15551110088';
+  const groups = [];
+  for (let i = 0; i < 10; i += 1) {
+    groups.push({ digits: '12345678901234567890', at: t, labeled: i === 0, msg: i });
+  }
+  store.saveThread(phone, {
+    turns: 1,
+    history: [{ role: 'user', content: '4111111111111111' }],
+    startedAt: iso(t),
+    digitGroups: groups,
+  });
+  const live = store.getThread(phone);
+  assert.equal(live.digitGroups.length, 8);
+  assert.equal(live.digitGroups[0].digits, '1234567890123456789');
+  assert.equal(live.history[0].content.includes('4111111111111111'), false);
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'threads.json'), 'utf8'));
+  assert.equal(JSON.stringify(onDisk).includes('1234567890123456789'), false);
+  t = NOW + THREAD_IDLE_MS;
+  const idle = store.getThread(phone);
+  assert.equal(idle.history.length, 0);
+  assert.equal(idle.digitGroups, undefined);
+  t = NOW + 1000;
+  const again = store.getThread(phone);
+  assert.deepEqual(again.digitGroups, []);
+  assert.equal(again.history.length, 1);
 });
