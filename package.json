@@ -16,6 +16,7 @@
         "express": "^4.18.2",
         "fast-xml-parser": "^4.5.7",
         "multer": "^1.4.5-lts.1",
+        "nodemailer": "^7.0.13",
         "puppeteer-core": "^24.43.1",
         "stripe": "^23.0.1",
         "xlsx": "^0.18.5"

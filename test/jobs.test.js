@@ -95,7 +95,7 @@ async function withServer(app, fn) {
 
 async function waitJob(base, id) {
   for (let i = 0; i < 50; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -121,7 +121,7 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
     const done = await waitJob(base, job.id);
     assert.equal(done.status, 'succeeded');
     assert.equal(done.coverage.percent, 100);
-    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal(pdf.status, 200);
     assert.match(pdf.headers.get('content-type'), /pdf/);
     assert.equal(paid.meta.manuals_used, '1');

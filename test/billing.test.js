@@ -71,7 +71,7 @@ test('starter remaining is credits minus manuals_used', () => {
   assert.equal(exhausted.remaining, 0);
 });
 
-test('pro is valid only while the subscription is active or trialing', () => {
+test('pro without an invoice period is valid only while active or trialing', () => {
   for (const status of ['active', 'trialing']) {
     const access = accessFromSession(
       { metadata: { plan: 'pro' }, payment_status: 'paid' },
