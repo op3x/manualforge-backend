@@ -148,7 +148,9 @@ test('a valve actuator is pneumatic, and empty logic is skipped', async () => {
     kind: 'troubleshooting',
     customKind: 'troubleshooting',
   }, {});
-  assert.equal(skipped.skipped, TROUBLE_SKIP);
+  assert.equal(skipped.skipped, undefined);
+  assert.notEqual(skipped.skipped, TROUBLE_SKIP);
+  assert.match(htmlOf(skipped), /did not include alarm text/i);
 });
 
 test('STEP parts merge instance suffixes and requested names split on commas', { skip: fs.existsSync(STEP) ? false : 'private CAD corpus is not in this checkout' }, async () => {
@@ -173,7 +175,9 @@ test('STEP parts merge instance suffixes and requested names split on commas', {
     kind: 'troubleshooting',
     customKind: 'troubleshooting',
   }, {});
-  assert.equal(trouble.skipped, TROUBLE_SKIP);
+  assert.equal(trouble.skipped, undefined);
+  assert.notEqual(trouble.skipped, TROUBLE_SKIP);
+  assert.match(htmlOf(trouble), /did not include alarm text/i);
 
   const selected = selectionFromRequest({
     body: { requested_documents: 'alarm and troubleshooting guide, spare parts list' },
@@ -304,7 +308,8 @@ test('control names skip status phrases and function titles', async () => {
   assert.equal(/power or air returns/i.test(startup), false);
   assert.match(startup, /when power returns/);
   const shutdown = htmlOf(buildShutdown(project, {}));
-  assert.match(shutdown, /The guard stays closed until motion has stopped/);
+  assert.match(shutdown, /People stay outside the guarded space until motion has finished/);
+  assert.equal(/The guard stays closed until motion has stopped/.test(shutdown), false);
   assert.match(shutdown, /Drain hot fluid/);
 
   const cell = await load(path.join(__dirname, 'fixtures/cell.scl'), 'cell.scl');
@@ -342,7 +347,9 @@ test('parts drop utilities and skip an empty list', async () => {
     customKind: 'parts',
   }, {}));
   assert.equal(/DISCHARGE DROP TUB/.test(parts), false);
-  assert.match(parts, /Drop Tub Discharge pump/);
+  assert.equal(/Drop Tub Discharge pump/.test(parts), false);
+  assert.match(parts, /Pump seal/);
+  assert.match(parts, /Steam trap/);
   assert.equal(/<h2[^>]*>[^<]*Spare Parts List/.test(parts), false);
   assert.match(parts, /Parts in this upload/);
 
@@ -355,8 +362,8 @@ test('parts drop utilities and skip an empty list', async () => {
     kind: 'parts',
     customKind: 'parts',
   }, {}));
-  assert.equal((merged.match(/Mash Water pump/g) || []).length, 1);
-  assert.match(merged, /Mash Water pump<\/td><td>Read the nameplate<\/td><td>2/);
+  assert.equal((merged.match(/Mash Water pump/g) || []).length, 0);
+  assert.match(merged, /Pump seal<\/td><td>Read the nameplate<\/td><td>1/);
 
   const bare = emptyProject();
   upsertTag(bare, { name: 'CloseGate', description: 'Close the gate' });
@@ -369,7 +376,14 @@ test('parts drop utilities and skip an empty list', async () => {
     kind: 'parts',
     customKind: 'parts',
   }, {});
-  assert.equal(skipped.skipped, PARTS_SKIP);
+  assert.equal(skipped.skipped, undefined);
+  assert.notEqual(skipped.skipped, PARTS_SKIP);
+  const skippedHtml = htmlOf(skipped);
+  assert.match(skippedHtml, /Add part numbers/);
+  assert.match(skippedHtml, /Seal/);
+  assert.equal(/Close the gate/.test(skippedHtml), false);
+  assert.equal(/Sequence Control/.test(skippedHtml), false);
+  assert.equal(/lubrication point/.test(skippedHtml), false);
 });
 
 test('cell startup warns that homing releases the brake', async () => {
