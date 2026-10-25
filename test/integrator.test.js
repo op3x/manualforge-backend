@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -1174,21 +1175,98 @@ test('a Liberation-only running header stays inside the right margin', async () 
   }
 });
 
-test('wide and emoji headers still fit when Chrome has Noto and the measurer does not', async () => {
+const CJK_FONT_CANDIDATES = [
+  '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',
+  '/usr/share/fonts/truetype/droid/DroidSansFallback.ttf',
+  '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf',
+  '/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf',
+  '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf',
+  '/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf',
+];
+
+function charsetIncludes(charset, code) {
+  for (const part of String(charset || '').trim().split(/\s+/)) {
+    if (!part) continue;
+    const [start, end] = part.split('-');
+    const lo = Number.parseInt(start, 16);
+    const hi = end ? Number.parseInt(end, 16) : lo;
+    if (Number.isFinite(lo) && Number.isFinite(hi) && code >= lo && code <= hi) return true;
+  }
+  return false;
+}
+
+function fontIdentity(file) {
+  try {
+    const out = execFileSync('fc-query', ['-f', '%{family[0]}\\n%{postscriptname}\\n%{charset}\\n', file], {
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const [family, postscript, charset] = out.split('\n');
+    return {
+      file,
+      family: String(family || '').trim(),
+      postscript: String(postscript || '').trim(),
+      covers: charsetIncludes(charset, 0x4e2d),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function findCjkFont() {
+  const files = CJK_FONT_CANDIDATES.filter((file) => fs.existsSync(file));
+  try {
+    const matched = execFileSync('fc-match', ['-f', '%{file}\\n', ':charset=4e2d'], {
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (matched) files.push(matched);
+  } catch {
+    // Candidate paths still apply when fontconfig is not installed.
+  }
+  const seen = new Set();
+  for (const file of files) {
+    if (!file || seen.has(file) || !fs.existsSync(file)) continue;
+    seen.add(file);
+    const identity = fontIdentity(file);
+    if (identity && identity.family && identity.covers) return identity;
+  }
+  return null;
+}
+
+function xmlText(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&apos;',
+  }[ch]));
+}
+
+test('wide and emoji headers still fit when Chrome has Noto and the measurer does not', async (t) => {
   const puppeteer = require('puppeteer-core');
   const executablePath = findChrome();
   assert.ok(executablePath, 'Chrome is required to measure the header');
   const emojiFont = '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf';
-  const wideFont = '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf';
   assert.equal(fs.existsSync(emojiFont), true, 'Noto Color Emoji is required');
-  assert.equal(fs.existsSync(wideFont), true, 'a CJK fallback face is required');
+  const wide = findCjkFont();
+  if (!wide) {
+    t.skip('No CJK fallback font found. Install fonts-droid-fallback or fonts-noto-cjk.');
+    return;
+  }
   const confDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manualos-noto-mismatch-'));
   const emojiDir = path.join(confDir, 'emoji');
   const wideDir = path.join(confDir, 'wide');
   fs.mkdirSync(emojiDir);
   fs.mkdirSync(wideDir);
   fs.symlinkSync(emojiFont, path.join(emojiDir, 'NotoColorEmoji.ttf'));
-  fs.symlinkSync(wideFont, path.join(wideDir, 'DroidSansFallbackFull.ttf'));
+  fs.symlinkSync(wide.file, path.join(wideDir, path.basename(wide.file)));
   const cacheDir = path.join(confDir, 'cache');
   fs.mkdirSync(cacheDir);
   fs.writeFileSync(path.join(confDir, 'fonts.conf'), `<?xml version="1.0"?>
@@ -1199,19 +1277,19 @@ test('wide and emoji headers still fit when Chrome has Noto and the measurer doe
   <cachedir>${cacheDir}</cachedir>
   <alias>
     <family>sans-serif</family>
-    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>${xmlText(wide.family)}</family></prefer>
   </alias>
   <alias>
     <family>Helvetica</family>
-    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>${xmlText(wide.family)}</family></prefer>
   </alias>
   <alias>
     <family>Arial</family>
-    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>${xmlText(wide.family)}</family></prefer>
   </alias>
   <alias>
     <family>Helvetica Neue</family>
-    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>Droid Sans Fallback</family></prefer>
+    <prefer><family>Liberation Sans</family><family>Noto Color Emoji</family><family>${xmlText(wide.family)}</family></prefer>
   </alias>
 </fontconfig>
 `);
@@ -1253,7 +1331,12 @@ test('wide and emoji headers still fit when Chrome has Noto and the measurer doe
       if (name.startsWith('emoji')) {
         assert.equal(embedded.includes('NotoColorEmoji'), true, `${name} did not embed Noto Color Emoji`);
       } else {
-        assert.equal(embedded.includes('DroidSansFallback'), true, `${name} did not embed the wide face`);
+        const wideName = wide.postscript || wide.family.replace(/\s+/g, '');
+        assert.equal(
+          embedded.includes(wideName) || embedded.includes(wide.family),
+          true,
+          `${name} did not embed ${wide.family}`,
+        );
       }
       const layout = headerLayout(pdfHeaderRuns(pdf));
       assert.ok(layout.gaps.length > 0, `${name} produced no running header`);
