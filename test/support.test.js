@@ -45,7 +45,8 @@ function harness(extra = {}) {
   const sent = [];
   const calls = [];
   const completions = [];
-  const now = () => Date.parse('2026-10-25T12:00:00Z');
+  const now = typeof extra.supportNow === 'function' ? extra.supportNow : () => Date.parse('2026-10-25T12:00:00Z');
+  const { supportNow: _supportNow, ...envExtra } = extra;
   const store = tempStore(now);
   const env = {
     NODE_ENV: 'test',
@@ -59,7 +60,7 @@ function harness(extra = {}) {
     LLM_API_KEY: 'sk-test-not-real',
     LLM_MONTHLY_BUDGET_USD: '10',
     PUBLIC_BASE_URL: 'http://127.0.0.1',
-    ...extra,
+    ...envExtra,
   };
   let completeImpl = async () => answer('Starter is $39 one-time for 3 manuals.');
   const app = createApp({
@@ -219,10 +220,12 @@ test('policy facts, budget math, guardrails, and caps', async () => {
   assert.equal(policy.classify('a personal note about starter'), '');
   assert.equal(policy.classify('This is an emergency and someone is injured'), 'safety');
   assert.equal(policy.classify('I will call my lawyer'), 'legal');
-  assert.equal(policy.classify('I am furious'), 'angry');
+  assert.equal(policy.classify('I am furious'), 'complaint');
   assert.equal(policy.classify('I was charged $600 on my invoice'), 'billing');
-  assert.equal(policy.classify('I was charged $39'), '');
-  assert.equal(policy.classify('I was charged $500'), '');
+  assert.equal(policy.classify('I was charged $39'), 'billing');
+  assert.equal(policy.classify('I was charged $500'), 'billing');
+  assert.equal(policy.classify('Please cancel my subscription'), 'billing');
+  assert.equal(policy.classify('I want to file a complaint'), 'complaint');
 
   const env = aiEnv();
   const refund = await policy.triageTurn({
@@ -1316,5 +1319,95 @@ test('a failed escalation text calls the owner unless the caller is already bein
     assert.match(await finished.text(), /<Response><\/Response>/);
     assert.equal(calls.length, 2);
     assert.match(calls[1].twiml, /hung up/);
+  });
+});
+
+test('after-hours billing calls and complaint texts escalate', async () => {
+  const afterHours = () => Date.parse('2026-10-25T07:30:00.000Z');
+  assert.equal(policy.isAfterHours(afterHours()), true);
+  assert.equal(policy.isAfterHours(Date.parse('2026-10-25T17:00:00.000Z')), false);
+  assert.equal(policy.escalatesAtThisHour('billing', afterHours()), true);
+  assert.equal(policy.escalatesAtThisHour('complaint', afterHours()), true);
+
+  const missed = await policy.triageTurn({
+    channel: 'sms',
+    text: 'the balance on my account looks off',
+    state: state(),
+    env: aiEnv(),
+    spentUsd: 0,
+    now: afterHours,
+    complete: async () => answer('I can check that.', {
+      handoff: false,
+      reason: 'billing',
+      summary: 'Account balance looks wrong.',
+    }),
+  });
+  assert.equal(missed.reason, 'billing');
+  assert.equal(missed.escalate, true);
+  assert.equal(missed.handoff, true);
+  assert.match(missed.reply, /cannot approve or issue a refund/i);
+
+  const h = harness({ supportNow: afterHours });
+  await withServer(h.app, async ({ base }) => {
+    h.env.PUBLIC_BASE_URL = base;
+    const voice = await postTwilio(base, h.env, '/api/twilio/voice', {
+      CallSid: 'CA_BILL_NIGHT',
+      From: '+15551118000',
+      To: '+15557654321',
+    });
+    const relay = relayUrlFrom(await voice.text());
+    const client = await openRelay(relay, twilio.getExpectedTwilioSignature(TOKEN, relay, {}));
+    try {
+      client.send({ type: 'setup', callSid: 'CA_BILL_NIGHT', from: '+15551118000' });
+      client.send({ type: 'prompt', voicePrompt: 'I was charged $39 and I need an invoice', lang: 'en-US', last: true });
+      const spoken = await client.next();
+      const ended = await client.next();
+      assert.equal(spoken.type, 'text');
+      assert.match(spoken.token, /Connecting you now/);
+      assert.match(spoken.token, /cannot approve or issue a refund/i);
+      assert.equal(ended.type, 'end');
+      const data = JSON.parse(ended.handoffData);
+      assert.equal(data.handoff, true);
+      assert.equal(data.reason, 'billing');
+      assert.equal(h.completions.length, 0);
+
+      const handoff = await postTwilio(base, h.env, '/api/twilio/voice/handoff', {
+        CallSid: 'CA_BILL_NIGHT',
+        From: '+15551118000',
+        CallStatus: 'in-progress',
+        HandoffData: JSON.stringify(data),
+      });
+      const xml = await handoff.text();
+      assert.match(xml, /<Dial timeout="25" action="\/api\/twilio\/voice\/dial-status">\+15550001111<\/Dial>/);
+      assert.equal(h.sent.length, 1);
+      assert.equal(h.sent[0].to, '+15550001111');
+      assert.match(h.sent[0].body, /charged \$39|billing/i);
+    } finally {
+      client.ws.close();
+    }
+  });
+
+  const texts = harness({ supportNow: afterHours });
+  await withServer(texts.app, async ({ base }) => {
+    texts.env.PUBLIC_BASE_URL = base;
+    const first = await postTwilio(base, texts.env, '/api/twilio/sms', {
+      From: '+15551118001',
+      Body: 'I want to file a complaint about the manual',
+      MessageSid: 'SM_COMPLAINT_1',
+    });
+    const firstXml = await first.text();
+    assert.match(firstXml, /person will follow up/);
+    assert.equal(texts.completions.length, 0);
+    assert.equal(texts.sent.length, 1);
+    assert.equal(texts.sent[0].to, '+15550001111');
+    assert.match(texts.sent[0].body, /complaint/i);
+    const second = await postTwilio(base, texts.env, '/api/twilio/sms', {
+      From: '+15551118001',
+      Body: 'This complaint is still unresolved',
+      MessageSid: 'SM_COMPLAINT_2',
+    });
+    assert.match(await second.text(), /person will follow up/);
+    assert.equal(texts.sent.length, 1);
+    assert.equal(texts.completions.length, 0);
   });
 });
