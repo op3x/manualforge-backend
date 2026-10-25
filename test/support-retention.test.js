@@ -113,10 +113,12 @@ function fakeClock(start) {
 
 function mockTwilio(recordings, transcriptions, hooks = {}) {
   const removed = { recordings: [], transcriptions: [] };
+  const attempted = { recordings: [], transcriptions: [] };
   const lists = [];
   function collection(bucket, items) {
     const fn = (sid) => ({
       async remove() {
+        attempted[bucket].push(sid);
         if (hooks.gone && hooks.gone.has(sid)) {
           const err = new Error('gone SECRET_TWILIO_ERROR');
           err.status = 404;
@@ -144,6 +146,7 @@ function mockTwilio(recordings, transcriptions, hooks = {}) {
       transcriptions: collection('transcriptions', transcriptions),
     },
     removed,
+    attempted,
     lists,
   };
 }
@@ -442,7 +445,8 @@ test('twilio deletion is skipped without credentials and filters by instant', as
     now: () => NOW,
     twilioClient: twilio.client,
   }));
-  assert.deepEqual(twilio.removed.recordings.sort(), ['RE_exact', 'RE_gone', 'RE_old']);
+  assert.deepEqual(twilio.attempted.recordings.sort(), ['RE_exact', 'RE_fail', 'RE_gone', 'RE_old']);
+  assert.deepEqual(twilio.removed.recordings.sort(), ['RE_exact', 'RE_old']);
   assert.deepEqual(twilio.removed.transcriptions, ['TR_old']);
   assert.equal(value.recordings, 3);
   assert.equal(value.transcriptions, 1);
