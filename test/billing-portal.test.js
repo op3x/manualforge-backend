@@ -1712,7 +1712,7 @@ test('billing portal rejects a raw session id after revoke or sunset and returns
     const revoked = await post(base, '/billing-portal', { session_id: sessionId }, '198.51.100.111');
     assert.equal(revoked.status, 401);
     assert.deepEqual(await revoked.json(), {
-      error: 'This sign-in was revoked. Exchange a new access token.',
+      error: 'This sign-in was revoked.',
       code: 'credential_revoked',
     });
     assert.equal(retrieves, 1);

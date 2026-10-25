@@ -62,6 +62,7 @@ const { requestIp } = require('./lib/client-ip');
 const {
   maybeSendCancellationConfirmation,
   mountBillingPortal,
+  verifyPortalToken,
   warnIfManagedPaymentsWithoutPortal,
   warnIfSmtpUnconfigured,
 } = require('./lib/billing-portal');
@@ -560,7 +561,7 @@ function createApp({
     for (const value of [bodyId, header]) {
       if (!value) continue;
       if (rawSessionBlocked(value, env)) {
-        throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+        throw exposed(401, 'This sign-in was revoked.', null, 'credential_revoked');
       }
       assertSessionId(value);
     }
@@ -687,7 +688,7 @@ function createApp({
     }
     for (const value of presented) {
       if (rawSessionBlocked(value, env)) {
-        throw exposed(401, 'This sign-in was revoked. Exchange a new access token.', null, 'credential_revoked');
+        throw exposed(401, 'This sign-in was revoked.', null, 'credential_revoked');
       }
       assertSessionId(value);
     }
@@ -730,6 +731,18 @@ function createApp({
       if (!gate.ok) {
         return tooMany(res, gate.retryAfter, `Too many token exchanges. Try again in ${gate.retryAfter} seconds.`);
       }
+      // A leaked session_id must not mint another token or clear the block.
+      // The cancel HMAC token proves the buyer. A new Checkout session id was
+      // never revoked, so it exchanges on the path below.
+      const revoked = rawSessionBlocked(sessionId, env);
+      const portalCustomer = verifyPortalToken(
+        req.body && typeof req.body.token === 'string' ? req.body.token.trim() : '',
+        env,
+        clock(),
+      );
+      if (revoked && !portalCustomer) {
+        return res.status(401).json({ error: 'This sign-in was revoked.', code: 'credential_revoked' });
+      }
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
@@ -754,13 +767,18 @@ function createApp({
           code: 'purchase_inactive',
         });
       }
+      if (revoked) {
+        if (!access.customerId || !safeEqual(access.customerId, portalCustomer)) {
+          return res.status(401).json({ error: 'This sign-in was revoked.', code: 'credential_revoked' });
+        }
+        clearRawSessionBlock(sessionId, env);
+      }
       const minted = signAccessToken({
         sessionId,
         customerId: access.plan === 'starter' ? '' : (access.customerId || ''),
         subscriptionId: access.plan === 'starter' ? '' : (access.subscriptionId || ''),
       }, env);
       recordTokenExchange(sessionId, env);
-      clearRawSessionBlock(sessionId, env);
       const sidHash = typeof store.hashCredential === 'function' ? store.hashCredential(sessionId) : '';
       if (sidHash) console.log('access_token_minted', sidHash.slice(0, 12));
       res.set(PRIVATE_RESPONSE);

@@ -19,6 +19,7 @@ const {
   EXCHANGE_LIMIT,
 } = require('../lib/access-token');
 const { redactSecrets } = require('../server');
+const { signPortalToken } = require('../lib/billing-portal');
 
 test.after(() => {
   removeTestJobDirectories();
@@ -632,6 +633,34 @@ test('LEGACY_SESSION_ID_SUNSET turns off the direct session_id path', async () =
       const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(token) });
       assert.equal(pdf.status, 200);
       await pdf.arrayBuffer();
+      const revoked = await fetch(`${base}/access-token/revoke`, {
+        method: 'POST',
+        headers: authHeaders(token),
+      });
+      assert.equal(revoked.status, 200);
+      const leaked = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_test_owner' }),
+      });
+      assert.equal(leaked.status, 401);
+      assert.equal((await leaked.json()).code, 'credential_revoked');
+      const again = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: 'cs_test_owner',
+          token: signPortalToken('cus_starter', sunsetEnv, Date.now()),
+        }),
+      });
+      assert.equal(again.status, 200);
+      const resigned = (await again.json()).access_token;
+      const after = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(resigned) });
+      assert.equal(after.status, 200);
+      await after.arrayBuffer();
+      const raw = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_owner' } });
+      assert.equal(raw.status, 401);
+      assert.equal((await raw.json()).code, 'session_id_retired');
     });
   } finally {
     store.close();
@@ -689,10 +718,14 @@ test('a short or missing portal secret disables tokens and reports that on healt
   assert.equal(logged.includes(env.PORTAL_TOKEN_SECRET), false);
 });
 
-test('revoking a token blocks the checkout session until a new token is exchanged', async () => {
+test('revoking a token blocks the checkout session and a bare session_id cannot exchange again', async () => {
   const updates = [];
+  let retrieves = 0;
   const stripe = {
-    checkout: { sessions: { retrieve: async () => starterSession('cs_test_bug27', { manuals_used: '0', plan: 'starter' }) } },
+    checkout: { sessions: { retrieve: async (id) => {
+      retrieves += 1;
+      return starterSession(id, { manuals_used: '0', plan: 'starter' });
+    } } },
     paymentIntents: {
       retrieve: async () => ({ id: 'pi_bug27', metadata: { manuals_used: '0', plan: 'starter' } }),
       update: async (id, params) => {
@@ -759,13 +792,43 @@ test('revoking a token blocks the checkout session until a new token is exchange
       assert.equal(typeof parsed.tokens[jti], 'number');
       assert.equal(Object.values(parsed.sessions).some((state) => state.rawBlocked === true), true);
 
-      const fresh = await fetch(`${base}/access-token`, {
+      const before = retrieves;
+      const leaked = await fetch(`${base}/access-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: 'cs_test_bug27' }),
       });
-      assert.equal(fresh.status, 200);
-      const freshToken = (await fresh.json()).access_token;
+      assert.equal(leaked.status, 401);
+      assert.equal((await leaked.json()).code, 'credential_revoked');
+      assert.equal(retrieves, before);
+      const rawStill = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
+      assert.equal(rawStill.status, 401);
+      assert.equal((await rawStill.json()).code, 'credential_revoked');
+
+      const wrong = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: 'cs_test_bug27',
+          token: signPortalToken('cus_wrong', bugEnv, Date.now()),
+        }),
+      });
+      assert.equal(wrong.status, 401);
+      assert.equal((await wrong.json()).code, 'credential_revoked');
+      assert.equal(retrieves, before + 1);
+      const rawWrong = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
+      assert.equal(rawWrong.status, 401);
+
+      const restored = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: 'cs_test_bug27',
+          token: signPortalToken('cus_starter', bugEnv, Date.now()),
+        }),
+      });
+      assert.equal(restored.status, 200);
+      const freshToken = (await restored.json()).access_token;
       const again = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(freshToken) });
       assert.equal(again.status, 200);
       await again.arrayBuffer();
@@ -774,6 +837,21 @@ test('revoking a token blocks the checkout session until a new token is exchange
       await rawAgain.arrayBuffer();
       const stale = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: authHeaders(firstToken) });
       assert.equal(stale.status, 401);
+
+      const revokedAgain = await fetch(`${base}/access-token/revoke`, {
+        method: 'POST',
+        headers: authHeaders(freshToken),
+      });
+      assert.equal(revokedAgain.status, 200);
+      const freshCheckout = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_test_bug27new' }),
+      });
+      assert.equal(freshCheckout.status, 200);
+      const oldStill = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_bug27' } });
+      assert.equal(oldStill.status, 401);
+      assert.equal((await oldStill.json()).code, 'credential_revoked');
       assert.equal(updates.length, 0);
     });
   } finally {

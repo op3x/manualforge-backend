@@ -1091,7 +1091,7 @@ test('a lost hold-clear response followed by failed confirm reads still delivers
     assert.equal(paid.meta.credit_hold, undefined);
     assert.equal(paid.decrements.count, 0);
     assert.equal((await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } })).status, 200);
-    assert.equal(JSON.stringify(done).includes('credit has been returned'), false);
+    assert.equal(JSON.stringify(done).includes('credit is being returned'), false);
   });
 });
 

@@ -137,7 +137,7 @@ test('BUG-29 a failure after the PDF is saved deletes that file', async () => {
       assert.equal(done.status, 'failed');
       const pdf = await fetch(`${base}/jobs/${body.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       assert.equal(pdf.status, 409);
-      const other = await fetch(`${base}/jobs/${body.id}/pdf`, { headers: { 'X-Session-Id': 'cs_other' } });
+      const other = await fetch(`${base}/jobs/${body.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_otherbuyer' } });
       assert.equal(other.status, 403);
       assert.equal(fs.existsSync(path.join(jobs.dir, `${body.id}.pdf`)), false);
       assert.equal(meta.manuals_used, '0');
@@ -224,7 +224,7 @@ test('a restart keeps the PDF until the hand-back resolves', async () => {
     assert.equal(done.error, null);
     assert.equal(done.progress.message, 'Manual is ready');
     assert.equal(restarted.readPdf(id).toString().includes('%committed'), true);
-    assert.equal(JSON.stringify(done).includes('credit has been returned'), false);
+    assert.equal(JSON.stringify(done).includes('credit is being returned'), false);
   } finally {
     restarted.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -264,13 +264,13 @@ test('a crash after the Starter credit commit keeps the manual and does not retu
       assert.equal(hidden.status, 401);
       const hiddenPdf = await fetch(`${base}/jobs/${id}/pdf`);
       assert.equal(hiddenPdf.status, 401);
-      const other = await fetch(`${base}/jobs/${id}/pdf`, { headers: { 'X-Session-Id': 'cs_other' } });
+      const other = await fetch(`${base}/jobs/${id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_otherbuyer' } });
       assert.equal(other.status, 403);
       const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       const body = await res.json();
       assert.equal(body.status, 'succeeded');
       assert.equal(body.error, null);
-      assert.equal(JSON.stringify(body).includes('credit has been returned'), false);
+      assert.equal(JSON.stringify(body).includes('credit is being returned'), false);
       const pdf = await fetch(`${base}/jobs/${id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       assert.equal(pdf.status, 200);
       assert.equal(Buffer.from(await pdf.arrayBuffer()).toString().includes('%committed'), true);
