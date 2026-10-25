@@ -486,6 +486,37 @@ test('savePdf recreates a missing directory and startup survives EACCES', () => 
   assert.equal(logged.includes(parent), false);
 });
 
+test('the retention sweep leaves open credit holds untouched', () => {
+  const root = tempDir();
+  const jobsDir = path.join(root, 'jobs');
+  fs.mkdirSync(jobsDir);
+  const holds = path.join(root, 'open-holds.json');
+  const queue = path.join(root, 'credit-handbacks.json');
+  const holdsBody = '[{"paymentIntentId":"pi_hold","token":"tok","heldAt":"2020-01-01T00:00:00.000Z"}]\n';
+  const queueBody = '[{"paymentIntentId":"pi_q","token":"tok2"}]\n';
+  fs.writeFileSync(holds, holdsBody);
+  fs.writeFileSync(queue, queueBody);
+  const clock = fakeClock(Date.UTC(2026, 0, 1));
+  const store = openStore(clock, jobsDir);
+  try {
+    const job = store.create({ sessionId: 'cs_owner' });
+    store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
+    job.status = 'succeeded';
+    store.persist(job);
+    const beforeHolds = fs.readFileSync(holds);
+    const beforeQueue = fs.readFileSync(queue);
+    clock.advance(DAY_MS + CLEANUP_INTERVAL_MS);
+    assert.equal(store.get(job.id), null);
+    assert.equal(fs.existsSync(path.join(jobsDir, `${job.id}.pdf`)), false);
+    assert.equal(fs.existsSync(path.join(jobsDir, `${job.id}.json`)), false);
+    assert.equal(fs.readFileSync(holds).equals(beforeHolds), true);
+    assert.equal(fs.readFileSync(queue).equals(beforeQueue), true);
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('cleanup failures log the error code and not the path', () => {
   const clock = fakeClock(Date.UTC(2026, 9, 1));
   const dir = tempDir();

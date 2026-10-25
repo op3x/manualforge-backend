@@ -255,8 +255,9 @@ test('a PDF save failure leaves no delivery stamp and the refund stays eligible'
       assert.equal(created.status, 202);
       const done = await waitJob(base, (await created.json()).id);
       assert.equal(done.status, 'failed');
-      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       assert.equal(pdf.status, 409);
+      assert.equal(jobs.readPdf(done.id), null);
       assert.equal(paid.calls.updates.some((metadata) => metadata.first_manual_at), false);
       assert.equal(Object.hasOwn(paid.meta, 'first_manual_at'), false);
       assert.equal(paid.meta.manuals_used, '0');
@@ -284,24 +285,28 @@ test('a stamp failure does not serve the pdf and refunds the credit', async () =
     }
     return { id, metadata: { ...paid.meta } };
   };
+  const jobs = createJobStore({ env: env() });
   try {
     await withServer(createApp({
       env: env(),
       stripe: paid.stripe,
       anthropic: anthropic(),
       renderPdf: async () => Buffer.from('%PDF-1.4\n%kept\n'),
+      jobs,
     }), async (base) => {
       const created = await postJob(base, 'line.L5X', L5X);
       const done = await waitJob(base, (await created.json()).id);
       assert.equal(done.status, 'failed');
       const pdf = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       assert.equal(pdf.status, 409);
+      assert.equal(jobs.readPdf(done.id), null);
       assert.equal(Object.hasOwn(paid.meta, 'first_manual_at'), false);
       assert.equal(paid.meta.manuals_used, '0');
       assert.equal(Object.hasOwn(paid.meta, 'generation_started_at'), false);
     });
   } finally {
     console.error = original;
+    jobs.close();
   }
   const logged = errors.join('\n');
   assert.match(logged, /First manual delivery stamp failed/);
