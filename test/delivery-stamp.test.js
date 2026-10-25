@@ -3,7 +3,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createApp } = require('../server');
-const { clearGenerationStarted, markGenerationStarted, refundCheck } = require('../lib/delivery');
+const {
+  GENERATION_REFRESH_MS,
+  clearGenerationStarted,
+  markGenerationStarted,
+  refundCheck,
+  touchGenerationStarted,
+} = require('../lib/delivery');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 
 test.after(() => {
@@ -376,6 +382,31 @@ test('G3 a generation marker older than 15 minutes does not block a refund', asy
   assert.equal(later.purchases[0].refund_eligible, true);
   assert.equal(later.purchases[0].reason.startsWith('eligible until '), true);
   assert.equal(paid.meta.generation_in_progress, '1');
+});
+
+test('a generation refresh every 5 minutes keeps a long run in progress', async () => {
+  assert.equal(GENERATION_REFRESH_MS, 5 * 60 * 1000);
+  const paid = starterStripe();
+  recentStarter(paid);
+  const access = { plan: 'starter', paymentIntentId: 'pi_1' };
+  const started = await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  await markGenerationStarted(paid.stripe, access, 'cs_test_starter');
+  assert.equal(paid.meta.generation_in_progress, '2');
+  const refreshedAt = new Date(Date.parse(started) + GENERATION_REFRESH_MS).toISOString();
+  const touched = await touchGenerationStarted(paid.stripe, access, 'cs_test_starter', { now: refreshedAt });
+  assert.equal(touched, refreshedAt);
+  assert.equal(paid.meta.generation_started_at, refreshedAt);
+  assert.equal(paid.meta.generation_in_progress, '2');
+  const stillRunning = await refundCheck(paid.stripe, 'pi_1', { now: Date.parse(started) + (16 * 60 * 1000) });
+  assert.equal(stillRunning.purchases[0].refund_eligible, false);
+  assert.match(stillRunning.purchases[0].reason, /generation in progress since /);
+  paid.meta.generation_started_at = new Date(Date.parse(refreshedAt) - (16 * 60 * 1000)).toISOString();
+  const recoveredAt = new Date(Date.parse(refreshedAt) + GENERATION_REFRESH_MS).toISOString();
+  const recovered = await touchGenerationStarted(paid.stripe, access, 'cs_test_starter', { now: recoveredAt });
+  assert.equal(recovered, recoveredAt);
+  assert.equal(paid.meta.generation_in_progress, '2');
+  const afterLateRefresh = await refundCheck(paid.stripe, 'pi_1', { now: Date.parse(recoveredAt) + (14 * 60 * 1000) });
+  assert.equal(afterLateRefresh.purchases[0].refund_eligible, false);
 });
 
 test('a stale generation count resets to 1 instead of incrementing', async () => {

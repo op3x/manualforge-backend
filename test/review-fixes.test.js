@@ -1035,7 +1035,7 @@ test('R1 a refund and a lost dispute on the same overage purchase decrement once
   });
 });
 
-test('R1j the removal marker is written before the decrement and a rolled list does not decrement again', async () => {
+test('R1j the pending removal marker is written before the decrement and a rolled list does not decrement again', async () => {
   const checkoutEnv = {
     ...env(),
     MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE: 'price_integrator_overage',
@@ -1078,7 +1078,7 @@ test('R1j the removal marker is written before the decrement and a rolled list d
         const nextCount = update.metadata && update.metadata.overage_remaining;
         if (noted && nextCount) {
           const newest = String(noted).split(',').filter(Boolean).pop();
-          assert.equal(intents[newest].metadata.overage_removed, '1');
+          assert.equal(intents[newest].metadata.overage_removed, 'pending');
         }
         subscription.metadata = mergeMeta(subscription.metadata, update);
         return { id, metadata: { ...subscription.metadata } };
@@ -1174,6 +1174,156 @@ test('a removal marker that never writes does not decrement the overage pool', a
     assert.equal(writes, 3);
     assert.equal(subscription.metadata.overage_remaining, '40');
     assert.equal(intent.metadata.overage_removed, undefined);
+  });
+});
+
+function integratorCreditWorld(label) {
+  const checkoutEnv = {
+    ...env(),
+    MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE: 'price_integrator_overage',
+  };
+  const params = overageCheckoutParams(checkoutEnv, {
+    subscriptionId: `sub_${label}`,
+    customerId: `cus_${label}`,
+    sessionId: `cs_${label}`,
+  });
+  const paymentIntentId = `pi_${label}`;
+  const subscription = {
+    id: `sub_${label}`,
+    status: 'active',
+    metadata: { plan: 'integrator', overage_remaining: '2' },
+  };
+  const intents = {
+    [paymentIntentId]: { metadata: { ...params.payment_intent_data.metadata } },
+  };
+  let subscriptionFailures = 0;
+  let finalizeFailures = 0;
+  const stripe = {
+    webhooks: sdk.webhooks,
+    checkout: {
+      sessions: {
+        list: async ({ payment_intent: paymentIntentIdListed }) => {
+          if (!intents[paymentIntentIdListed]) return { data: [] };
+          return { data: [{ id: `cs_${paymentIntentIdListed}`, metadata: params.metadata }] };
+        },
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id) => ({ id, created: 1700000000, metadata: { ...(intents[id] && intents[id].metadata) } }),
+      update: async (id, update) => {
+        if (update.metadata && update.metadata.overage_removed === '1' && finalizeFailures > 0) {
+          finalizeFailures -= 1;
+          throw new Error('finalize crashed');
+        }
+        intents[id].metadata = mergeMeta(intents[id].metadata, update);
+        return { id, metadata: { ...intents[id].metadata } };
+      },
+    },
+    subscriptions: {
+      retrieve: async () => ({ id: subscription.id, status: subscription.status, metadata: { ...subscription.metadata } }),
+      update: async (id, update) => {
+        assert.equal(id, subscription.id);
+        if (subscriptionFailures > 0 && update.metadata && Object.hasOwn(update.metadata, 'overage_remaining')) {
+          subscriptionFailures -= 1;
+          throw new Error('subscription decrement failed');
+        }
+        subscription.metadata = mergeMeta(subscription.metadata, update);
+        return { id, metadata: { ...subscription.metadata } };
+      },
+    },
+  };
+  const refund = (id) => stripeEvent(id, 'charge.refunded', {
+    id: `ch_${paymentIntentId}`,
+    amount: 900,
+    amount_refunded: 900,
+    refunded: true,
+    payment_intent: paymentIntentId,
+  });
+  const lost = (id, disputeId) => stripeEvent(id, 'charge.dispute.closed', {
+    id: disputeId,
+    charge: { id: `ch_${paymentIntentId}`, payment_intent: paymentIntentId },
+    status: 'lost',
+  });
+  return {
+    stripe,
+    subscription,
+    intents,
+    paymentIntentId,
+    refund,
+    lost,
+    failNextDecrements(n) { subscriptionFailures = n; },
+    failNextFinalizes(n) { finalizeFailures = n; },
+  };
+}
+
+test('D1 a refund retry decrements once when the subscription write fails after pending', async () => {
+  const world = integratorCreditWorld('d1');
+  world.failNextDecrements(1);
+  const pi = world.paymentIntentId;
+  await withServer(createApp({ env: env(), stripe: world.stripe, anthropic: null }), async (base) => {
+    const first = await signedWebhook(base, world.refund('evt_d1_refund'));
+    assert.equal(first.status, 500);
+    assert.equal(world.subscription.metadata.overage_remaining, '2');
+    assert.equal(world.intents[pi].metadata.overage_removed, 'pending');
+    assert.equal(String(world.subscription.metadata.overage_removed_intents || '').includes(pi), false);
+    const retry = await signedWebhook(base, world.refund('evt_d1_refund'));
+    assert.equal(retry.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, '1');
+    assert.equal(String(world.subscription.metadata.overage_removed_intents).includes(pi), true);
+    const again = await signedWebhook(base, world.refund('evt_d1_refund_again'));
+    assert.equal(again.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    const lost = await signedWebhook(base, world.lost('evt_d1_lost', 'dp_d1'));
+    assert.equal(lost.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, '1');
+  });
+});
+
+test('D2 a lost dispute retry decrements once when the subscription write fails after pending', async () => {
+  const world = integratorCreditWorld('d2');
+  world.failNextDecrements(1);
+  const pi = world.paymentIntentId;
+  await withServer(createApp({ env: env(), stripe: world.stripe, anthropic: null }), async (base) => {
+    const first = await signedWebhook(base, world.lost('evt_d2_lost', 'dp_d2'));
+    assert.equal(first.status, 500);
+    assert.equal(world.subscription.metadata.overage_remaining, '2');
+    assert.equal(world.intents[pi].metadata.overage_removed, 'pending');
+    assert.equal(String(world.subscription.metadata.overage_removed_intents || '').includes(pi), false);
+    const retry = await signedWebhook(base, world.lost('evt_d2_lost', 'dp_d2'));
+    assert.equal(retry.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, '1');
+    assert.equal(String(world.subscription.metadata.overage_removed_intents).includes(pi), true);
+    const again = await signedWebhook(base, world.lost('evt_d2_lost_again', 'dp_d2'));
+    assert.equal(again.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    const refund = await signedWebhook(base, world.refund('evt_d2_refund'));
+    assert.equal(refund.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, '1');
+  });
+});
+
+test('a crash between the overage decrement and overage_removed=1 does not decrement twice', async () => {
+  const world = integratorCreditWorld('dcrash');
+  world.failNextFinalizes(3);
+  const pi = world.paymentIntentId;
+  await withServer(createApp({ env: env(), stripe: world.stripe, anthropic: null }), async (base) => {
+    const first = await signedWebhook(base, world.refund('evt_dcrash_refund'));
+    assert.equal(first.status, 500);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, 'pending');
+    assert.equal(String(world.subscription.metadata.overage_removed_intents).includes(pi), true);
+    const retry = await signedWebhook(base, world.refund('evt_dcrash_refund'));
+    assert.equal(retry.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, '1');
+    const lost = await signedWebhook(base, world.lost('evt_dcrash_lost', 'dp_dcrash'));
+    assert.equal(lost.status, 200);
+    assert.equal(world.subscription.metadata.overage_remaining, '1');
+    assert.equal(world.intents[pi].metadata.overage_removed, '1');
   });
 });
 

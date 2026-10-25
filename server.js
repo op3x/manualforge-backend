@@ -28,7 +28,14 @@ const { countUnknownEvents, recordUnknownEvent } = require('./lib/unknown-events
 const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
 const { applyPeriodAccessEvent } = require('./lib/period-access');
 const { applyOverageCreditEvent } = require('./lib/overage-credit');
-const { clearGenerationStarted, markFirstManualDelivered, markGenerationStarted, rollbackFirstManual } = require('./lib/delivery');
+const {
+  GENERATION_REFRESH_MS,
+  clearGenerationStarted,
+  markFirstManualDelivered,
+  markGenerationStarted,
+  rollbackFirstManual,
+  touchGenerationStarted,
+} = require('./lib/delivery');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -315,6 +322,17 @@ function createApp({
     else generationRuns.set(key, next);
   }
 
+  function watchGeneration(access, sessionId) {
+    const timer = setInterval(() => {
+      touchGenerationStarted(stripeClient, access, sessionId).catch((err) => {
+        const plan = access && access.plan ? access.plan : 'unknown';
+        console.error('Generation progress refresh failed', plan, redactSecrets(err && err.message ? err.message : err));
+      });
+    }, GENERATION_REFRESH_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    return timer;
+  }
+
   async function beginGeneration(access, sessionId) {
     const key = generationRunKey(access, sessionId);
     const active = generationRuns.get(key) || 0;
@@ -370,6 +388,7 @@ function createApp({
       respond: async (access, files, credit, project) => {
         const sessionId = readSessionId(req);
         const runKey = await beginGeneration(access, sessionId);
+        const refresh = watchGeneration(access, sessionId);
         try {
           const job = store.create({ sessionId });
           res.status(202).json(publicJob(job));
@@ -411,6 +430,7 @@ function createApp({
             job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
           }
         } finally {
+          clearInterval(refresh);
           releaseGenerationRun(runKey);
         }
         return null;
@@ -454,6 +474,7 @@ function createApp({
       respond: async (access, files, credit, project) => {
         const sessionId = readSessionId(req);
         const runKey = await beginGeneration(access, sessionId);
+        const refresh = watchGeneration(access, sessionId);
         let stamp = null;
         try {
           const result = await generateManual({
@@ -490,6 +511,7 @@ function createApp({
           if (!res.headersSent) await clearGenerationStarted(stripeClient, access, sessionId);
           throw err;
         } finally {
+          clearInterval(refresh);
           releaseGenerationRun(runKey);
         }
       },
