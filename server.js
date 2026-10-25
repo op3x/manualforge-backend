@@ -12,11 +12,11 @@ const {
   isProduction,
 } = require('./lib/config');
 const {
-  accessBlock,
   assertCanGenerate,
   blockForAccess,
   checkoutParams,
   isStripeNotFound,
+  checkoutSessionOf,
   publicAccess,
   commitStarterCredit,
   recordStarterManual,
@@ -108,7 +108,6 @@ function sendError(res, err, env) {
     if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
     const body = { error: err.message };
     if (err.publicCode) body.code = err.publicCode;
-    else if (err.code === 'ca_business_required') body.code = err.code;
     return res.status(err.status || 500).json(body);
   }
   logUnexpected(err, env);
@@ -363,13 +362,29 @@ function createApp({
     }
   }
 
-  async function enforceCaPurchase(sessionId) {
+  async function enforceCaPurchase(sessionId, access) {
     await assertCaPurchaseAllowed({
       stripe: stripeClient,
       sessionId,
       env,
       store: caAttestations,
+      session: access ? checkoutSessionOf(access) : undefined,
     });
+  }
+
+  async function blockAfterCa(sessionId) {
+    if (!sessionId || !stripeClient) return null;
+    let access;
+    try {
+      access = await verifyCheckoutSession(stripeClient, sessionId, env);
+    } catch (err) {
+      if (isStripeNotFound(err)) {
+        return { status: 402, message: 'Payment required. This checkout session is not valid.' };
+      }
+      throw err;
+    }
+    await enforceCaPurchase(sessionId, access);
+    return blockForAccess(access);
   }
 
   jobTimeoutMs(env);
@@ -823,6 +838,7 @@ function createApp({
         }
         throw err;
       }
+      await enforceCaPurchase(sessionId, access);
       if (!access || !access.plan) {
         return res.status(404).json({ error: 'No purchase was found for this session.', code: 'purchase_not_found' });
       }
@@ -1116,8 +1132,7 @@ function createApp({
           stopRefresh();
           pageCount = pdfPageCount(result && result.pdf);
           try {
-            await enforceCaPurchase(sessionId);
-            const block = await accessBlock(stripeClient, sessionId, env);
+            const block = await blockAfterCa(sessionId);
             if (block) throw blockedError(block);
             store.savePdf(job.id, result.pdf);
             if (result.pdf && result.pdf.length) stamp = await publishManual(access, sessionId);
@@ -1211,8 +1226,7 @@ function createApp({
       if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
       const sessionForBlock = job.sessionId || (caller && identityMatches(caller, job) ? caller.sessionId : '');
       if (sessionForBlock) {
-        await enforceCaPurchase(sessionForBlock);
-        const block = await accessBlock(stripeClient, sessionForBlock, env);
+        const block = await blockAfterCa(sessionForBlock);
         if (block) return res.status(block.status).json({ error: block.message });
       }
       const pdf = store.readPdf(job.id);
@@ -1251,8 +1265,7 @@ function createApp({
             env,
             renderPdf,
           });
-          await enforceCaPurchase(sessionId);
-          const block = await accessBlock(stripeClient, sessionId, env);
+          const block = await blockAfterCa(sessionId);
           if (block) throw blockedError(block);
           if (!result.pdf || !result.pdf.length) {
             const err = new Error('Manual generation failed. Please try again.');

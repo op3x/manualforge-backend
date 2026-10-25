@@ -82,7 +82,7 @@ function createStripe() {
       sessions: {
         create: async (params) => {
           calls.create.push(params);
-          const id = `cs_created_${calls.create.length}`;
+          const id = `cs_test_created${calls.create.length}`;
           const plan = params.metadata && params.metadata.plan;
           const prior = (params.payment_intent_data && params.payment_intent_data.metadata) || {};
           const session = {
@@ -394,7 +394,7 @@ test('an attestation record is fsynced before it is renamed', async () => {
   try {
     const store = createCaAttestationStore({ env: { SUPPORT_DATA_DIR: dir } });
     await store.record({
-      sessionId: 'cs_fsync',
+      sessionId: 'cs_test_fsync',
       customerId: 'cus_fsync',
       at: AT,
       billingCountry: 'CA',
@@ -402,7 +402,7 @@ test('an attestation record is fsynced before it is renamed', async () => {
       attestationVersion: 'ca-b2b-v1',
     });
     await store.record({
-      sessionId: 'cs_fsync_2',
+      sessionId: 'cs_test_fsync2',
       at: AT,
       billingCountry: 'CA',
       caBusinessAttestation: true,
@@ -410,7 +410,7 @@ test('an attestation record is fsynced before it is renamed', async () => {
     });
     assert.deepEqual(events, ['fsync', 'rename', 'fsync', 'fsync', 'rename', 'fsync']);
     const rows = readJsonl(dir, ATTESTATION_FILE);
-    assert.deepEqual(rows.map((row) => row.sessionId), ['cs_fsync', 'cs_fsync_2']);
+    assert.deepEqual(rows.map((row) => row.sessionId), ['cs_test_fsync', 'cs_test_fsync2']);
   } finally {
     fs.fsyncSync = origFsync;
     fs.renameSync = origRename;
@@ -519,7 +519,7 @@ test('a Canadian business attestation is stored outside the checkout session', a
     const rows = readJsonl(dir, ATTESTATION_FILE);
     assert.equal(rows.length, 2);
     assert.deepEqual(rows[0], {
-      sessionId: 'cs_created_1',
+      sessionId: 'cs_test_created1',
       customerId: 'cus_created',
       userId: null,
       at: AT,
@@ -527,7 +527,7 @@ test('a Canadian business attestation is stored outside the checkout session', a
       caBusinessAttestation: true,
       attestationVersion: 'ca-b2b-v1',
     });
-    assert.equal(rows[1].sessionId, 'cs_created_2');
+    assert.equal(rows[1].sessionId, 'cs_test_created2');
     assert.equal(rows[1].caBusinessAttestation, true);
     const raw = fs.readFileSync(path.join(dir, ATTESTATION_FILE), 'utf8');
     assert.equal(raw.includes('@'), false);
@@ -541,9 +541,9 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const mock = createStripe();
-  const starter = setCountry(seedStarter(mock, 'cs_block'), 'CA');
-  const pro = setCountry(seedPro(mock, 'cs_pro_block'), 'CA');
-  setCountry(seedStarter(mock, 'cs_us'), 'US');
+  const starter = setCountry(seedStarter(mock, 'cs_test_block'), 'CA');
+  const pro = setCountry(seedPro(mock, 'cs_test_problock'), 'CA');
+  setCountry(seedStarter(mock, 'cs_test_us'), 'US');
   const app = appFor(env, mock.stripe);
   try {
     await capture(async (lines) => {
@@ -555,29 +555,29 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
         assert.equal(second.status, 200);
 
         assert.equal(mock.calls.refunds.length, 1);
-        assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_block' });
+        assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_test_block' });
         assert.equal(Object.hasOwn(mock.calls.refunds[0].params, 'amount'), false);
-        assert.equal(mock.calls.refunds[0].options.idempotencyKey, 'ca-b2b-refund-cs_block');
+        assert.equal(mock.calls.refunds[0].options.idempotencyKey, 'ca-b2b-refund-cs_test_block');
         assert.deepEqual(mock.calls.piUpdates, [{
-          id: 'pi_cs_block',
+          id: 'pi_cs_test_block',
           metadata: { credit_status: 'revoked', credit_revoke_reason: 'refund' },
         }]);
         assert.equal(mock.calls.cancels.length, 0);
 
-        const access = await fetch(`${base}/verify-session?session_id=cs_block`);
+        const access = await fetch(`${base}/verify-session?session_id=cs_test_block`);
         assert.equal(access.status, 400);
         assert.deepEqual(await access.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
-        const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_block' } });
+        const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_block' } });
         assert.equal(job.status, 400);
         assert.deepEqual(await job.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
         const health = await fetch(`${base}/health`);
         assert.equal((await health.json()).caBackstopRefunds, 1);
 
-        const unitedStates = await postWebhook(base, completedEvent(mock.sessions.cs_us, 'US'));
+        const unitedStates = await postWebhook(base, completedEvent(mock.sessions.cs_test_us, 'US'));
         assert.equal(unitedStates.status, 200);
         assert.equal(mock.calls.refunds.length, 1);
-        const usAccess = await fetch(`${base}/verify-session?session_id=cs_us`);
+        const usAccess = await fetch(`${base}/verify-session?session_id=cs_test_us`);
         assert.deepEqual(await usAccess.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
 
         const proHook = await postWebhook(base, completedEvent(pro, 'CA'));
@@ -585,23 +585,23 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
         const proAgain = await postWebhook(base, completedEvent(pro, 'CA'));
         assert.equal(proAgain.status, 200);
         assert.equal(mock.calls.refunds.length, 2);
-        assert.deepEqual(mock.calls.refunds[1].params, { payment_intent: 'pi_cs_pro_block' });
+        assert.deepEqual(mock.calls.refunds[1].params, { payment_intent: 'pi_cs_test_problock' });
         assert.deepEqual(mock.calls.cancels, [{
-          id: 'sub_cs_pro_block',
+          id: 'sub_cs_test_problock',
           params: { prorate: false, invoice_now: false },
-          options: { idempotencyKey: 'ca-b2b-cancel-sub_cs_pro_block' },
+          options: { idempotencyKey: 'ca-b2b-cancel-sub_cs_test_problock' },
         }]);
         assert.deepEqual(mock.calls.subUpdates, [{
-          id: 'sub_cs_pro_block',
+          id: 'sub_cs_test_problock',
           metadata: { period_access: 'revoked', period_access_reason: 'refund' },
         }]);
         assert.equal(pro.payment_intent, null);
-        assert.equal(mock.invoices.in_cs_pro_block.payment_intent, undefined);
-        assert.equal(mock.invoices.in_cs_pro_block.charge, undefined);
-        const proAccess = await fetch(`${base}/verify-session?session_id=cs_pro_block`);
+        assert.equal(mock.invoices.in_cs_test_problock.payment_intent, undefined);
+        assert.equal(mock.invoices.in_cs_test_problock.charge, undefined);
+        const proAccess = await fetch(`${base}/verify-session?session_id=cs_test_problock`);
         assert.equal(proAccess.status, 400);
         assert.deepEqual(await proAccess.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
-        const proJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_pro_block' } });
+        const proJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_problock' } });
         assert.equal(proJob.status, 400);
         assert.deepEqual(await proJob.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
         assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 2);
@@ -609,15 +609,15 @@ test('the backstop refunds an unattested Canadian checkout once and blocks acces
       const logged = lines.join('\n');
       assert.match(logged, /Canadian business check refunded lock/);
       assert.match(logged, /Canadian business check already refunded lock/);
-      assert.equal(logged.includes('cs_block'), false);
-      assert.equal(logged.includes('cs_pro_block'), false);
-      assert.equal(logged.includes('cs_us'), false);
+      assert.equal(logged.includes('cs_test_block'), false);
+      assert.equal(logged.includes('cs_test_problock'), false);
+      assert.equal(logged.includes('cs_test_us'), false);
       assert.equal(logged.includes('buyer@example.com'), false);
       assert.equal(logged.includes('sk_test_'), false);
       assert.equal(logged.includes('whsec_'), false);
     });
     const refunds = readJsonl(dir, REFUND_FILE);
-    assert.deepEqual(refunds.map((row) => row.sessionId), ['cs_block', 'cs_pro_block']);
+    assert.deepEqual(refunds.map((row) => row.sessionId), ['cs_test_block', 'cs_test_problock']);
     assert.equal(JSON.stringify(refunds).includes('buyer@example.com'), false);
     assert.equal(JSON.stringify(refunds).includes('sk_test_'), false);
   } finally {
@@ -639,15 +639,15 @@ test('a Canadian billing country with a valid attestation is granted', async () 
         attestationVersion: 'ca-b2b-v1',
       });
       assert.equal(opened.status, 200);
-      const session = setCountry(mock.sessions.cs_created_1, 'CA');
+      const session = setCountry(mock.sessions.cs_test_created1, 'CA');
       const hook = await postWebhook(base, completedEvent(session, 'CA'));
       assert.equal(hook.status, 200);
       assert.equal(mock.calls.refunds.length, 0);
       assert.equal(mock.calls.piUpdates.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
-      const access = await fetch(`${base}/verify-session?session_id=cs_created_1`);
+      const access = await fetch(`${base}/verify-session?session_id=cs_test_created1`);
       assert.deepEqual(await access.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
-      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_created_1' } });
+      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_created1' } });
       assert.equal(job.status, 400);
       assert.equal((await job.json()).error, 'No file or plcContent provided');
       assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 0);
@@ -659,13 +659,13 @@ test('a Canadian billing country with a valid attestation is granted', async () 
         attestationVersion: 'ca-b2b-v1',
       });
       assert.equal(pro.status, 200);
-      const proSession = setCountry(mock.sessions.cs_created_2, 'CA');
+      const proSession = setCountry(mock.sessions.cs_test_created2, 'CA');
       assert.equal(proSession.payment_intent, null);
       const proHook = await postWebhook(base, completedEvent(proSession, 'CA'));
       assert.equal(proHook.status, 200);
       assert.equal(mock.calls.refunds.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
-      const proAccess = await fetch(`${base}/verify-session?session_id=cs_created_2`);
+      const proAccess = await fetch(`${base}/verify-session?session_id=cs_test_created2`);
       assert.deepEqual(await proAccess.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
     });
   } finally {
@@ -677,7 +677,7 @@ test('a repeated webhook after a restart does not refund again', async () => {
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const first = createStripe();
-  const session = seedStarter(first, 'cs_retry');
+  const session = seedStarter(first, 'cs_test_retry');
   try {
     await withServer(appFor(env, first.stripe), async (base) => {
       const response = await postWebhook(base, completedEvent(session, 'CA'));
@@ -685,9 +685,9 @@ test('a repeated webhook after a restart does not refund again', async () => {
       assert.equal(first.calls.refunds.length, 1);
     });
     const second = createStripe();
-    seedStarter(second, 'cs_retry');
+    seedStarter(second, 'cs_test_retry');
     await withServer(appFor(env, second.stripe), async (base) => {
-      const response = await postWebhook(base, completedEvent(second.sessions.cs_retry, 'CA'));
+      const response = await postWebhook(base, completedEvent(second.sessions.cs_test_retry, 'CA'));
       assert.equal(response.status, 200);
       assert.equal(second.calls.refunds.length, 0);
       assert.equal(second.calls.piUpdates.length, 0);
@@ -705,7 +705,7 @@ test('turning the gate off restores checkout and webhook behavior', async () => 
   const env = baseEnv({ SUPPORT_DATA_DIR: dir, MANUALOS_CA_B2B_GATE: '0' });
   const mock = createStripe();
   const expected = await expectedParams(mock.stripe, 'starter', env);
-  const session = setCountry(seedStarter(mock, 'cs_open'), 'CA');
+  const session = setCountry(seedStarter(mock, 'cs_test_open'), 'CA');
   const app = appFor(env, mock.stripe);
   try {
     await withServer(app, async (base) => {
@@ -726,9 +726,9 @@ test('turning the gate off restores checkout and webhook behavior', async () => 
       assert.equal(mock.calls.refunds.length, 0);
       assert.equal(mock.calls.piUpdates.length, 0);
       assert.equal(mock.calls.cancels.length, 0);
-      const access = await fetch(`${base}/verify-session?session_id=cs_open`);
+      const access = await fetch(`${base}/verify-session?session_id=cs_test_open`);
       assert.deepEqual(await access.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
-      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_open' } });
+      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_open' } });
       assert.equal(job.status, 400);
       assert.equal((await job.json()).error, 'No file or plcContent provided');
       assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 0);
@@ -744,7 +744,7 @@ test('another product on the shared account is not refunded', async () => {
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const mock = createStripe();
   const session = {
-    id: 'cs_other_product',
+    id: 'cs_test_otherproduct',
     object: 'checkout.session',
     mode: 'payment',
     payment_status: 'paid',
@@ -775,32 +775,32 @@ test('an unattested Canadian session is refused before any credit or Pro access'
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir, MANUALOS_LEGACY_GENERATE: '1' });
   const mock = createStripe();
-  const starter = setCountry(seedStarter(mock, 'cs_window'), 'CA');
-  const pro = setCountry(seedPro(mock, 'cs_window_pro'), 'CA');
-  setCountry(seedStarter(mock, 'cs_window_us'), 'US');
+  const starter = setCountry(seedStarter(mock, 'cs_test_window'), 'CA');
+  const pro = setCountry(seedPro(mock, 'cs_test_windowpro'), 'CA');
+  setCountry(seedStarter(mock, 'cs_test_windowus'), 'US');
   const app = appFor(env, mock.stripe);
   try {
     await withServer(app, async (base) => {
-      const verify = await fetch(`${base}/verify-session?session_id=cs_window`);
+      const verify = await fetch(`${base}/verify-session?session_id=cs_test_window`);
       assert.equal(verify.status, 400);
       assert.deepEqual(await verify.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
-      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_window' } });
+      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_window' } });
       assert.equal(job.status, 400);
       assert.deepEqual(await job.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
-      const legacy = await fetch(`${base}/generate-manual`, { method: 'POST', headers: { 'X-Session-Id': 'cs_window' } });
+      const legacy = await fetch(`${base}/generate-manual`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_window' } });
       assert.equal(legacy.status, 400);
       assert.deepEqual(await legacy.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
-      const proVerify = await fetch(`${base}/verify-session?session_id=cs_window_pro`);
+      const proVerify = await fetch(`${base}/verify-session?session_id=cs_test_windowpro`);
       assert.equal(proVerify.status, 400);
       assert.deepEqual(await proVerify.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
-      const proJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_window_pro' } });
+      const proJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_windowpro' } });
       assert.equal(proJob.status, 400);
       assert.deepEqual(await proJob.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
-      const unitedStates = await fetch(`${base}/verify-session?session_id=cs_window_us`);
+      const unitedStates = await fetch(`${base}/verify-session?session_id=cs_test_windowus`);
       assert.equal(unitedStates.status, 200);
       assert.deepEqual(await unitedStates.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
     });
@@ -819,13 +819,13 @@ test('a subscription refund uses invoice payments and is not counted when none e
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const mock = createStripe();
-  const listed = setCountry(seedPro(mock, 'cs_list_pay'), 'CA');
+  const listed = setCountry(seedPro(mock, 'cs_test_listpay'), 'CA');
   mock.invoices[listed.invoice] = { id: listed.invoice };
   mock.listedPayments[listed.invoice] = [{
     status: 'paid',
     payment: { type: 'charge', charge: 'ch_list_pay' },
   }];
-  const missing = setCountry(seedPro(mock, 'cs_no_payment'), 'CA');
+  const missing = setCountry(seedPro(mock, 'cs_test_nopayment'), 'CA');
   mock.invoices[missing.invoice] = { id: missing.invoice };
   mock.listedPayments[missing.invoice] = [];
   const app = appFor(env, mock.stripe);
@@ -846,7 +846,7 @@ test('a subscription refund uses invoice payments and is not counted when none e
       assert.equal(mock.calls.cancels.length, 1);
       assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 1);
     });
-    assert.deepEqual(readJsonl(dir, REFUND_FILE).map((row) => row.sessionId), ['cs_list_pay']);
+    assert.deepEqual(readJsonl(dir, REFUND_FILE).map((row) => row.sessionId), ['cs_test_listpay']);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -856,7 +856,7 @@ test('an unpaid completed session waits for async payment success', async () => 
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const mock = createStripe();
-  const session = setCountry(seedStarter(mock, 'cs_delay'), 'CA');
+  const session = setCountry(seedStarter(mock, 'cs_test_delay'), 'CA');
   session.payment_status = 'unpaid';
   const app = appFor(env, mock.stripe);
   try {
@@ -878,14 +878,14 @@ test('an unpaid completed session waits for async payment success', async () => 
         const succeeded = await postWebhook(base, asyncEvent);
         assert.equal(succeeded.status, 200);
         assert.equal(mock.calls.refunds.length, 1);
-        assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_delay' });
+        assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_test_delay' });
         const again = await postWebhook(base, asyncEvent);
         assert.equal(again.status, 200);
         assert.equal(mock.calls.refunds.length, 1);
         assert.equal((await (await fetch(`${base}/health`)).json()).caBackstopRefunds, 1);
       });
       const logged = lines.join('\n');
-      assert.equal(logged.includes('cs_delay'), false);
+      assert.equal(logged.includes('cs_test_delay'), false);
       assert.match(logged, /Canadian business check refunded elay/);
     });
     assert.equal(readJsonl(dir, REFUND_FILE).length, 1);
@@ -908,15 +908,15 @@ test('a United States attestation does not satisfy a Canadian payment', async ()
         attestationVersion: 'ca-b2b-v1',
       });
       assert.equal(opened.status, 200);
-      const session = setCountry(mock.sessions.cs_created_1, 'CA');
+      const session = setCountry(mock.sessions.cs_test_created1, 'CA');
       const hook = await postWebhook(base, completedEvent(session, 'CA'));
       assert.equal(hook.status, 200);
       assert.equal(mock.calls.refunds.length, 1);
-      assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_created_1' });
-      const access = await fetch(`${base}/verify-session?session_id=cs_created_1`);
+      assert.deepEqual(mock.calls.refunds[0].params, { payment_intent: 'pi_cs_test_created1' });
+      const access = await fetch(`${base}/verify-session?session_id=cs_test_created1`);
       assert.equal(access.status, 400);
       assert.deepEqual(await access.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
-      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_created_1' } });
+      const job = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_test_created1' } });
       assert.equal(job.status, 400);
       assert.deepEqual(await job.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
     });
@@ -924,7 +924,7 @@ test('a United States attestation does not satisfy a Canadian payment', async ()
     assert.equal(rows.length, 1);
     assert.equal(rows[0].billingCountry, 'US');
     assert.equal(rows[0].caBusinessAttestation, true);
-    assert.deepEqual(readJsonl(dir, REFUND_FILE).map((row) => row.sessionId), ['cs_created_1']);
+    assert.deepEqual(readJsonl(dir, REFUND_FILE).map((row) => row.sessionId), ['cs_test_created1']);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -949,8 +949,8 @@ test('an unwritable attestation directory expires the checkout session', async (
       assert.equal(body.error, 'Internal server error');
       assert.equal(body.url, undefined);
       assert.equal(mock.calls.create.length, 1);
-      assert.deepEqual(mock.calls.expires, ['cs_created_1']);
-      assert.equal(mock.sessions.cs_created_1.status, 'expired');
+      assert.deepEqual(mock.calls.expires, ['cs_test_created1']);
+      assert.equal(mock.sessions.cs_test_created1.status, 'expired');
     });
     assert.equal(fs.existsSync(path.join(dir, REFUND_FILE)), false);
   } finally {
@@ -1026,14 +1026,14 @@ test('job and PDF reads require the buyer credential and still refuse an unattes
   const dir = tempDir();
   const env = baseEnv({ SUPPORT_DATA_DIR: dir });
   const mock = createStripe();
-  const starter = setCountry(seedStarter(mock, 'cs_pdf'), 'CA');
-  setCountry(seedStarter(mock, 'cs_pdf_other'), 'US');
+  const starter = setCountry(seedStarter(mock, 'cs_test_pdf'), 'CA');
+  setCountry(seedStarter(mock, 'cs_test_pdfother'), 'US');
   const store = createJobStore({
     env,
     directory: path.join(dir, 'jobs'),
     now: () => FIXED,
   });
-  const job = store.create({ sessionId: 'cs_pdf' });
+  const job = store.create({ sessionId: 'cs_test_pdf' });
   store.savePdf(job.id, Buffer.from('%PDF-1.4\n%ca\n'));
   job.status = 'succeeded';
   store.persist(job);
@@ -1050,14 +1050,14 @@ test('job and PDF reads require the buyer credential and still refuse an unattes
       assert.equal(missingList.status, 401);
       assert.equal((await missingList.json()).code, 'authorization_required');
 
-      const otherPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf_other' } });
+      const otherPdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_pdfother' } });
       assert.equal(otherPdf.status, 403);
       assert.equal((await otherPdf.json()).code, 'forbidden');
-      const otherStatus = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_pdf_other' } });
+      const otherStatus = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_pdfother' } });
       assert.equal(otherStatus.status, 403);
       assert.equal((await otherStatus.json()).code, 'forbidden');
 
-      const denied = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      const denied = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_pdf' } });
       assert.equal(denied.status, 400);
       assert.deepEqual(await denied.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
       assert.equal(String(denied.headers.get('content-type') || '').includes('application/pdf'), false);
@@ -1065,31 +1065,31 @@ test('job and PDF reads require the buyer credential and still refuse an unattes
       assert.equal(mock.calls.refunds.length, 0);
       assert.equal(mock.calls.piUpdates.length, 0);
 
-      const status = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      const status = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_pdf' } });
       assert.equal(status.status, 200);
       const statusBody = await status.json();
       assert.equal(statusBody.status, 'succeeded');
-      assert.equal(JSON.stringify(statusBody).includes('cs_pdf'), false);
-      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      assert.equal(JSON.stringify(statusBody).includes('cs_test_pdf'), false);
+      const listed = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_test_pdf' } });
       assert.equal(listed.status, 200);
       assert.deepEqual((await listed.json()).jobs.map((item) => item.id), [job.id]);
 
-      const verify = await fetch(`${base}/verify-session?session_id=cs_pdf`);
+      const verify = await fetch(`${base}/verify-session?session_id=cs_test_pdf`);
       assert.equal(verify.status, 400);
       assert.deepEqual(await verify.json(), { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
 
       const attestations = createCaAttestationStore({ env });
       await attestations.record({
-        sessionId: 'cs_pdf',
+        sessionId: 'cs_test_pdf',
         billingCountry: 'CA',
         at: AT,
       });
 
-      const granted = await fetch(`${base}/verify-session?session_id=cs_pdf`);
+      const granted = await fetch(`${base}/verify-session?session_id=cs_test_pdf`);
       assert.equal(granted.status, 200);
       assert.deepEqual(await granted.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
 
-      const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf' } });
+      const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_pdf' } });
       assert.equal(pdf.status, 200);
       assert.equal(pdf.headers.get('content-type'), 'application/pdf');
       assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
@@ -1100,12 +1100,55 @@ test('job and PDF reads require the buyer credential and still refuse an unattes
       const stillMissing = await fetch(`${base}/jobs/${job.id}/pdf`);
       assert.equal(stillMissing.status, 401);
       assert.equal((await stillMissing.json()).code, 'authorization_required');
-      const stillOther = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_pdf_other' } });
+      const stillOther = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_pdfother' } });
       assert.equal(stillOther.status, 403);
       assert.equal((await stillOther.json()).code, 'forbidden');
     });
   } finally {
     store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a malformed session id is rejected before the Canadian check and access tokens are refused', async () => {
+  const dir = tempDir();
+  const env = baseEnv({
+    SUPPORT_DATA_DIR: dir,
+    PORTAL_TOKEN_SECRET: 'test-portal-token-secret-32bytes-min',
+  });
+  const mock = createStripe();
+  let retrieves = 0;
+  const retrieve = mock.stripe.checkout.sessions.retrieve;
+  mock.stripe.checkout.sessions.retrieve = async (id) => {
+    retrieves += 1;
+    return retrieve(id);
+  };
+  setCountry(seedStarter(mock, 'cs_test_token'), 'CA');
+  const app = appFor(env, mock.stripe);
+  try {
+    await withServer(app, async (base) => {
+      const bad = await fetch(`${base}/verify-session?session_id=cs_block`);
+      assert.equal(bad.status, 400);
+      assert.deepEqual(await bad.json(), { error: 'Session id is invalid.', code: 'invalid_session_id' });
+      const badJob = await fetch(`${base}/jobs`, { method: 'POST', headers: { 'X-Session-Id': 'cs_block' } });
+      assert.equal(badJob.status, 400);
+      assert.equal((await badJob.json()).code, 'invalid_session_id');
+      assert.equal(retrieves, 0);
+
+      const token = await fetch(`${base}/access-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'cs_test_token' }),
+      });
+      assert.equal(token.status, 400);
+      const tokenBody = await token.json();
+      assert.deepEqual(tokenBody, { error: CA_BUSINESS_MESSAGE, code: CA_BUSINESS_CODE });
+      assert.equal(Object.hasOwn(tokenBody, 'access_token'), false);
+      assert.equal(retrieves, 1);
+    });
+    assert.equal(mock.calls.piUpdates.length, 0);
+    assert.equal(mock.calls.refunds.length, 0);
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

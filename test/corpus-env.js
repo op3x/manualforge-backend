@@ -2,7 +2,13 @@ const fs = require('fs');
 const path = require('path');
 
 function corpusRoot() {
-  if (process.env.MANUALOS_CORPUS) return process.env.MANUALOS_CORPUS;
+  if (Object.prototype.hasOwnProperty.call(process.env, 'MANUALOS_CORPUS')) {
+    const configured = process.env.MANUALOS_CORPUS;
+    if (!configured || !fs.existsSync(configured)) {
+      throw new Error(`MANUALOS_CORPUS does not exist: ${configured || '(empty)'}`);
+    }
+    return configured;
+  }
   const store = '/cursor/stores/bot/manualos-test-corpus/';
   if (fs.existsSync(path.join(store, 'manifest.json'))) return store;
   const fixture = path.join(__dirname, 'fixtures', 'corpus');
