@@ -48,7 +48,7 @@ function stripe() {
     checkout: {
       sessions: {
         retrieve: async () => ({
-          id: 'cs_e2e',
+          id: 'cs_test_e2e',
           metadata: { plan: 'pro' },
           payment_status: 'paid',
           payment_intent: null,
@@ -83,7 +83,7 @@ async function withServer(app, fn) {
 
 async function runJob(base, files) {
   const form = new FormData();
-  form.set('session_id', 'cs_e2e');
+  form.set('session_id', 'cs_test_e2e');
   form.set('manufacturer_name', 'ManualOS');
   form.set('product_name', 'Sample line');
   for (const file of files) form.append('files', new Blob([file.buffer]), file.name);
@@ -93,7 +93,7 @@ async function runJob(base, files) {
   }
   const job = await created.json();
   for (let i = 0; i < 120; i += 1) {
-    const headers = { 'X-Session-Id': 'cs_e2e' };
+    const headers = { 'X-Session-Id': 'cs_test_e2e' };
     const body = await (await fetch(`${base}/jobs/${job.id}`, { headers })).json();
     if (body.status === 'succeeded') {
       const pdf = Buffer.from(await (await fetch(`${base}/jobs/${job.id}/pdf`, { headers })).arrayBuffer());

@@ -164,7 +164,7 @@ function proStripe() {
     checkout: {
       sessions: {
         retrieve: async () => ({
-          id: 'cs_pro',
+          id: 'cs_test_pro',
           metadata: { plan: 'pro', brand: 'manualos' },
           payment_status: 'paid',
           subscription: { id: 'sub_1', status: 'active', metadata: { plan: 'pro', brand: 'manualos' } },
@@ -538,18 +538,18 @@ test('Pro jobs do not touch Starter credits', async () => {
     },
   });
   await withServer(hanging, async (base) => {
-    const created = await postJob(base, 'cs_pro');
+    const created = await postJob(base, 'cs_test_pro');
     assert.equal(created.status, 202);
     const job = await created.json();
     await startedPromise;
     fire();
-    const done = await waitJob(base, job.id, null, 'cs_pro');
+    const done = await waitJob(base, job.id, null, 'cs_test_pro');
     assert.equal(done.status, 'failed');
     assert.equal(done.error, JOB_TIMEOUT_MESSAGE);
     assert.equal(paid.touched(), false);
     late();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal((await (await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_pro' } })).json()).status, 'failed');
+    assert.equal((await (await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_pro' } })).json()).status, 'failed');
   });
 
   const again = proStripe();
@@ -560,8 +560,8 @@ test('Pro jobs do not touch Starter credits', async () => {
     renderPdf: async () => Buffer.from('%PDF-1.4\n%pro\n'),
   });
   await withServer(ok, async (base) => {
-    const created = await postJob(base, 'cs_pro');
-    const done = await waitJob(base, (await created.json()).id, null, 'cs_pro');
+    const created = await postJob(base, 'cs_test_pro');
+    const done = await waitJob(base, (await created.json()).id, null, 'cs_test_pro');
     assert.equal(done.status, 'succeeded');
     assert.equal(again.touched(), false);
     const failed = proStripe();
@@ -572,8 +572,8 @@ test('Pro jobs do not touch Starter credits', async () => {
       renderPdf: async () => { throw new Error('render exploded'); },
     });
     await withServer(bad, async (badBase) => {
-      const createdJob = await postJob(badBase, 'cs_pro');
-      const failedJob = await waitJob(badBase, (await createdJob.json()).id, null, 'cs_pro');
+      const createdJob = await postJob(badBase, 'cs_test_pro');
+      const failedJob = await waitJob(badBase, (await createdJob.json()).id, null, 'cs_test_pro');
       assert.equal(failedJob.status, 'failed');
       assert.equal(failed.touched(), false);
     });

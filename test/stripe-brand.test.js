@@ -338,7 +338,7 @@ test('webhook brand matrix for every handled event', async () => {
     assertIgnored(await post({
       id: 'evt_other_brand',
       type: 'checkout.session.completed',
-      data: { object: { id: 'cs_other', object: 'checkout.session', metadata: { brand: 'contoso', plan: 'starter' } } },
+      data: { object: { id: 'cs_test_other', object: 'checkout.session', metadata: { brand: 'contoso', plan: 'starter' } } },
     }), 'contoso');
 
     assertIgnored(await post({
@@ -504,7 +504,7 @@ test('checkout creates a manualos customer and prefers the lookup key', async ()
       sessions: {
         create: async (params) => {
           creates.push(params);
-          return { id: 'cs_lookup', url: 'https://checkout.stripe.com/c/pay/cs_lookup' };
+          return { id: 'cs_test_lookup', url: 'https://checkout.stripe.com/c/pay/cs_test_lookup' };
         },
       },
     },
@@ -574,7 +574,7 @@ test('checkout and webhook failures do not echo secrets or apply side effects', 
       sessions: {
         create: async () => {
           writes.push('sessions.create');
-          return { id: 'cs_x', url: 'https://checkout.stripe.com/c/pay/cs_x' };
+          return { id: 'cs_test_x', url: 'https://checkout.stripe.com/c/pay/cs_test_x' };
         },
       },
     },
@@ -1158,7 +1158,7 @@ test('integrator overage charge with a customer is ManualOS and an HTS customer 
           if (paymentIntentId === 'pi_over_session') {
             return {
               data: [{
-                id: 'cs_over',
+                id: 'cs_test_over',
                 object: 'checkout.session',
                 customer: 'cus_test123',
                 metadata: { brand: 'manualos', plan: 'integrator', kind: 'overage', subscription_id: 'sub_int' },

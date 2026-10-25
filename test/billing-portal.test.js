@@ -76,7 +76,7 @@ function proSession(customer, extra = {}) {
 
 function htsSession(extra = {}) {
   return {
-    id: 'cs_hts',
+    id: 'cs_test_hts',
     mode: 'subscription',
     payment_status: 'paid',
     customer: 'cus_hts',
@@ -316,18 +316,18 @@ test('unknown and known emails match, and a token cannot open another customer',
           lists.push(params);
           await gate;
           if (params.customer_details.email === 'hts-only@example.com') {
-            return { data: [htsSession({ customer: 'cus_hts_only', id: 'cs_hts_only' })] };
+            return { data: [htsSession({ customer: 'cus_hts_only', id: 'cs_test_htsonly' })] };
           }
           if (params.customer_details.email === 'buyer@example.com') {
             return {
               data: [
                 proSession('cus_buyer'),
-                { id: 'cs_starter', mode: 'payment', payment_status: 'paid', customer: 'cus_starter', metadata: { plan: 'starter' } },
-                { id: 'cs_unpaid', mode: 'subscription', payment_status: 'unpaid', customer: 'cus_unpaid', metadata: { plan: 'pro' } },
-                proSession({ id: 'cus_expanded' }, { customer: { id: 'cus_expanded' }, id: 'cs_expanded' }),
+                { id: 'cs_test_starter', mode: 'payment', payment_status: 'paid', customer: 'cus_starter', metadata: { plan: 'starter' } },
+                { id: 'cs_test_unpaid', mode: 'subscription', payment_status: 'unpaid', customer: 'cus_unpaid', metadata: { plan: 'pro' } },
+                proSession({ id: 'cus_expanded' }, { customer: { id: 'cus_expanded' }, id: 'cs_test_expanded' }),
                 htsSession(),
                 {
-                  id: 'cs_unmarked',
+                  id: 'cs_test_unmarked',
                   mode: 'subscription',
                   payment_status: 'paid',
                   customer: 'cus_unmarked',
@@ -341,7 +341,7 @@ test('unknown and known emails match, and a token cannot open another customer',
         },
         retrieve: async (id) => {
           if (id === 'cs_test_pro') return proSession('cus_session');
-          if (id === 'cs_starter') {
+          if (id === 'cs_test_starter') {
             return {
               id,
               mode: 'payment',
@@ -351,11 +351,11 @@ test('unknown and known emails match, and a token cannot open another customer',
               metadata: { plan: 'starter' },
             };
           }
-          if (id === 'cs_old') {
+          if (id === 'cs_test_old') {
             return proSession('cus_old', { id, created: Math.floor(FIXED / 1000) - (25 * 60 * 60) });
           }
-          if (id === 'cs_hts') return htsSession();
-          if (id === 'cs_unmarked') {
+          if (id === 'cs_test_hts') return htsSession();
+          if (id === 'cs_test_unmarked') {
             return {
               id,
               mode: 'subscription',
@@ -365,7 +365,7 @@ test('unknown and known emails match, and a token cannot open another customer',
               metadata: { plan: 'pro' },
             };
           }
-          if (id === 'cs_price') {
+          if (id === 'cs_test_price') {
             return {
               id,
               mode: 'subscription',
@@ -494,10 +494,10 @@ test('unknown and known emails match, and a token cannot open another customer',
     const crossed = await post(base, '/billing-portal', { session_id: 'cs_test_pro', customer: 'cus_buyer' }, '198.51.100.15');
     assert.equal(crossed.status, 400);
     assert.equal(created.length, 3);
-    const starter = await post(base, '/billing-portal', { session_id: 'cs_starter' }, '198.51.100.16');
+    const starter = await post(base, '/billing-portal', { session_id: 'cs_test_starter' }, '198.51.100.16');
     assert.equal(starter.status, 400);
     assert.equal((await starter.json()).error, INVALID_LINK);
-    const missing = await post(base, '/billing-portal', { session_id: 'cs_missing' }, '198.51.100.17');
+    const missing = await post(base, '/billing-portal', { session_id: 'cs_test_missing' }, '198.51.100.17');
     assert.equal(missing.status, 400);
     const missingBody = await missing.json();
     assert.equal(missingBody.error, INVALID_LINK);
@@ -509,16 +509,16 @@ test('unknown and known emails match, and a token cannot open another customer',
     assert.equal(none.status, 400);
     assert.equal((await none.json()).error, 'A cancel link is required.');
 
-    const old = await post(base, '/billing-portal', { session_id: 'cs_old' }, '198.51.100.22');
+    const old = await post(base, '/billing-portal', { session_id: 'cs_test_old' }, '198.51.100.22');
     assert.equal(old.status, 400);
     assert.equal((await old.json()).error, INVALID_LINK);
-    const hts = await post(base, '/billing-portal', { session_id: 'cs_hts' }, '198.51.100.23');
+    const hts = await post(base, '/billing-portal', { session_id: 'cs_test_hts' }, '198.51.100.23');
     assert.equal(hts.status, 400);
     assert.equal((await hts.json()).error, INVALID_LINK);
-    const unmarked = await post(base, '/billing-portal', { session_id: 'cs_unmarked' }, '198.51.100.24');
+    const unmarked = await post(base, '/billing-portal', { session_id: 'cs_test_unmarked' }, '198.51.100.24');
     assert.equal(unmarked.status, 400);
     assert.equal((await unmarked.json()).error, INVALID_LINK);
-    const priced = await post(base, '/billing-portal', { session_id: 'cs_price' }, '198.51.100.25');
+    const priced = await post(base, '/billing-portal', { session_id: 'cs_test_price' }, '198.51.100.25');
     assert.equal(priced.status, 200);
     assert.equal(created.at(-1).customer, 'cus_price');
     const htsToken = signPortalToken('cus_hts', env, FIXED);
@@ -1608,7 +1608,7 @@ test('a failed cancellation send keeps the send error when the claim cannot be r
 
 test('billing portal rejects a raw session id after revoke or sunset and returns to the upload page', async () => exclusive(async () => {
   const secret = 'test-portal-token-secret-32bytes-min';
-  const sessionId = 'cs_portal_revoke_once';
+  const sessionId = 'cs_test_portalrevokeonce';
   let retrieves = 0;
   const created = [];
   const stripe = {

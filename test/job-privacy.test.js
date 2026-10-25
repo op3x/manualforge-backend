@@ -179,7 +179,7 @@ test('a restart through SUPPORT_DATA_DIR keeps a two-hour-old PDF and drops a tr
   });
   try {
     assert.equal(first.dir, path.join(root, 'jobs'));
-    const job = first.create({ sessionId: 'cs_owner' });
+    const job = first.create({ sessionId: 'cs_test_owner' });
     first.savePdf(job.id, Buffer.from('%PDF-1.4\n%kept\n'));
     job.status = 'succeeded';
     first.persist(job);
@@ -265,12 +265,12 @@ test('a job left running at restart is failed and its credit is handed back once
   }
   const first = open();
   try {
-    const running = first.create({ sessionId: 'cs_runner' });
+    const running = first.create({ sessionId: 'cs_test_runner' });
     running.status = 'running';
     running.creditHold = { paymentIntentId, token };
     first.savePdf(running.id, Buffer.from('%PDF-1.4\n%running\n'));
     first.persist(running);
-    const pro = first.create({ sessionId: 'cs_pro_run' });
+    const pro = first.create({ sessionId: 'cs_test_prorun' });
     pro.status = 'running';
     first.savePdf(pro.id, Buffer.from('%PDF-1.4\n%pro\n'));
     first.persist(pro);
@@ -281,7 +281,7 @@ test('a job left running at restart is failed and its credit is handed back once
     const badRecord = JSON.parse(fs.readFileSync(badFile, 'utf8'));
     badRecord.creditHold = { paymentIntentId: 'not-a-pi', token: 'nope' };
     fs.writeFileSync(badFile, JSON.stringify(badRecord));
-    const done = first.create({ sessionId: 'cs_done' });
+    const done = first.create({ sessionId: 'cs_test_done' });
     first.savePdf(done.id, Buffer.from('%PDF-1.4\n%done\n'));
     done.status = 'succeeded';
     first.persist(done);
@@ -289,7 +289,7 @@ test('a job left running at restart is failed and its credit is handed back once
     const doneRecord = JSON.parse(fs.readFileSync(doneFile, 'utf8'));
     doneRecord.creditHold = { paymentIntentId: 'pi_donehold', token: 'fedcba9876543210' };
     fs.writeFileSync(doneFile, JSON.stringify(doneRecord));
-    const queued = first.create({ sessionId: 'cs_wait' });
+    const queued = first.create({ sessionId: 'cs_test_wait' });
     const runningFile = JSON.parse(fs.readFileSync(path.join(first.dir, `${running.id}.json`), 'utf8'));
     assert.equal(runningFile.status, 'running');
     assert.deepEqual(runningFile.creditHold, { paymentIntentId, token });
@@ -420,7 +420,7 @@ test('startup sweep keeps recent orphan pdfs for one hour and still drops files 
 test('no job file on disk contains the raw session id', () => {
   const clock = fakeClock(Date.UTC(2026, 6, 1));
   const dir = tempDir();
-  const sessionId = 'cs_test_retention_session_bearer_value';
+  const sessionId = 'cs_test_retentionsessionbearervalue';
   const customerId = 'cus_retention_customer_bearer';
   const subscriptionId = 'sub_retention_subscription_bearer';
   const store = openStore(clock, dir);
@@ -694,7 +694,7 @@ test('the retention sweep leaves open credit holds untouched', () => {
   const clock = fakeClock(Date.UTC(2026, 0, 1));
   const store = openStore(clock, jobsDir);
   try {
-    const job = store.create({ sessionId: 'cs_owner' });
+    const job = store.create({ sessionId: 'cs_test_owner' });
     store.savePdf(job.id, Buffer.from('%PDF-1.4\n'));
     job.status = 'succeeded';
     store.persist(job);

@@ -224,7 +224,7 @@ async function postWebhook(base, payload) {
 
 async function postJob(base) {
   const form = new FormData();
-  form.set('session_id', 'cs_pro');
+  form.set('session_id', 'cs_test_pro');
   form.set('file', new Blob([L5X]), 'line.L5X');
   return fetch(`${base}/jobs`, { method: 'POST', body: form });
 }
@@ -232,7 +232,7 @@ async function postJob(base) {
 async function postGenerate(base) {
   return fetch(`${base}/generate-manual`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_pro' },
+    headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
     body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
   });
 }
@@ -241,7 +241,7 @@ async function waitForSettledJob(base, id) {
   const deadline = Date.now() + 60000;
   let last = '';
   while (Date.now() < deadline) {
-    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_pro' } });
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_test_pro' } });
     const body = await res.json();
     last = body && body.status ? body.status : '';
     if (last === 'succeeded' || last === 'failed') return body;
@@ -300,7 +300,7 @@ test('a full pro refund blocks the period until a new paid invoice and does not 
     assert.equal(subUpdates.length, 1);
     assert.equal(lines.filter((line) => line.includes('subscription period revoked')).length, 1);
 
-    const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
+    const verified = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
     assert.deepEqual(await verified.json(), { valid: false, plan: 'pro', remaining: null, billingIssue: false });
     const job = await postJob(base);
     assert.equal(job.status, 402);
@@ -330,7 +330,7 @@ test('a full pro refund blocks the period until a new paid invoice and does not 
     assert.equal(subscription.metadata.period_access, 'active');
     assert.equal(subscription.metadata.period_invoice, 'in_next');
     assert.equal(cancels.length, 0);
-    const opened = await fetch(`${base}/verify-session?session_id=cs_pro`);
+    const opened = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
     assert.deepEqual(await opened.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
     const generated = await postGenerate(base);
     assert.equal(generated.status, 200);
@@ -368,7 +368,7 @@ test('a partial pro refund is logged and does not block generation', async () =>
     assertMetadataOnly(subUpdates);
     assert.match(lines.find((line) => line.includes('partial subscription period unchanged')) || '', /amount_refunded 500 amount 7900/);
     assert.equal(lines.some((line) => /@|sk_|whsec_/.test(line)), false);
-    const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
+    const verified = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
     assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
     const created = await postJob(base);
     assert.equal(created.status, 202);
@@ -376,7 +376,7 @@ test('a partial pro refund is logged and does not block generation', async () =>
     await waitForSettledJob(base, createdBody.id);
     const generated = await fetch(`${base}/generate-manual`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_pro' },
+      headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
       body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
       signal: AbortSignal.timeout(120000),
     });
@@ -407,7 +407,7 @@ test('pro disputes suspend, restore on won, and revoke permanently on lost', asy
     }))).status, 200);
     assert.equal(subscription.metadata.period_access, 'active');
     assert.equal(subscription.metadata.period_access_reason, undefined);
-    const restored = await fetch(`${base}/verify-session?session_id=cs_pro`);
+    const restored = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
     assert.equal((await restored.json()).valid, true);
 
     assert.equal((await postWebhook(base, event('evt_open_2', 'charge.dispute.created', {
@@ -464,7 +464,7 @@ test('pro disputes suspend, restore on won, and revoke permanently on lost', asy
     assert.equal(subscription.status, 'canceled');
     assert.equal(cancels.length, 1);
     assertMetadataOnly(subUpdates);
-    assert.equal((await fetch(`${base}/verify-session?session_id=cs_pro`).then((res) => res.json())).valid, false);
+    assert.equal((await fetch(`${base}/verify-session?session_id=cs_test_pro`).then((res) => res.json())).valid, false);
   });
 });
 
@@ -484,7 +484,7 @@ test('a refund of an earlier period does not block the current one', async () =>
     assert.equal(subscription.metadata.period_access, undefined);
     assert.equal(subscription.status, 'active');
     assert.equal(cancels.length, 0);
-    const verified = await fetch(`${base}/verify-session?session_id=cs_pro`);
+    const verified = await fetch(`${base}/verify-session?session_id=cs_test_pro`);
     assert.deepEqual(await verified.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
   });
 });
