@@ -106,15 +106,46 @@ test('the cover keeps a free-text language and drops original instructions', () 
   assert.equal(/original instructions/i.test(html), false);
 });
 
+test('an SCL output counts as motion even when its name has no motion word', () => {
+  const project = emptyProject();
+  project.tags = [{ name: 'QX_Station_Enable_Q1', description: 'Enable', dataType: 'BOOL', direction: 'output' }];
+  assert.equal(equipmentMoves(project), true);
+  const sensor = emptyProject();
+  sensor.tags = [{ name: 'IX_Station_Ready_I1', description: 'Ready', dataType: 'BOOL', direction: 'input' }];
+  assert.equal(equipmentMoves(sensor), false);
+});
+
+test('a Rockwell tag CSV keeps the laser job comment as a rung, not a collapsed tag', async () => {
+  const csv = [
+    'TYPE,SCOPE,NAME,DESCRIPTION,DATATYPE,SPECIFIER,ATTRIBUTES',
+    'TAG,,LEC:C,"","AB:ETHERNET_MODULE:C:0","",""',
+    'TYPE,SCOPE,ROUTINE,COMMENT,OWNING_ELEMENT,LOCATION',
+    'RCOMMENT,"MainProgram","MainRoutine","Copy the local PLC structure to the LEC.","COP(LECEIP_O2T,LEC:O.Data[0],332)","0"',
+    'RCOMMENT,"MainProgram","MainRoutine","Set the laser job file name and set the command to load the job file","MOV(5,nState)","8"',
+  ].join('\n');
+  const project = await parseUploads([{ name: 'mecco-tags.csv', buffer: Buffer.from(csv) }]);
+  assert.equal(project.tags.some((tag) => tag.name === 'ROUTINE' || tag.name === 'MainRoutine'), false);
+  assert.equal(project.tags.length, 1);
+  const routine = project.routines.find((item) => item.name === 'MainRoutine');
+  assert.ok(routine);
+  assert.equal(routine.units.length, 2);
+  assert.match(routine.units.map((unit) => unit.comment).join('\n'), /laser job file/i);
+  const html = htmlOf(project);
+  assert.match(html, /Laser radiation\. Class: Please confirm\./);
+  assert.match(html, /Laser safety eyewear rated for the wavelength/);
+  assert.match(html, /laser interlock must stop the beam/);
+  assert.equal(/Class 3B or Class 4/.test(html), false);
+});
+
 test('the fischertechnik SCL source lists its I/O symbols and does not deny motion', { skip: !corpusHas('plc/fischertechnik_TP_Main.scl') }, async () => {
   const buffer = fs.readFileSync(path.join(corpusRoot(), 'plc/fischertechnik_TP_Main.scl'));
   const project = await parseUploads([{ name: 'fischertechnik_TP_Main.scl', buffer }]);
   const io = project.tags.filter((tag) => /^(IX|QX|IW|QW)_/i.test(tag.name));
   const inputs = io.filter((tag) => tag.direction === 'input');
   const outputs = io.filter((tag) => tag.direction === 'output');
-  assert.ok(io.length >= 80, `I/O symbols ${io.length}`);
-  assert.ok(inputs.length >= 30, `inputs ${inputs.length}`);
-  assert.ok(outputs.length >= 40, `outputs ${outputs.length}`);
+  assert.ok(io.length >= 87, `I/O symbols ${io.length}`);
+  assert.ok(inputs.length >= 33, `inputs ${inputs.length}`);
+  assert.ok(outputs.length >= 54, `outputs ${outputs.length}`);
   assert.equal(equipmentMoves(project), true);
   assert.ok(energyRows(project).some((row) => row.energy === 'Pneumatic'));
   assert.ok(matchedHazards(project).some((hazard) => hazard.id === 'mech.shearing_cutting'));
@@ -122,8 +153,24 @@ test('the fischertechnik SCL source lists its I/O symbols and does not deny moti
   assert.equal((html.match(/Export the block again as SCL/g) || []).length, 0);
   assert.match(html, /Saw/);
   assert.match(html, /Compressor|Pneumatic/);
+  assert.match(html, /IX_HBW_LightBarrierInside_I2|Light barrier/);
+  assert.match(html, /QX_MPO_M3_Saw_Q4/);
   assert.equal(/no guarded motion/i.test(html), false);
   assert.equal(/Nothing moves/i.test(html), false);
+  assert.equal(/This part does not move/i.test(html), false);
+});
+
+test('the mecco tag CSV laser job comment is its own laser hazard', { skip: !corpusHas('plc/mecco_Eip_test-Controller-Tags.CSV') }, async () => {
+  const buffer = fs.readFileSync(path.join(corpusRoot(), 'plc/mecco_Eip_test-Controller-Tags.CSV'));
+  const project = await parseUploads([{ name: 'mecco_Eip_test-Controller-Tags.CSV', buffer }]);
+  assert.equal(project.tags.length, 13);
+  assert.equal(project.tags.some((tag) => tag.name === 'ROUTINE' || tag.name === 'MainRoutine'), false);
+  assert.match(project.routines.flatMap((routine) => routine.units || []).map((unit) => unit.comment).join('\n'), /laser job file/i);
+  const html = htmlOf(project);
+  assert.match(html, /Laser radiation\. Class: Please confirm\./);
+  assert.match(html, /Laser safety eyewear rated for the wavelength/);
+  assert.match(html, /laser interlock must stop the beam/);
+  assert.equal(/Class 3B or Class 4/.test(html), false);
 });
 
 test('the mecco marker is a laser with the class left to confirm', { skip: !corpusHas('plc/mecco_laser_dotpeen_Eip_test.L5K') }, async () => {

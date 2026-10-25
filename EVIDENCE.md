@@ -42,15 +42,19 @@ Counts are `grep -c` on the `pdftotext -layout` output unless a line is named.
 
 ### eddy-14 — Mecco laser hazard
 
-`mecco` before: `Laser radiation` 0, `Class 3B` 0, `laser safety eyewear` 0. The product name is in the header, and that did not add a hazard.
+The QA input is `plc/mecco_Eip_test-Controller-Tags.CSV`. The word laser is only in a rung comment, `Set the laser job file name and set the command to load the job file`. On `67cc179` that comment collapses onto one tag named `MainRoutine`, so the manual never sees it.
 
-`mecco` after, page 8: line 22 `Laser radiation. Class: Please confirm.`; lines 6–12 the PPE row `Laser safety eyewear rated for the wavelength` and `The laser interlock must stop the beam before the enclosure is opened. Confirm the interlock on the machine.`; line 26 `Wear laser safety eyewear rated for the wavelength.` `Class 3B` stays 0. `This part does not move` stays 3 (pages 13 and 14); those lines are static parts, not the laser.
+`mecco-csv` before, 23 pages: `Laser radiation` 0, `laser job` 0, `laser safety eyewear` 0. Page 7 line 45 and page 8 line 6 are `Safety glasses`. Page 23 has the invented tag `ROUTINE`.
+
+`mecco-csv` after, 27 pages: page 8 line 22 `Laser radiation. Class: Please confirm.`; lines 6–11 `Laser safety eyewear rated for the wavelength` and `The laser interlock must stop the beam before the enclosure is opened.`; line 26 `Wear laser safety eyewear rated for the wavelength.` Page 11 lines 13–14 quote the laser job comment. `Class 3B` is 0. `ROUTINE` is 0. The last page is the legal notice.
+
+The L5K `mecco_laser_dotpeen_Eip_test.L5K` is the same hazard from the word laser in that file. `mecco` before: `Laser radiation` 0. `mecco` after, page 8 line 22 is the same `Laser radiation. Class: Please confirm.` line, with the same eyewear and interlock row. `This part does not move` is still 3 on pages 13 and 14; those lines are static parts.
 
 ### eddy-15 — Fischertechnik motion
 
 `fischer` before: `no guarded motion` 1, page 7 line 4 `There is no guarded motion in this calculation.`; `Nothing moves` 3, page 12 lines 9 and 37 and page 13 line 8; `This part does not move` 2, page 12 line 15 and page 13 line 14.
 
-`fischer` after: all three strings are 0. Page 12 line 26 reads `Powered motion is present.`
+`fischer` after: all three strings are 0. Page 12 line 26 reads `Powered motion is present.` The parser keeps all 87 I/O symbols (33 inputs, 54 outputs). A `QX_` / `QW_` / `QB_` / `QD_` symbol counts as motion even when the name has no motion word.
 
 ### eddy-16 — Compressed air and the saw
 
