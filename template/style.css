@@ -9,18 +9,23 @@
 html { font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif; font-size: 9.8pt; color: #1f2a36; line-height: 1.42; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 body { margin: 0; }
 p { margin: 0 0 2.2mm; orphans: 3; widows: 3; }
-.cover { height: 279.4mm; width: 215.9mm; position: relative; padding: 30mm 22mm 0; page-break-after: always; overflow: hidden; }
-.cover .band { position:absolute; left:0; top:0; width:100%; height:14mm; background: repeating-linear-gradient(135deg,#f2b400 0 10mm,#1f2a36 10mm 20mm); }
-.sample-flag { position:absolute; top:22mm; right:22mm; border:2pt solid #b03a2e; color:#b03a2e; font-weight:bold; padding:2mm 4mm; font-size:11pt; letter-spacing:.5pt; }
-.maker { font-size: 11pt; color:#5b6b7b; margin-top: 12mm; text-transform: uppercase; letter-spacing: 1pt; }
-.ctitle { font-size: 34pt; margin: 3mm 0 1mm; color:#13314f; line-height:1.1; }
-.csub { font-size: 16pt; color:#2c4a68; margin-bottom: 12mm; }
-.cimg { border:1pt solid #c9d3dd; padding: 6mm; background:#f7f9fb; margin-bottom: 10mm; }
-.cmeta { width: 60%; border-collapse: collapse; font-size: 10pt; }
-.cmeta td { padding: 1.6mm 0; border-bottom: .5pt solid #dbe2e8; }
+.cover { min-height: 279.4mm; height: auto; width: 215.9mm; position: relative; padding: 18mm 16mm 12mm; page-break-after: always; overflow: visible; display: flex; flex-direction: column; }
+.cover .band { position:absolute; left:0; top:0; width:100%; height:10mm; background: repeating-linear-gradient(135deg,#f2b400 0 10mm,#1f2a36 10mm 20mm); }
+.sample-flag { position:absolute; top:16mm; right:16mm; border:2pt solid #b03a2e; color:#b03a2e; font-weight:bold; padding:2mm 4mm; font-size:11pt; letter-spacing:.5pt; }
+.maker { font-size: 10pt; color:#5b6b7b; margin-top: 6mm; text-transform: uppercase; letter-spacing: 1pt; }
+.ctitle { font-size: 22pt; margin: 2mm 0 1mm; color:#13314f; line-height:1.1; }
+.csub { font-size: 13pt; color:#2c4a68; margin-bottom: 3mm; }
+.cimg { border:1pt solid #c9d3dd; padding: 2mm; background:#f7f9fb; margin-bottom: 3mm; max-height: 42mm; overflow: hidden; }
+.cimg svg { max-height: 36mm; width: 100%; height: auto; }
+.cdisclaimer { border: 1.5pt solid #b03a2e; background: #fff6f4; padding: 2.5mm 3.5mm; margin: 0 0 3mm; font-size: 8pt; line-height: 1.32; }
+.cdisclaimer p { margin: 0 0 1.4mm; }
+.cdisclaimer p:first-child { font-weight: 900; letter-spacing: .2pt; }
+.cdisclaimer p:last-child { margin-bottom: 0; }
+.cmeta { width: 70%; border-collapse: collapse; font-size: 9pt; }
+.cmeta td { padding: 1mm 0; border-bottom: .5pt solid #dbe2e8; }
 .cmeta td:first-child { color:#5b6b7b; width: 40%; }
-.cwarn { margin-top: 10mm; background:#ff7900; color:#000; font-weight:bold; padding: 4mm 5mm; font-size:10.5pt; }
-.cfoot { position:absolute; bottom: 14mm; left:22mm; right:22mm; font-size:8.5pt; color:#b03a2e; border-top: .5pt solid #c9d3dd; padding-top: 3mm; }
+.cwarn { margin-top: 3mm; background:#ff7900; color:#000; font-weight:bold; padding: 2.5mm 4mm; font-size: 9.5pt; }
+.cfoot { margin-top: auto; font-size: 8.5pt; color:#b03a2e; border-top: .5pt solid #c9d3dd; padding-top: 3mm; }
 .toc { page-break-after: always; }
 .tochead { font-size: 20pt; color:#13314f; border-bottom: 2pt solid #13314f; padding-bottom: 2mm; margin: 0 0 5mm; }
 .toc ul { list-style:none; padding:0; margin:0; }
@@ -33,6 +38,9 @@ p { margin: 0 0 2.2mm; orphans: 3; widows: 3; }
 .toc .tp { width: 8mm; text-align:right; flex:none; }
 .toc a .tp::after { content: target-counter(attr(href), page); }
 .chapter { page-break-before: always; }
+.legal-disclaimer { page-break-before: always; break-before: page; }
+.legal-disclaimer p { font-size: 9.8pt; hyphens: manual; -webkit-hyphens: manual; }
+.legal-disclaimer .legal-title { font-weight: 700; font-size: 10.5pt; margin: 0 0 3mm; }
 h1 { font-size: 19pt; color:#13314f; margin: 0 0 5mm; padding-bottom: 2.5mm; border-bottom: 2pt solid #13314f; }
 h1 .num { display:inline-block; background:#13314f; color:#fff; min-width: 10mm; text-align:center; margin-right: 4mm; padding: 0 2mm; border-radius: 1mm; }
 h2 { font-size: 12pt; color:#13314f; margin: 6mm 0 2.5mm; break-after: avoid; page-break-after: avoid; }

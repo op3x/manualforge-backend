@@ -8,7 +8,8 @@
 > **CAD:** Infer each subsystem's function from assembly and part names, motion components (motors, servos, cylinders, vacuum, belts, guides, heaters), sensors, guards and layout along the product flow. Describe what the equipment does and how the parts work together; part lists go to the spare-parts chapter. Use human assembly names, not CAD file names.  
 > **PLC + CAD:** When PLC and CAD are both supplied, write one narrative per subsystem: CAD gives the physical arrangement, PLC gives behaviour, timing and conditions.  
 > **Inferences:** Any statement inferred rather than read directly must carry an 'Inferred - please confirm' marker (rendered as a small badge) until the user confirms it.  
-> **Headings:** Headings are plain-language function names (e.g. 'Case erector', 'Starting and stopping the infeed'), never 'Routine: ...' or tag names.
+> **Headings:** Headings are plain-language function names (e.g. 'Case erector', 'Starting and stopping the infeed'), never 'Routine: ...' or tag names.  
+> **Claims:** Do not write compliant, certified, or meets a named standard. Do not call the manual original instructions or a declaration of conformity. Do not invent numbers, alarm codes, stop reactions, or test intervals. An OTE is not a latch. A less-than comparison is not an over-limit.
 
 Document no. {{doc_number}} · Revision {{revision}} · {{date}} · {{language}} ({{original_or_translation}})
 
@@ -534,10 +535,10 @@ _Table mapping every PLC routine and rung range to the manual section that descr
 | {{routine_name}} | {{x–y}} | {{section}} | {{function_group}} |
 | **Total** | **{{n}} of {{n}}** | | |
 
-## Declaration of conformity and applied standards
+## Standards that may apply
 <!-- id: app.compliance · REQUIRED · seen in 6/10 · [USER] [STD] · refs: EU 2023/1230 Annex III 1.7.4.2(c) -->
 
-_DoC copy or link, list of applied standards._
+_Name standards that commonly cover the topic. Do not write compliant, certified, or meets a named standard. Do not present a declaration of conformity. Do not invent numbers._
 
 ## Warranty and service contacts
 <!-- id: app.warranty · optional · seen in 4/10 · [USER] -->

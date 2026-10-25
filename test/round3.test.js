@@ -175,10 +175,12 @@ test('part names and alarm reactions are readable and distinct', () => {
   };
   const html = renderHtml(buildDocument(project));
   const alarms = html.slice(html.indexOf('Alarm and fault messages</h2>'), html.indexOf('Troubleshooting guide</h2>'));
-  assert.equal((alarms.match(/ALM-\d+/g) || []).length >= 2, true);
+  assert.equal((alarms.match(/ALM-\d+/g) || []).length, 0);
   assert.equal(/high_high_alarm|\bHH\b/.test(alarms), false);
-  assert.match(alarms, /stops and stays stopped/);
-  assert.match(alarms, /keeps running and the warning stays on/);
+  assert.match(alarms, /Cooker 1 level high-high/);
+  assert.match(alarms, /Lower the level/);
+  assert.match(alarms, /Watch the trend/);
+  assert.equal(/stops and stays stopped|keeps running and the warning stays on/.test(alarms), false);
   const troubleAt = html.indexOf('Troubleshooting guide</h2>');
   const trouble = html.slice(troubleAt, html.indexOf('Accidents, breakdowns</h2>', troubleAt));
   assert.equal(/Frame and guarding|Frame does not start/.test(trouble), false);
