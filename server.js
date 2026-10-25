@@ -320,6 +320,7 @@ function createApp({
           res.status(202).json(publicJob(job));
           job.status = 'running';
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
+          let stamp = null;
           try {
             const result = await generateManual({
               files,
@@ -335,13 +336,16 @@ function createApp({
             });
             const block = await accessBlock(stripeClient, sessionId, env);
             if (block) throw blockedError(block);
-            if (result.pdf && result.pdf.length) await publishManual(access, sessionId);
             store.savePdf(job.id, result.pdf);
+            if (result.pdf && result.pdf.length) stamp = await publishManual(access, sessionId);
             job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
             job.warnings = result.warnings || [];
             job.status = 'succeeded';
             job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
           } catch (err) {
+            if (stamp && stamp.created) {
+              await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
+            }
             await clearGenerationStarted(stripeClient, access, sessionId);
             if (credit) {
               try {
