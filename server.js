@@ -2,10 +2,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
-const multer = require('multer');
 const rateLimit = require('express-rate-limit');
 const { createAnthropic } = require('./lib/anthropic');
 const { limits } = require('./lib/limits');
+const { CHECKOUT_PAUSED_MESSAGE, generationPausedError } = require('./lib/ai-budget');
+const { createAiSpend } = require('./lib/ai-spend');
 const {
   allowedOrigins,
   frontendConfigProblem,
@@ -69,6 +70,15 @@ const { createCreditLedger, redactCreditLog, supportDataDirOk, warnSupportDataDi
 const { CREDIT_RETURN_MESSAGE, JOB_TIMEOUT_MESSAGE, jobTimeoutMs } = require('./lib/job-timeout');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
+const { createUpload } = require('./lib/uploads');
+const {
+  confirmDuplicate,
+  dedupeUploadFiles,
+  duplicateUploadError,
+  emptyFileError,
+  tooManyFilesError,
+  uploadSetHash,
+} = require('./lib/upload-errors');
 const { logPythonAvailability, sweepStaleAcdTemps } = require('./lib/parsers/acd');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
 const { redactCustomerLog, redactSecrets } = require('./lib/redact-log');
@@ -97,8 +107,20 @@ function logUnexpected(err, env) {
 function sendError(res, err, env) {
   if (err && err.expose) {
     if (err.logMessage) console.error(redactSecrets(redactCustomerLog(err.logMessage)));
+    const display = typeof err.displayMessage === 'string' && err.displayMessage.trim()
+      ? err.displayMessage
+      : '';
     const body = { error: err.message };
     if (err.publicCode) body.code = err.publicCode;
+    else if (typeof err.code === 'string' && err.code) body.code = err.code;
+    if (display) body.message = display;
+    else if (!err.publicCode && err.code) body.message = err.message;
+    if (err.jobId) body.jobId = err.jobId;
+    if (err.file) body.file = err.file;
+    if (Number.isInteger(err.limit)) body.limit = err.limit;
+    if (Number.isInteger(err.received)) body.received = err.received;
+    if (Number.isInteger(err.sizeBytes)) body.sizeBytes = err.sizeBytes;
+    if (Number.isInteger(err.limitBytes)) body.limitBytes = err.limitBytes;
     return res.status(err.status || 500).json(body);
   }
   logUnexpected(err, env);
@@ -142,7 +164,7 @@ function safePlan(plan) {
 
 function jobErrorCode(err, timeout) {
   if (timeout) return 'job_timeout';
-  const code = err && err.publicCode;
+  const code = err && (err.publicCode || err.code);
   if (typeof code === 'string' && /^[a-z0-9_]+$/.test(code)) return code;
   return 'generation_failed';
 }
@@ -317,6 +339,9 @@ function createApp({
   creditLedger,
   scheduleTimeout = setTimeout,
   cancelTimeout = clearTimeout,
+  beforeGenerate,
+  aiNow,
+  aiWarn,
 } = {}) {
   const stripeClient = stripe !== undefined ? stripe : createStripe(env);
   const anthropicClient = anthropic !== undefined ? anthropic : createAnthropic(env);
@@ -344,8 +369,12 @@ function createApp({
   warnSupportDataDir(env);
   ledger.attach(stripeClient, { now: clock, timeoutMs: () => jobTimeoutMs(env) });
   const mailerClient = mailer !== undefined ? mailer : createSmtpMailer(env);
-  const uploadLimit = limits(env).uploadBytes;
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: uploadLimit, files: 25 } });
+  const upload = createUpload(env);
+  const spend = createAiSpend({
+    env,
+    now: typeof aiNow === 'function' ? aiNow : undefined,
+    warn: typeof aiWarn === 'function' ? aiWarn : undefined,
+  });
   const store = jobs || createJobStore({
     env,
     onAbandonedCredit(hold) {
@@ -406,6 +435,23 @@ function createApp({
     } catch {
       console.error('Support data directory check failed');
     }
+    const cap = limits(env);
+    let aiBudgetPct = 0;
+    try {
+      aiBudgetPct = spend.percent();
+    } catch {
+      console.error('AI spend read failed');
+      aiBudgetPct = 100;
+    }
+    if (typeof aiBudgetPct !== 'number' || !Number.isFinite(aiBudgetPct)) aiBudgetPct = 100;
+    let activeJobs = 0;
+    try {
+      activeJobs = store && typeof store.countActive === 'function' ? store.countActive() : 0;
+    } catch {
+      console.error('Active job count failed');
+      activeJobs = 0;
+    }
+    if (!Number.isInteger(activeJobs) || activeJobs < 0) activeJobs = 0;
     res.json({
       status: 'ok',
       service: 'manualos-backend',
@@ -417,6 +463,10 @@ function createApp({
       creditLedgerOk,
       supportDataDirOk: dataDirOk,
       portalTokens: portalTokensEnabled(env),
+      aiBudgetPct,
+      checkoutPaused: cap.checkoutPaused,
+      generationPaused: cap.generationPaused,
+      activeJobs,
     });
   });
   app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -493,6 +543,12 @@ function createApp({
 
   app.post('/create-checkout-session', checkoutLimiter, async (req, res) => {
     try {
+      if (limits(env).checkoutPaused) {
+        return res.status(503).json({
+          error: 'checkout_paused',
+          message: CHECKOUT_PAUSED_MESSAGE,
+        });
+      }
       if (!stripeClient) {
         console.error('STRIPE_SECRET_KEY is not set');
         return res.status(500).json({ error: 'Checkout is temporarily unavailable.' });
@@ -852,7 +908,32 @@ function createApp({
     }
   }
 
+  function failTrackedJob(job, err, credit) {
+    if (!job || job.status === 'succeeded' || job.status === 'failed') return;
+    const message = err && err.expose
+      ? err.message
+      : (credit ? CREDIT_RETURN_MESSAGE : 'Manual generation failed. Please try again.');
+    job.status = 'failed';
+    job.code = err && err.code ? err.code : null;
+    job.error = message;
+    job.progress = {
+      stage: 'failed',
+      percent: (job.progress && job.progress.percent) || 0,
+      message,
+    };
+    delete job.creditHold;
+    rememberJob(job);
+  }
+
+  function purchaseKeyFor(access, sessionId) {
+    if (access && access.paymentIntentId) return access.paymentIntentId;
+    if (!sessionId || typeof store.hashCredential !== 'function') return '';
+    const hash = store.hashCredential(sessionId);
+    return hash ? `session:${hash}` : '';
+  }
+
   async function runPaid(req, res, { reserveAtStart, respond }) {
+    if (limits(env).generationPaused || spend.blocksJobs()) throw generationPausedError();
     const caller = await generationCaller(req);
     verifyCache.delete(caller.sessionId);
     const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
@@ -860,17 +941,20 @@ function createApp({
     if (tooLong) {
       throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
     }
-    const files = collectFiles(req);
-    if (files.length > FILE_LIMIT) {
-      throw exposed(400, 'Too many files. Send at most 25.', null, 'too_many_files');
-    }
-    if (!files.length) {
+    const collected = collectFiles(req);
+    if (collected.length > FILE_LIMIT) throw tooManyFilesError(collected.length);
+    if (!collected.length) {
       const err = new Error('No file or plcContent provided');
       err.status = 400;
       err.expose = true;
       throw err;
     }
-    const project = await parseUploads(files, fieldsFrom(req), env);
+    for (const file of collected) {
+      if (!file.buffer || file.buffer.length === 0) throw emptyFileError(file.originalname || file.name || 'upload');
+    }
+    const normalized = dedupeUploadFiles(collected);
+    const project = await parseUploads(normalized.files, fieldsFrom(req), env);
+    const ignored = normalized.ignored.concat(project.ignoredFiles || []);
     if (!anthropicClient) {
       const err = new Error('Manual generation is temporarily unavailable.');
       err.status = 503;
@@ -878,32 +962,50 @@ function createApp({
       err.logMessage = 'ANTHROPIC_API_KEY is not configured';
       throw err;
     }
+    const sessionId = caller.sessionId;
+    const uploadHash = uploadSetHash(normalized.files);
+    const purchaseKey = purchaseKeyFor(access, sessionId);
+    if (!confirmDuplicate(req.body) && typeof store.findDuplicate === 'function') {
+      const existing = store.findDuplicate({ purchaseKey, uploadHash });
+      if (existing) throw duplicateUploadError(existing.id);
+    }
+    const job = store.create({
+      ...jobOwnerFields(access, sessionId, project),
+      uploadHash,
+      purchaseKey,
+      ignored,
+    });
     let credit = null;
     if (reserveAtStart && access.plan === 'starter') {
-      credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env, {
-        holds: ledger,
-        now: clock,
-      });
+      try {
+        credit = await reserveStarterCredit(stripeClient, access.paymentIntentId, env, {
+          holds: ledger,
+          now: clock,
+        });
+      } catch (err) {
+        failTrackedJob(job, err);
+        throw err;
+      }
     }
     try {
-      const result = await respond(access, files, credit, project, caller);
-      return result;
+      return await respond(access, normalized.files, credit, project, caller, job);
     } catch (err) {
-      if (credit) {
+      if (credit && job.status !== 'failed' && job.status !== 'succeeded') {
         try {
           await ledger.handBack(stripeClient, credit.paymentIntentId, credit.token);
         } catch (refundErr) {
           console.error('Starter credit hand-back failed', redactCreditLog(refundErr && refundErr.message ? refundErr.message : refundErr));
         }
       }
+      failTrackedJob(job, err, credit);
       throw err;
     }
   }
 
-  app.post('/jobs', jobWriteLimiter, upload.fields([{ name: 'file', maxCount: 25 }, { name: 'files', maxCount: 25 }]), (req, res, next) => {
+  app.post('/jobs', jobWriteLimiter, upload, (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: true,
-      respond: async (access, files, credit, project, caller) => {
+      respond: async (access, files, credit, project, caller, job) => {
         const sessionId = caller.sessionId;
         const runStarted = Date.now();
         const modelCounter = { count: 0 };
@@ -912,7 +1014,6 @@ function createApp({
         let outcomeLogged = false;
         const runKey = await beginGeneration(access, sessionId);
         const refresh = watchGeneration(access, sessionId);
-        let job = null;
         let stamp = null;
         let stopped = false;
         let timer = null;
@@ -957,6 +1058,7 @@ function createApp({
                   : 'Manual generation failed. Please try again.'));
             delete job.creditHold;
             job.status = 'failed';
+            job.code = err && err.code ? err.code : null;
             job.error = message;
             job.progress = { stage: 'failed', percent: (job.progress && job.progress.percent) || 0, message };
             if (typeof store.removePdf === 'function') {
@@ -980,7 +1082,6 @@ function createApp({
           }
         }
         try {
-          job = store.create(jobOwnerFields(access, sessionId, project));
           res.status(202).json(publicJob(job));
           job.status = 'running';
           job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
@@ -988,6 +1089,7 @@ function createApp({
             job.creditHold = { paymentIntentId: credit.paymentIntentId, token: credit.token };
           }
           rememberJob(job);
+          if (typeof beforeGenerate === 'function') await beforeGenerate(job);
           const abort = new AbortController();
           const timeoutMs = jobTimeoutMs(env);
           timer = scheduleTimeout(() => {
@@ -1010,6 +1112,7 @@ function createApp({
               env,
               renderPdf,
               signal: abort.signal,
+              onUsage: (usage) => spend.record(usage),
               onProgress(stage, percent, message) {
                 if (stopped || !job) return;
                 job.status = 'running';
@@ -1020,6 +1123,7 @@ function createApp({
             if (stopped) return null;
             stopped = true;
             if (timer) cancelTimeout(timer);
+            abort.abort();
             await failJob(err, false);
             return null;
           }
@@ -1145,14 +1249,17 @@ function createApp({
       return res.status(404).json({ error: 'not_found' });
     }
     return next();
-  }, jobWriteLimiter, upload.single('file'), (req, res, next) => {
+  }, jobWriteLimiter, upload, (req, res, next) => {
     runPaid(req, res, {
       reserveAtStart: false,
-      respond: async (access, files, credit, project, caller) => {
+      respond: async (access, files, credit, project, caller, job) => {
         const sessionId = caller.sessionId;
         const runKey = await beginGeneration(access, sessionId);
         const refresh = watchGeneration(access, sessionId);
         let stamp = null;
+        job.status = 'running';
+        job.progress = { stage: 'parsing', percent: 5, message: 'Reading project files' };
+        rememberJob(job);
         try {
           const result = await generateManual({
             files,
@@ -1161,6 +1268,7 @@ function createApp({
             anthropic: anthropicClient,
             env,
             renderPdf,
+            onUsage: (usage) => spend.record(usage),
           });
           const block = await accessBlock(stripeClient, sessionId, env);
           if (block) throw blockedError(block);
@@ -1172,6 +1280,10 @@ function createApp({
           }
           stamp = await publishManual(access, sessionId);
           if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
+          job.status = 'succeeded';
+          job.code = null;
+          job.progress = { stage: 'done', percent: 100, message: 'Manual is ready' };
+          rememberJob(job);
           res.set({
             'Content-Type': 'application/pdf',
             'Content-Disposition': contentDisposition(''),

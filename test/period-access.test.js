@@ -377,7 +377,7 @@ test('a partial pro refund is logged and does not block generation', async () =>
     const generated = await fetch(`${base}/generate-manual`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_pro' },
-      body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
+      body: JSON.stringify({ plcContent: L5X.toString('utf8'), confirmDuplicate: true }),
       signal: AbortSignal.timeout(120000),
     });
     assert.equal(generated.status, 200);

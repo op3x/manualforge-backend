@@ -135,7 +135,7 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
     const legacy = await fetch(`${base}/generate-manual`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Session-Id': 'cs_test_starter' },
-      body: JSON.stringify({ plcContent: L5X.toString('utf8') }),
+      body: JSON.stringify({ plcContent: L5X.toString('utf8'), confirmDuplicate: true }),
     });
     assert.equal(legacy.status, 200);
     assert.equal(legacy.headers.get('deprecation'), 'true');
@@ -211,15 +211,16 @@ test('concurrent starter reserves cannot both spend the last credit', async () =
     renderPdf: async () => Buffer.from('%PDF-1.4\n'),
   });
   await withServer(app, async (base) => {
-    const send = () => {
+    const send = (controller) => {
       const form = new FormData();
       form.set('session_id', 'cs_test_starter');
-      form.set('file', new Blob([L5X]), 'line.L5X');
+      const bytes = Buffer.from(L5X.toString('utf8').replace('Name="Line"', `Name="${controller}"`));
+      form.set('file', new Blob([bytes]), 'line.L5X');
       return fetch(`${base}/jobs`, { method: 'POST', body: form });
     };
-    const first = send();
+    const first = send('Line');
     await new Promise((resolve) => setTimeout(resolve, 30));
-    const second = send();
+    const second = send('LineB');
     release();
     const results = await Promise.all([first, second]);
     const statuses = results.map((res) => res.status).sort();
