@@ -3,13 +3,16 @@ const assert = require('node:assert/strict');
 const { checkoutParams } = require('../lib/billing');
 const {
   DESCRIPTIONS,
-  REFUND_POLICY_MESSAGE,
+  PAYMENT_REFUND_MESSAGE,
+  SUBSCRIPTION_REFUND_MESSAGE,
+  starterDescription,
   withCheckoutPolicy,
 } = require('../lib/checkoutPolicy');
 const { createApp } = require('../server');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 
-const REFUND_RULE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable. Cancel anytime.';
+const PAYMENT_MESSAGE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable.';
+const SUBSCRIPTION_MESSAGE = `${PAYMENT_MESSAGE} Cancel anytime.`;
 
 const STARTER_DESCRIPTION = 'ManualOS Starter: 3 operator and maintenance manuals from your files';
 const PRO_MONTHLY = 'ManualOS Pro: unlimited manuals, billed monthly';
@@ -40,7 +43,7 @@ function preserved(result, source) {
   assert.equal(result.integration_identifier, source.integration_identifier);
   assert.equal(result.payment_method_types, undefined);
   assert.equal(result.billing_address_collection, 'required');
-  assert.equal(result.custom_text.submit.message, REFUND_RULE);
+  assert.equal(result.custom_text.submit.message, source.mode === 'subscription' ? SUBSCRIPTION_MESSAGE : PAYMENT_MESSAGE);
   assert.equal(result.consent_collection, undefined);
 }
 
@@ -73,11 +76,33 @@ function withAttribution(params, raw) {
 }
 
 test('submit message is the refund rule and stays within 1200 characters', () => {
-  assert.equal(REFUND_POLICY_MESSAGE, REFUND_RULE);
-  assert.equal(REFUND_RULE.length <= 1200, true);
-  assert.equal(REFUND_RULE.includes('AI'), false);
-  const starter = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env: {} });
-  assert.equal(starter.custom_text.submit.message, REFUND_RULE);
+  assert.equal(PAYMENT_REFUND_MESSAGE, PAYMENT_MESSAGE);
+  assert.equal(SUBSCRIPTION_REFUND_MESSAGE, SUBSCRIPTION_MESSAGE);
+  assert.equal(PAYMENT_MESSAGE.length <= 1200, true);
+  assert.equal(SUBSCRIPTION_MESSAGE.length <= 1200, true);
+  assert.equal(PAYMENT_MESSAGE.includes('Cancel anytime.'), false);
+  assert.equal(SUBSCRIPTION_MESSAGE.endsWith('Cancel anytime.'), true);
+  const starter = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env });
+  const pro = withCheckoutPolicy(checkoutParams('pro', env), { plan: 'pro', env });
+  assert.equal(starter.custom_text.submit.message, PAYMENT_MESSAGE);
+  assert.equal(pro.custom_text.submit.message, SUBSCRIPTION_MESSAGE);
+});
+
+test('starter description uses STARTER_CREDITS and pluralizes', () => {
+  const fiveEnv = { ...env, STARTER_CREDITS: '5' };
+  const five = withCheckoutPolicy(checkoutParams('starter', fiveEnv), { plan: 'starter', env: fiveEnv });
+  assert.equal(five.payment_intent_data.description, 'ManualOS Starter: 5 operator and maintenance manuals from your files');
+  assert.equal(five.payment_intent_data.metadata.manuals_used, '0');
+  assert.deepEqual(five.line_items, checkoutParams('starter', fiveEnv).line_items);
+  assert.equal(five.success_url, checkoutParams('starter', fiveEnv).success_url);
+
+  const oneEnv = { ...env, STARTER_CREDITS: '1' };
+  const one = withCheckoutPolicy(checkoutParams('starter', oneEnv), { plan: 'starter', env: oneEnv });
+  assert.equal(one.payment_intent_data.description, 'ManualOS Starter: 1 operator and maintenance manual from your files');
+
+  const fallback = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env: {} });
+  assert.equal(fallback.payment_intent_data.description, starterDescription({}));
+  assert.equal(fallback.payment_intent_data.description, 'ManualOS Starter: 3 operator and maintenance manuals from your files');
 });
 
 test('payment and subscription plans on main keep existing checkout fields', () => {
@@ -188,7 +213,16 @@ test('descriptions name the plan without calling the product AI', () => {
     seen.push(...customerCopy(result));
   }
 
-  seen.push(REFUND_RULE, ...Object.values(DESCRIPTIONS.pro), ...Object.values(DESCRIPTIONS.integrator), DESCRIPTIONS.starter, DESCRIPTIONS.overage);
+  seen.push(
+    PAYMENT_MESSAGE,
+    SUBSCRIPTION_MESSAGE,
+    ...Object.values(DESCRIPTIONS.pro),
+    ...Object.values(DESCRIPTIONS.integrator),
+    DESCRIPTIONS.overage,
+    starterDescription({ STARTER_CREDITS: '1' }),
+    starterDescription({ STARTER_CREDITS: '3' }),
+    starterDescription({ STARTER_CREDITS: '5' }),
+  );
   for (const text of seen) {
     assert.equal(AI_WORD.test(text), false, text);
     assert.equal(text.includes('AI-generated'), false, text);
@@ -260,7 +294,10 @@ test('checkout policy and attribution compose in either order', () => {
     assert.equal(policyThenAttribution.metadata.plan, plan);
     assert.equal(policyThenAttribution.metadata.attr_utm_source, 'newsletter');
     assert.equal(policyThenAttribution.billing_address_collection, 'required');
-    assert.equal(policyThenAttribution.custom_text.submit.message, REFUND_RULE);
+    assert.equal(
+      policyThenAttribution.custom_text.submit.message,
+      plan === 'pro' ? SUBSCRIPTION_MESSAGE : PAYMENT_MESSAGE,
+    );
     assert.deepEqual(policyThenAttribution.line_items, base.line_items);
     assert.equal(policyThenAttribution.success_url, base.success_url);
     if (plan === 'starter') {
@@ -274,6 +311,134 @@ test('checkout policy and attribution compose in either order', () => {
     for (const text of customerCopy(policyThenAttribution)) {
       assert.equal(AI_WORD.test(text), false);
     }
+  }
+});
+
+function withUtm(metadata) {
+  return {
+    ...metadata,
+    utm_source: 'newsletter',
+    utm_medium: 'email',
+    utm_campaign: 'october',
+    utm_term: 'plc',
+    utm_content: 'hero',
+    attr_utm_source: 'newsletter',
+    attr_utm_medium: 'email',
+    attr_utm_campaign: 'october',
+  };
+}
+
+function integratorCheckout(interval) {
+  return {
+    mode: 'subscription',
+    line_items: [{ price: interval === 'year' ? 'price_int_year' : 'price_int_month', quantity: 1 }],
+    success_url: 'https://manualos.com/upload.html?session_id={CHECKOUT_SESSION_ID}',
+    cancel_url: 'https://manualos.com/#pricing',
+    metadata: withUtm({ plan: 'integrator', interval }),
+    subscription_data: {
+      metadata: withUtm({
+        plan: 'integrator',
+        interval,
+        credits_granted: '0',
+        manuals_used: '0',
+        overage_remaining: '0',
+        credit_generation: '0',
+      }),
+    },
+    integration_identifier: interval === 'year'
+      ? 'manualos_integrator_year_hxqpdmct'
+      : 'manualos_integrator_month_bvkqnwpl',
+  };
+}
+
+function overageCheckout() {
+  return {
+    mode: 'payment',
+    line_items: [{ price: 'price_int_overage', quantity: 1 }],
+    success_url: 'https://manualos.com/upload.html?session_id=cs_parent',
+    cancel_url: 'https://manualos.com/#pricing',
+    client_reference_id: 'sub_int',
+    customer: 'cus_test',
+    metadata: withUtm({
+      plan: 'integrator_overage',
+      subscription_id: 'sub_int',
+      subscription_session_id: 'cs_parent',
+    }),
+    payment_intent_data: {
+      metadata: withUtm({
+        plan: 'integrator_overage',
+        subscription_id: 'sub_int',
+      }),
+    },
+    integration_identifier: 'manualos_integrator_overage_rlnwvkqb',
+  };
+}
+
+test('utm metadata and integrator checkout shapes survive aside from policy fields', () => {
+  const cases = [
+    {
+      plan: 'integrator',
+      source: integratorCheckout('month'),
+      slot: 'subscription_data',
+      description: INTEGRATOR_MONTHLY,
+      message: SUBSCRIPTION_MESSAGE,
+    },
+    {
+      plan: 'integrator_annual',
+      source: integratorCheckout('year'),
+      slot: 'subscription_data',
+      description: INTEGRATOR_YEARLY,
+      message: SUBSCRIPTION_MESSAGE,
+    },
+    {
+      plan: 'integrator_overage',
+      source: overageCheckout(),
+      slot: 'payment_intent_data',
+      description: OVERAGE_DESCRIPTION,
+      message: PAYMENT_MESSAGE,
+    },
+  ];
+  const attribution = {
+    attr_utm_source: 'newsletter',
+    attr_utm_medium: 'email',
+    attr_utm_campaign: 'october',
+    attr_utm_term: 'plc',
+    attr_utm_content: 'hero',
+  };
+  for (const entry of cases) {
+    const result = withCheckoutPolicy(entry.source, { plan: entry.plan, env });
+    const expected = structuredClone(entry.source);
+    expected.billing_address_collection = 'required';
+    expected.custom_text = { submit: { message: entry.message } };
+    expected[entry.slot] = { ...expected[entry.slot], description: entry.description };
+    assert.deepEqual(result, expected);
+    assert.equal(result.consent_collection, undefined);
+    assert.equal(result.custom_text.submit.message.includes('Cancel anytime.'), entry.source.mode === 'subscription');
+    for (const key of Object.keys(entry.source.metadata)) {
+      if (!key.includes('utm_')) continue;
+      assert.equal(result.metadata[key], entry.source.metadata[key], key);
+      assert.equal(result[entry.slot].metadata[key], entry.source[entry.slot].metadata[key], key);
+    }
+
+    const composed = withCheckoutPolicy(withAttribution(structuredClone(entry.source), attribution), {
+      plan: entry.plan,
+      env,
+    });
+    for (const [key, value] of Object.entries(attribution)) {
+      assert.equal(composed.metadata[key], value, key);
+    }
+    assert.equal(composed.metadata.plan, entry.source.metadata.plan);
+    assert.deepEqual(composed.line_items, entry.source.line_items);
+    assert.equal(composed.success_url, entry.source.success_url);
+    assert.equal(composed.cancel_url, entry.source.cancel_url);
+    assert.equal(composed.integration_identifier, entry.source.integration_identifier);
+    assert.equal(composed.client_reference_id, entry.source.client_reference_id);
+    assert.equal(composed.customer, entry.source.customer);
+    assert.equal(composed[entry.slot].description, entry.description);
+    const nestedMetadata = entry.source.mode === 'subscription'
+      ? { ...entry.source[entry.slot].metadata, ...attribution }
+      : entry.source[entry.slot].metadata;
+    assert.deepEqual(composed[entry.slot].metadata, nestedMetadata);
   }
 });
 
