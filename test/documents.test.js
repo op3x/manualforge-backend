@@ -195,7 +195,9 @@ test('schedules and procedures follow the equipment that was found', async () =>
   assert.match(pm, /500 operating hours/);
   assert.match(pm, /conveyor motor/i);
   assert.equal(/run command/i.test(pm), false);
-  assert.match(pm, /pneumatic cylinder valve/i);
+  assert.match(pm, /pneumatic cylinder/i);
+  assert.match(pm, /scored rods/i);
+  assert.equal(/cylinder valve/i.test(pm.slice(pm.search(/scored rods/i) - 80, pm.search(/scored rods/i) + 40)), false);
   assert.match(pm, /hydraulic pump/i);
   assert.match(pm, /emergency stop circuit/i);
   assert.match(pm, /part present sensor/i);
