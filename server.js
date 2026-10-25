@@ -23,6 +23,8 @@ const {
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { createJobStore, publicJob } = require('./lib/jobs/store');
+const { redactCustomerLog } = require('./lib/redact-log');
+const { closeBrowser } = require('./lib/manual/pdf');
 function createStripe(env) {
   const key = env.STRIPE_SECRET_KEY;
   if (!key || !String(key).trim()) return null;
@@ -31,10 +33,10 @@ function createStripe(env) {
 
 function sendError(res, err) {
   if (err && err.expose) {
-    if (err.logMessage) console.error(err.logMessage);
+    if (err.logMessage) console.error(redactCustomerLog(err.logMessage));
     return res.status(err.status || 500).json({ error: err.message });
   }
-  console.error(err && err.stack ? err.stack : err);
+  console.error(redactCustomerLog(err && err.stack ? err.stack : err));
   return res.status(500).json({ error: 'Internal server error' });
 }
 
@@ -64,7 +66,7 @@ function collectFiles(req) {
 function fieldsFrom(req) {
   const body = req.body || {};
   const fields = {};
-  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language']) {
+  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language', 'date']) {
     if (typeof body[key] === 'string') fields[key] = body[key];
   }
   return fields;
@@ -236,7 +238,7 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
               console.error('Starter credit refund failed', refundErr && refundErr.message ? refundErr.message : refundErr);
             }
           }
-          console.error(err && err.logMessage ? err.logMessage : (err && err.message));
+          console.error(redactCustomerLog(err && err.logMessage ? err.logMessage : (err && err.message)));
           job.status = 'failed';
           job.error = err && err.expose ? err.message : 'Manual generation failed. Please try again.';
           job.progress = { stage: 'failed', percent: job.progress.percent || 0, message: job.error };
@@ -297,7 +299,7 @@ function createApp({ env = process.env, stripe, anthropic, renderPdf, jobs } = {
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     if (err && err.expose) return sendError(res, err);
-    console.error(err && err.stack ? err.stack : err);
+    console.error(redactCustomerLog(err && err.stack ? err.stack : err));
     if (err && err.name === 'MulterError') {
       const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.';
       return res.status(400).json({ error: message });
@@ -322,15 +324,53 @@ function prepareListen(env = process.env, exit = process.exit) {
   return true;
 }
 
+function installShutdown(server, {
+  closeBrowser: close = closeBrowser,
+  exit = process.exit,
+  on = (signal, listener) => process.on(signal, listener),
+  setTimeout: schedule = setTimeout,
+  clearTimeout: cancel = clearTimeout,
+  forceMs = 10000,
+} = {}) {
+  let shuttingDown = false;
+  const handler = () => new Promise((resolve) => {
+    if (shuttingDown) return resolve();
+    shuttingDown = true;
+    let settled = false;
+    let timer;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) cancel(timer);
+      Promise.resolve()
+        .then(() => close())
+        .then(() => exit(0), () => exit(0))
+        .then(resolve, resolve);
+    };
+    timer = schedule(finish, forceMs);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    if (server && typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+    if (server && typeof server.closeAllConnections === 'function') server.closeAllConnections();
+    if (server && typeof server.close === 'function') server.close(finish);
+    else finish();
+  });
+  on('SIGTERM', handler);
+  on('SIGINT', handler);
+  on('SIGHUP', handler);
+  return handler;
+}
+
 function start() {
   if (!prepareListen(process.env)) return null;
   const port = process.env.PORT || 3001;
   const app = createApp();
-  return app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`ManualOS backend running on port ${port}`);
   });
+  installShutdown(server);
+  return server;
 }
 
 if (require.main === module) start();
 
-module.exports = { createApp, prepareListen, start };
+module.exports = { createApp, prepareListen, start, installShutdown, fieldsFrom };
