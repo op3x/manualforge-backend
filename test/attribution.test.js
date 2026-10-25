@@ -20,7 +20,7 @@ const validAttribution = {
   first_seen_at: '2026-10-25T05:41:00.123Z',
   referrer_host: 'https://WWW.Google.com/search?q=1',
   gclid: 'Cj0KCQjw_test',
-  msclkid: 'msclk-test',
+  msclkid: 'abc123def456',
 };
 
 function captureLog(fn) {
@@ -38,14 +38,14 @@ function captureLog(fn) {
 }
 
 function assertSafeMetadata(metadata) {
+  assert.ok(Object.keys(metadata).length <= 50);
   for (const [key, value] of Object.entries(metadata)) {
     assert.equal(typeof value, 'string');
     assert.ok(key.length <= 40, key);
-    assert.ok(value.length <= VALUE_MAX, key);
-    if (key.startsWith(KEY_PREFIX)) {
-      assert.equal(key.includes('@'), false);
-      assert.equal(/\d{9,}/.test(value), false);
-    }
+    assert.ok(value.length <= 500, key);
+    const field = key.replace(/^attr_(?:latest_)?/, '');
+    if (field === 'gclid' || field === 'msclkid') continue;
+    if (key.startsWith(KEY_PREFIX)) assert.ok(value.length <= VALUE_MAX, key);
   }
 }
 
@@ -65,7 +65,7 @@ test('valid attribution is copied onto the Checkout Session', () => {
     attr_first_seen_at: '2026-10-25T05:41:00.123Z',
     attr_referrer_host: 'www.google.com',
     attr_gclid: 'Cj0KCQjw_test',
-    attr_msclkid: 'msclk-test',
+    attr_msclkid: 'abc123def456',
   });
   assert.deepEqual(value.payment_intent_data.metadata, { plan: 'starter', manuals_used: '0' });
   assert.equal(value.subscription_data, undefined);
@@ -192,6 +192,152 @@ test('invalid attribution does not throw and does not change metadata', () => {
   assert.deepEqual(blown.lines, ['attribution fields kept: 0']);
   assert.equal(blown.lines.join('\n').includes('secret-utm-value'), false);
   assert.deepEqual(blown.value.metadata, { plan: 'starter' });
+});
+
+test('drops card, phone, and SSN values mixed with words, separators, or full-width digits', () => {
+  const blocked = [
+    'card 4111 1111 1111 1111',
+    'cc:4111-1111-1111-1111',
+    '4111_1111_1111_1111',
+    '4111/1111/1111/1111',
+    'call 555 123 4567',
+    'SSN 123-45-6789',
+    '４１１１　１１１１　１１１１　１１１１',
+    'card ４１１１-１１１１-１１１１-１１１１',
+  ];
+  for (const sample of blocked) {
+    const { value, lines } = captureLog(() => withAttribution(checkoutParams('starter', env), {
+      utm_source: 'ads',
+      utm_campaign: sample,
+      landing_path: `/${sample}`,
+    }));
+    assert.deepEqual(lines, ['attribution fields kept: 1'], sample);
+    assert.deepEqual(value.metadata, { plan: 'starter', attr_utm_source: 'ads' });
+    const serialized = JSON.stringify(value);
+    assert.equal(serialized.includes(sample), false, sample);
+    assert.equal(serialized.includes('4111111111111111'), false, sample);
+    assert.equal(serialized.includes('5551234567'), false, sample);
+    assert.equal(serialized.includes('123456789'), false, sample);
+  }
+});
+
+test('gclid and msclkid keep long digit runs up to 500 characters', () => {
+  const gclid = `Cj0KCQjw-${'1'.repeat(20)}${'A'.repeat(90)}`;
+  const msclkid = `123456789abcdef123456789abcdef12`;
+  assert.ok(gclid.length > VALUE_MAX);
+  assert.match(gclid, /[A-Za-z0-9_-]+/);
+  assert.match(msclkid, /\d{9,}/);
+  const maxGclid = `A_b-${'c'.repeat(496)}`;
+  assert.equal(maxGclid.length, 500);
+  const maxMsclk = 'a1'.repeat(250);
+  assert.equal(maxMsclk.length, 500);
+  const { value, lines } = captureLog(() => withAttribution(checkoutParams('starter', env), {
+    utm_source: 'ads',
+    gclid,
+    msclkid,
+  }));
+  assert.deepEqual(lines, ['attribution fields kept: 3']);
+  assert.equal(value.metadata.attr_gclid, gclid);
+  assert.equal(value.metadata.attr_msclkid, msclkid);
+  assert.equal(value.metadata.attr_utm_source, 'ads');
+
+  const full = captureLog(() => withAttribution(checkoutParams('pro', env), {
+    gclid: maxGclid,
+    msclkid: maxMsclk,
+  }));
+  assert.deepEqual(full.lines, ['attribution fields kept: 2']);
+  assert.equal(full.value.metadata.attr_gclid, maxGclid);
+  assert.equal(full.value.metadata.attr_msclkid, maxMsclk);
+  assert.equal(full.value.subscription_data.metadata.attr_gclid, maxGclid);
+  assert.equal(full.value.subscription_data.metadata.attr_msclkid, maxMsclk);
+
+  const rejected = captureLog(() => withAttribution(checkoutParams('starter', env), {
+    utm_source: 'ads',
+    gclid: `${'A'.repeat(501)}`,
+    msclkid: `${'a1'.repeat(250)}b`,
+  }));
+  assert.deepEqual(rejected.lines, ['attribution fields kept: 1']);
+  assert.deepEqual(rejected.value.metadata, { plan: 'starter', attr_utm_source: 'ads' });
+  assert.equal(JSON.stringify(rejected.value).includes('A'.repeat(100)), false);
+
+  const badChars = captureLog(() => withAttribution(checkoutParams('starter', env), {
+    utm_source: 'ads',
+    gclid: 'Cj0KCQjw.test',
+    msclkid: 'abc123-def456',
+  }));
+  assert.deepEqual(badChars.lines, ['attribution fields kept: 1']);
+  assert.equal(badChars.value.metadata.attr_gclid, undefined);
+  assert.equal(badChars.value.metadata.attr_msclkid, undefined);
+  assertSafeMetadata(value.metadata);
+  assertSafeMetadata(full.value.subscription_data.metadata);
+});
+
+test('latest touch is stored as attr_latest_* and copied onto Pro subscription metadata', () => {
+  for (const key of ALLOWED_KEYS) {
+    assert.ok(`${KEY_PREFIX}${key}`.length <= 40);
+    assert.ok(`${KEY_PREFIX}latest_${key}`.length <= 40);
+  }
+  const raw = {
+    utm_source: 'google',
+    utm_medium: 'cpc',
+    gclid: 'Cj0KCQjw_ok',
+    latest: {
+      utm_source: 'newsletter',
+      utm_medium: 'email',
+      utm_campaign: 'founder@manualos.com',
+      utm_term: 'call 555 123 4567',
+      landing_path: 'https://manualos.com/pricing?plan=pro',
+      gclid: 'not a click id',
+      msclkid: 'abc123def456',
+      unknown: 'nope',
+    },
+  };
+  const { value, lines } = captureLog(() => withAttribution(checkoutParams('pro', env), raw));
+  assert.deepEqual(lines, ['attribution fields kept: 7']);
+  const expected = {
+    plan: 'pro',
+    attr_utm_source: 'google',
+    attr_utm_medium: 'cpc',
+    attr_gclid: 'Cj0KCQjw_ok',
+    attr_latest_utm_source: 'newsletter',
+    attr_latest_utm_medium: 'email',
+    attr_latest_landing_path: '/pricing',
+    attr_latest_msclkid: 'abc123def456',
+  };
+  assert.deepEqual(value.metadata, expected);
+  assert.deepEqual(value.subscription_data.metadata, expected);
+  assertSafeMetadata(value.metadata);
+  assertSafeMetadata(value.subscription_data.metadata);
+  const serialized = JSON.stringify(value);
+  assert.equal(serialized.includes('founder@manualos.com'), false);
+  assert.equal(serialized.includes('555'), false);
+  assert.equal(serialized.includes('not a click id'), false);
+  assert.equal(serialized.includes('nope'), false);
+
+  const starter = captureLog(() => withAttribution(checkoutParams('starter', env), raw));
+  assert.equal(starter.value.payment_intent_data.metadata.attr_latest_utm_source, undefined);
+  assert.deepEqual(starter.value.payment_intent_data.metadata, { plan: 'starter', manuals_used: '0' });
+
+  const crowded = { plan: 'pro' };
+  for (let i = 0; i < 48; i += 1) crowded[`p${i}`] = 'x';
+  assert.equal(Object.keys(crowded).length, 49);
+  const packed = captureLog(() => withAttribution({
+    mode: 'subscription',
+    metadata: { ...crowded },
+    subscription_data: { metadata: { ...crowded } },
+  }, {
+    utm_source: 'google',
+    utm_medium: 'cpc',
+    latest: { utm_source: 'newsletter' },
+  }));
+  assert.deepEqual(packed.lines, ['attribution fields kept: 1']);
+  assert.equal(Object.keys(packed.value.metadata).length, 50);
+  assert.equal(packed.value.metadata.attr_utm_source, 'google');
+  assert.equal(packed.value.metadata.attr_utm_medium, undefined);
+  assert.equal(packed.value.metadata.attr_latest_utm_source, undefined);
+  assert.equal(Object.keys(packed.value.subscription_data.metadata).length, 50);
+  assert.equal(packed.value.subscription_data.metadata.attr_utm_source, 'google');
+  assert.equal(packed.value.subscription_data.metadata.attr_latest_utm_source, undefined);
 });
 
 test('subscription checkout copies attribution onto subscription_data.metadata', () => {
