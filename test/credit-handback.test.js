@@ -114,12 +114,13 @@ function anthropic() {
   };
 }
 
-function starterStripe({ failReadsAfterClear = 0 } = {}) {
+function starterStripe({ failReadsAfterClear = 0, loseClearResponse = false } = {}) {
   const calls = { updates: [] };
   const meta = { manuals_used: '0', plan: 'starter', credit_generation: '0', credit_hold: '' };
   const decrements = { count: 0 };
   let clearArmed = false;
   let readsLeft = failReadsAfterClear;
+  let lostResponse = false;
   const stripe = {
     checkout: {
       sessions: {
@@ -143,7 +144,13 @@ function starterStripe({ failReadsAfterClear = 0 } = {}) {
       update: async (id, params) => {
         calls.updates.push(params.metadata);
         applyMeta(meta, params, decrements);
-        if (params.metadata && params.metadata.credit_hold === '') clearArmed = true;
+        if (params.metadata && params.metadata.credit_hold === '') {
+          clearArmed = true;
+          if (loseClearResponse && !lostResponse) {
+            lostResponse = true;
+            throw new Error('response lost');
+          }
+        }
         return { id, metadata: { ...meta } };
       },
     },
@@ -1022,6 +1029,177 @@ test('reconcile clears a generation marker older than this process and leaves a 
     assert.equal(updates.some((row) => row.id === freshPi), false);
   } finally {
     ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lost hold-clear response followed by failed confirm reads still delivers the manual', async () => {
+  const meta = {
+    manuals_used: '1',
+    plan: 'starter',
+    credit_generation: '1',
+    credit_hold: TOKEN,
+    credit_hold_at: '2026-01-01T00:00:00.000Z',
+  };
+  const decrements = { count: 0 };
+  let lost = false;
+  let failedReads = 0;
+  const stripe = {
+    paymentIntents: {
+      retrieve: async () => {
+        if (lost) {
+          failedReads += 1;
+          throw new Error('confirm read failed');
+        }
+        return { id: PI, metadata: { ...meta } };
+      },
+      update: async (id, params) => {
+        applyMeta(meta, params, decrements);
+        lost = true;
+        throw new Error('response lost');
+      },
+    },
+  };
+  assert.equal(await commitStarterCredit(stripe, PI, TOKEN), true);
+  assert.ok(failedReads >= 2);
+  assert.equal(meta.manuals_used, '1');
+  assert.equal(meta.credit_hold, undefined);
+  assert.equal(decrements.count, 0);
+
+  const paid = starterStripe({ loseClearResponse: true, failReadsAfterClear: 8 });
+  const app = createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: anthropic(),
+    renderPdf: async () => Buffer.from('%PDF-1.4\n%ok\n'),
+  });
+  await withServer(app, async (base) => {
+    const created = await postJob(base, 'cs_test_starter');
+    assert.equal(created.status, 202);
+    const done = await waitJob(base, (await created.json()).id);
+    assert.equal(done.status, 'succeeded');
+    assert.equal(done.error == null, true);
+    assert.equal(paid.meta.manuals_used, '1');
+    assert.equal(paid.meta.credit_hold, undefined);
+    assert.equal(paid.decrements.count, 0);
+    assert.equal((await fetch(`${base}/jobs/${done.id}/pdf`)).status, 200);
+    assert.equal(JSON.stringify(done).includes('credit has been returned'), false);
+  });
+});
+
+test('queued hand-backs are retried when open holds cannot be read', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'open-holds.json'), '{', { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([{ paymentIntentId: PI, token: TOKEN }])}\n`);
+  const paid = holdStripe();
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    await assert.rejects(() => ledger.reconcile(paid.stripe, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS }));
+    assert.equal(paid.meta.manuals_used, '0');
+    assert.equal(paid.decrements.count, 1);
+    assert.equal(paid.meta.credit_hold, undefined);
+  } finally {
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rewriting the hand-back queue keeps the rejected payment id count', () => {
+  const dir = tempDir();
+  const bad = 'ch_not_a_payment_intentABCD';
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([
+    { paymentIntentId: bad, token: TOKEN },
+    { paymentIntentId: PI, token: TOKEN },
+  ])}\n`);
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    assert.equal(ledger.health().rejected, 1);
+    ledger.drop({ paymentIntentId: PI, token: TOKEN });
+    assert.equal(ledger.health().rejected, 1);
+    assert.equal(ledger.pending(), 0);
+    const stored = JSON.parse(fs.readFileSync(path.join(dir, 'credit-handbacks.json'), 'utf8'));
+    assert.equal(stored.some((row) => row.paymentIntentId === bad), true);
+    assert.equal(stored.some((row) => row.paymentIntentId === PI), false);
+  } finally {
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a payment id of 4 characters or fewer is masked completely', () => {
+  const dir = tempDir();
+  const short = 'ch_1';
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([{ paymentIntentId: short, token: TOKEN }])}\n`);
+  const logs = [];
+  const original = console.warn;
+  console.warn = (...args) => logs.push(args.map(String).join(' '));
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    assert.equal(ledger.health().rejected, 1);
+    const warning = logs.find((line) => line.includes('not a PaymentIntent'));
+    assert.ok(warning);
+    assert.equal(warning.includes(short), false);
+    assert.equal(warning.includes('****'), true);
+  } finally {
+    console.warn = original;
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('generation markers are swept once and not on later reconciles', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'credit-handbacks.json'), `${JSON.stringify([{ paymentIntentId: PI, token: TOKEN }])}\n`);
+  let reads = 0;
+  const stripe = {
+    paymentIntents: {
+      retrieve: async () => {
+        reads += 1;
+        throw new Error('stripe down');
+      },
+      update: async () => {
+        throw new Error('stripe down');
+      },
+    },
+  };
+  const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+  try {
+    await ledger.reconcile(stripe, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS });
+    const first = reads;
+    await ledger.reconcile(stripe, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS });
+    assert.equal(first, 2);
+    assert.equal(reads, first + 1);
+  } finally {
+    ledger.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a directory sync failure after rename still keeps the credit record', () => {
+  const dir = tempDir();
+  const origFsync = fs.fsyncSync;
+  let calls = 0;
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(' '));
+  fs.fsyncSync = (fd) => {
+    calls += 1;
+    if (calls >= 2) throw new Error('dir sync failed /secret/path');
+    return origFsync(fd);
+  };
+  try {
+    const ledger = createCreditLedger({ env: { SUPPORT_DATA_DIR: dir }, intervalMs: 0 });
+    ledger.note({ paymentIntentId: PI, token: TOKEN, heldAt: '2026-01-01T00:00:00.000Z' });
+    const stored = JSON.parse(fs.readFileSync(path.join(dir, 'open-holds.json'), 'utf8'));
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].token, TOKEN);
+    const text = logs.join('\n');
+    assert.equal(text.includes('Credit record directory sync failed'), true);
+    assert.equal(text.includes('/secret/path'), false);
+    ledger.close();
+  } finally {
+    fs.fsyncSync = origFsync;
+    console.error = original;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

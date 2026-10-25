@@ -290,6 +290,8 @@ test('apply decrements a Starter credit once per ticket and a later hand-back do
     const audit = fs.readFileSync(auditPath, 'utf8');
     const lines = audit.trim().split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(lines.map((line) => line.result), ['applied', 'already_restored', 'applied', 'nothing_to_restore']);
+    assert.equal(lines.every((line) => line.paymentIntentId === PI.slice(-4)), true);
+    assert.equal(audit.includes(PI), false);
     assert.equal(audit.includes('buyer@example.com'), false);
     assert.equal(audit.includes('sk_test'), false);
     assert.equal(await refundStarterCredit(paid.stripe, PI, TOKEN), 0);
@@ -400,4 +402,26 @@ test('the restore command rejects a live key and a bad id without printing them'
   });
   assert.equal(usage.status, 1);
   assert.match(usage.stderr, /Usage/);
+});
+
+test('a restore audit masks a short payment id completely', async () => {
+  const dir = tempDir();
+  const short = 'pi_1';
+  const paid = fakeStripe({ manualsUsed: '1' });
+  try {
+    const result = await runRestore({
+      args: { apply: true, live: false, paymentIntentId: short, ticket: 'T-1' },
+      stripe: paid.stripe,
+      key: 'sk_test_secretvalue',
+      env: { SUPPORT_DATA_DIR: dir },
+    });
+    assert.equal(result.exitCode, 0);
+    const audit = fs.readFileSync(path.join(dir, 'credit-restores.jsonl'), 'utf8');
+    const line = JSON.parse(audit.trim());
+    assert.equal(line.paymentIntentId, '****');
+    assert.equal(audit.includes(short), false);
+    assert.equal(audit.includes('buyer@example.com'), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
