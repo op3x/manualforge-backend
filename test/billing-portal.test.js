@@ -4,6 +4,7 @@ const path = require('path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp } = require('../server');
+const { revokeAccessToken, signAccessToken } = require('../lib/access-token');
 const { removeTestJobDirectories } = require('../lib/jobs/store');
 const {
   EMAIL_LIMIT,
@@ -75,7 +76,7 @@ function proSession(customer, extra = {}) {
 
 function htsSession(extra = {}) {
   return {
-    id: 'cs_hts',
+    id: 'cs_test_hts',
     mode: 'subscription',
     payment_status: 'paid',
     customer: 'cus_hts',
@@ -315,18 +316,18 @@ test('unknown and known emails match, and a token cannot open another customer',
           lists.push(params);
           await gate;
           if (params.customer_details.email === 'hts-only@example.com') {
-            return { data: [htsSession({ customer: 'cus_hts_only', id: 'cs_hts_only' })] };
+            return { data: [htsSession({ customer: 'cus_hts_only', id: 'cs_test_htsonly' })] };
           }
           if (params.customer_details.email === 'buyer@example.com') {
             return {
               data: [
                 proSession('cus_buyer'),
-                { id: 'cs_starter', mode: 'payment', payment_status: 'paid', customer: 'cus_starter', metadata: { plan: 'starter' } },
-                { id: 'cs_unpaid', mode: 'subscription', payment_status: 'unpaid', customer: 'cus_unpaid', metadata: { plan: 'pro' } },
-                proSession({ id: 'cus_expanded' }, { customer: { id: 'cus_expanded' }, id: 'cs_expanded' }),
+                { id: 'cs_test_starter', mode: 'payment', payment_status: 'paid', customer: 'cus_starter', metadata: { plan: 'starter' } },
+                { id: 'cs_test_unpaid', mode: 'subscription', payment_status: 'unpaid', customer: 'cus_unpaid', metadata: { plan: 'pro' } },
+                proSession({ id: 'cus_expanded' }, { customer: { id: 'cus_expanded' }, id: 'cs_test_expanded' }),
                 htsSession(),
                 {
-                  id: 'cs_unmarked',
+                  id: 'cs_test_unmarked',
                   mode: 'subscription',
                   payment_status: 'paid',
                   customer: 'cus_unmarked',
@@ -340,7 +341,7 @@ test('unknown and known emails match, and a token cannot open another customer',
         },
         retrieve: async (id) => {
           if (id === 'cs_test_pro') return proSession('cus_session');
-          if (id === 'cs_starter') {
+          if (id === 'cs_test_starter') {
             return {
               id,
               mode: 'payment',
@@ -350,11 +351,11 @@ test('unknown and known emails match, and a token cannot open another customer',
               metadata: { plan: 'starter' },
             };
           }
-          if (id === 'cs_old') {
+          if (id === 'cs_test_old') {
             return proSession('cus_old', { id, created: Math.floor(FIXED / 1000) - (25 * 60 * 60) });
           }
-          if (id === 'cs_hts') return htsSession();
-          if (id === 'cs_unmarked') {
+          if (id === 'cs_test_hts') return htsSession();
+          if (id === 'cs_test_unmarked') {
             return {
               id,
               mode: 'subscription',
@@ -364,7 +365,7 @@ test('unknown and known emails match, and a token cannot open another customer',
               metadata: { plan: 'pro' },
             };
           }
-          if (id === 'cs_price') {
+          if (id === 'cs_test_price') {
             return {
               id,
               mode: 'subscription',
@@ -474,7 +475,7 @@ test('unknown and known emails match, and a token cannot open another customer',
     assert.equal(opened.status, 200);
     assert.deepEqual(Object.keys(await opened.json()), ['method', 'url']);
     assert.equal(created[0].customer, customers[0]);
-    assert.equal(created[0].return_url, 'https://manualos.com/cancel');
+    assert.equal(created[0].return_url, 'https://manualos.com/upload.html');
     assert.equal(created[0].configuration, 'bpc_manualos');
     assert.equal(opened.headers.get('referrer-policy'), 'no-referrer');
 
@@ -493,10 +494,10 @@ test('unknown and known emails match, and a token cannot open another customer',
     const crossed = await post(base, '/billing-portal', { session_id: 'cs_test_pro', customer: 'cus_buyer' }, '198.51.100.15');
     assert.equal(crossed.status, 400);
     assert.equal(created.length, 3);
-    const starter = await post(base, '/billing-portal', { session_id: 'cs_starter' }, '198.51.100.16');
+    const starter = await post(base, '/billing-portal', { session_id: 'cs_test_starter' }, '198.51.100.16');
     assert.equal(starter.status, 400);
     assert.equal((await starter.json()).error, INVALID_LINK);
-    const missing = await post(base, '/billing-portal', { session_id: 'cs_missing' }, '198.51.100.17');
+    const missing = await post(base, '/billing-portal', { session_id: 'cs_test_missing' }, '198.51.100.17');
     assert.equal(missing.status, 400);
     const missingBody = await missing.json();
     assert.equal(missingBody.error, INVALID_LINK);
@@ -508,16 +509,16 @@ test('unknown and known emails match, and a token cannot open another customer',
     assert.equal(none.status, 400);
     assert.equal((await none.json()).error, 'A cancel link is required.');
 
-    const old = await post(base, '/billing-portal', { session_id: 'cs_old' }, '198.51.100.22');
+    const old = await post(base, '/billing-portal', { session_id: 'cs_test_old' }, '198.51.100.22');
     assert.equal(old.status, 400);
     assert.equal((await old.json()).error, INVALID_LINK);
-    const hts = await post(base, '/billing-portal', { session_id: 'cs_hts' }, '198.51.100.23');
+    const hts = await post(base, '/billing-portal', { session_id: 'cs_test_hts' }, '198.51.100.23');
     assert.equal(hts.status, 400);
     assert.equal((await hts.json()).error, INVALID_LINK);
-    const unmarked = await post(base, '/billing-portal', { session_id: 'cs_unmarked' }, '198.51.100.24');
+    const unmarked = await post(base, '/billing-portal', { session_id: 'cs_test_unmarked' }, '198.51.100.24');
     assert.equal(unmarked.status, 400);
     assert.equal((await unmarked.json()).error, INVALID_LINK);
-    const priced = await post(base, '/billing-portal', { session_id: 'cs_price' }, '198.51.100.25');
+    const priced = await post(base, '/billing-portal', { session_id: 'cs_test_price' }, '198.51.100.25');
     assert.equal(priced.status, 200);
     assert.equal(created.at(-1).customer, 'cus_price');
     const htsToken = signPortalToken('cus_hts', env, FIXED);
@@ -584,7 +585,7 @@ test('a portal configuration id is sent and rate limits match the consent route'
     assert.equal((await configured.json()).url, 'https://billing.stripe.com/p/session/configured');
     assert.deepEqual(created[0], {
       customer: 'cus_config',
-      return_url: 'https://manualos.com/cancel',
+      return_url: 'https://manualos.com/upload.html',
       configuration: 'bpc_cancel123',
     });
 
@@ -1602,5 +1603,118 @@ test('a failed cancellation send keeps the send error when the claim cannot be r
     console.error = original;
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
+
+test('billing portal rejects a raw session id after revoke or sunset and returns to the upload page', async () => exclusive(async () => {
+  const secret = 'test-portal-token-secret-32bytes-min';
+  const sessionId = 'cs_test_portalrevokeonce';
+  let retrieves = 0;
+  const created = [];
+  const stripe = {
+    checkout: {
+      sessions: {
+        retrieve: async (id) => {
+          retrieves += 1;
+          assert.equal(id, sessionId);
+          return proSession('cus_portalbuyer', { id: sessionId });
+        },
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/portal_buyer' };
+        },
+      },
+    },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
+  };
+  const env = baseEnv({ PORTAL_TOKEN_SECRET: secret });
+  const app = createApp({
+    env,
+    stripe,
+    anthropic: null,
+    mailer: { async sendMail() {} },
+    now: () => FIXED,
+  });
+  const { server, base } = await listen(app);
+  try {
+    const opened = await post(base, '/billing-portal', { session_id: sessionId }, '198.51.100.110');
+    assert.equal(opened.status, 200);
+    assert.equal(retrieves, 1);
+    assert.equal(created[0].return_url, 'https://manualos.com/upload.html');
+    const minted = signAccessToken({ sessionId }, env, FIXED);
+    assert.ok(minted);
+    assert.equal(revokeAccessToken(minted.token, env, FIXED), true);
+    const revoked = await post(base, '/billing-portal', { session_id: sessionId }, '198.51.100.111');
+    assert.equal(revoked.status, 401);
+    assert.deepEqual(await revoked.json(), {
+      error: 'This sign-in was revoked. Exchange a new access token.',
+      code: 'credential_revoked',
+    });
+    assert.equal(retrieves, 1);
+    const token = signPortalToken('cus_portalbuyer', env, FIXED);
+    const byToken = await post(base, '/billing-portal', { token }, '198.51.100.112');
+    assert.equal(byToken.status, 200);
+    assert.equal(retrieves, 1);
+    assert.equal(created[1].customer, 'cus_portalbuyer');
+    assert.equal(created[1].return_url, 'https://manualos.com/upload.html');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  let sunsetRetrieves = 0;
+  const sunsetStripe = {
+    checkout: {
+      sessions: {
+        retrieve: async () => {
+          sunsetRetrieves += 1;
+          return proSession('cus_portalbuyer', { id: sessionId });
+        },
+      },
+    },
+    billingPortal: {
+      sessions: {
+        create: async (params) => {
+          created.push(params);
+          return { url: 'https://billing.stripe.com/p/session/sunset' };
+        },
+      },
+    },
+    subscriptions: {
+      list: async () => ({ data: [manualosSubscription()] }),
+    },
+  };
+  const sunsetEnv = baseEnv({
+    PORTAL_TOKEN_SECRET: secret,
+    LEGACY_SESSION_ID_SUNSET: '2020-01-01',
+  });
+  const sunsetApp = createApp({
+    env: sunsetEnv,
+    stripe: sunsetStripe,
+    anthropic: null,
+    mailer: { async sendMail() {} },
+    now: () => FIXED,
+  });
+  const sunsetListen = await listen(sunsetApp);
+  try {
+    const retired = await post(sunsetListen.base, '/billing-portal', { session_id: sessionId }, '198.51.100.113');
+    assert.equal(retired.status, 401);
+    assert.deepEqual(await retired.json(), {
+      error: 'session_id is no longer accepted.',
+      code: 'session_id_retired',
+    });
+    assert.equal(sunsetRetrieves, 0);
+    const token = signPortalToken('cus_portalbuyer', sunsetEnv, FIXED);
+    const byToken = await post(sunsetListen.base, '/billing-portal', { token }, '198.51.100.114');
+    assert.equal(byToken.status, 200);
+    assert.equal(sunsetRetrieves, 0);
+    assert.equal(created[created.length - 1].return_url, 'https://manualos.com/upload.html');
+  } finally {
+    await new Promise((resolve) => sunsetListen.server.close(resolve));
   }
 }));

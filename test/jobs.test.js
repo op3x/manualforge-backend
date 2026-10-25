@@ -94,9 +94,9 @@ async function withServer(app, fn) {
   }
 }
 
-async function waitJob(base, id) {
+async function waitJob(base, id, sessionId = 'cs_test_starter') {
   for (let i = 0; i < 50; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': sessionId } });
     const body = await res.json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -115,6 +115,7 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
   await withServer(app, async (base) => {
     const form = new FormData();
     form.set('session_id', 'cs_test_starter');
+    form.set('product_name', 'Infeed Line');
     form.set('file', new Blob([L5X]), 'line.L5X');
     const created = await fetch(`${base}/jobs`, { method: 'POST', body: form });
     assert.equal(created.status, 202);
@@ -122,9 +123,12 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
     const done = await waitJob(base, job.id);
     assert.equal(done.status, 'succeeded');
     assert.equal(done.coverage.percent, 100);
-    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`);
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal(pdf.status, 200);
     assert.match(pdf.headers.get('content-type'), /pdf/);
+    assert.equal(pdf.headers.get('content-disposition'), `attachment; filename="manual-${job.id.slice(4, 12)}.pdf"`);
+    assert.equal(pdf.headers.get('content-disposition').includes('Infeed'), false);
+    assert.equal(pdf.headers.get('content-disposition').includes('filename*'), false);
     assert.equal(paid.meta.manuals_used, '1');
     assert.equal(pdf.headers.get('deprecation'), null);
 
@@ -186,6 +190,77 @@ test('a missing model and an unreadable file do not spend a credit', async () =>
     const body = await res.json();
     assert.equal(JSON.stringify(body).includes('ACD'), false);
   });
+});
+
+function stripeWithStaleConfirm(allowanceStart = '0') {
+  const paid = stripeFor(allowanceStart);
+  let previous = { ...paid.meta };
+  let serveStale = false;
+  const update = paid.stripe.paymentIntents.update;
+  const retrieve = paid.stripe.paymentIntents.retrieve;
+  paid.stripe.paymentIntents.update = async (id, params) => {
+    previous = { ...paid.meta };
+    const result = await update(id, params);
+    serveStale = true;
+    return result;
+  };
+  paid.stripe.paymentIntents.retrieve = async (...args) => {
+    if (serveStale) {
+      serveStale = false;
+      return { id: 'pi_1', metadata: { ...previous } };
+    }
+    return retrieve(...args);
+  };
+  return paid;
+}
+
+async function twoStarterJobs(paid) {
+  const app = createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: anthropic(),
+    renderPdf: async () => Buffer.from('%PDF-1.4\n'),
+  });
+  await withServer(app, async (base) => {
+    const send = () => {
+      const form = new FormData();
+      form.set('session_id', 'cs_test_starter');
+      form.set('file', new Blob([L5X]), 'line.L5X');
+      return fetch(`${base}/jobs`, { method: 'POST', body: form });
+    };
+    const results = await Promise.all([send(), send()]);
+    const accepted = [];
+    for (const res of results) {
+      if (res.status === 202) {
+        accepted.push(await res.json());
+        continue;
+      }
+      const body = await res.json();
+      assert.ok(res.status === 402 || res.status === 409, JSON.stringify(body));
+    }
+    const finished = [];
+    for (const job of accepted) finished.push(await waitJob(base, job.id));
+    const delivered = finished.filter((job) => job.status === 'succeeded').length;
+    const failedJobs = finished.filter((job) => job.status === 'failed').length;
+    const refused = results.filter((res) => res.status !== 202).length + failedJobs;
+    assert.equal(delivered + refused, 2);
+    assert.equal(delivered, 2);
+    assert.equal(Number(paid.meta.manuals_used), delivered);
+    const verify = await fetch(`${base}/verify-session?session_id=cs_test_starter`);
+    assert.equal(verify.status, 200);
+    const access = await verify.json();
+    assert.equal(access.remaining, 1);
+    assert.equal(paid.meta.credit_holds || '', '');
+    assert.equal(paid.meta.credit_hold || '', '');
+  });
+}
+
+test('two concurrent starter jobs on three credits both deliver and leave one credit', async () => {
+  await twoStarterJobs(stripeFor('0'));
+});
+
+test('two concurrent starter jobs still leave one credit when a confirm read is stale', async () => {
+  await twoStarterJobs(stripeWithStaleConfirm('0'));
 });
 
 test('concurrent starter reserves cannot both spend the last credit', async () => {

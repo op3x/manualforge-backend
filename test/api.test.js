@@ -211,13 +211,14 @@ test('health, checkout, verify, and webhook', async () => {
     assert.equal(missingId.status, 400);
 
     const pro = await fetch(base + '/verify-session?session_id=cs_test_pro');
-    assert.deepEqual(await pro.json(), { valid: true, plan: 'pro', remaining: null });
+    assert.deepEqual(await pro.json(), { valid: true, plan: 'pro', remaining: null, billingIssue: false });
 
     const unpaid = await fetch(base + '/verify-session?session_id=cs_test_unpaid');
-    assert.deepEqual(await unpaid.json(), { valid: false, plan: 'starter', remaining: null });
+    assert.deepEqual(await unpaid.json(), { valid: false, plan: 'starter', remaining: null, billingIssue: false });
 
     const missing = await fetch(base + '/verify-session?session_id=missing');
-    assert.deepEqual(await missing.json(), { valid: false, plan: null, remaining: null });
+    assert.equal(missing.status, 400);
+    assert.deepEqual(await missing.json(), { error: 'Session id is invalid.', code: 'invalid_session_id' });
 
     const www = await fetch(base + '/health', { headers: { Origin: 'https://www.manualos.com' } });
     assert.equal(www.headers.get('access-control-allow-origin'), 'https://www.manualos.com');
@@ -264,7 +265,7 @@ test('generate requires payment, spends one starter credit after success, and hi
     assert.equal(harness.calls.updates.length, 0);
 
     const headerOnly = await fetch(base + '/verify-session?session_id=cs_test_starter');
-    assert.deepEqual(await headerOnly.json(), { valid: true, plan: 'starter', remaining: 3 });
+    assert.deepEqual(await headerOnly.json(), { valid: true, plan: 'starter', remaining: 3, billingIssue: false });
 
     const form = new FormData();
     form.set('session_id', 'cs_test_starter');
@@ -285,7 +286,7 @@ test('generate requires payment, spends one starter credit after success, and hi
     assert.equal(harness.used, 1);
 
     const after = await fetch(base + '/verify-session?session_id=cs_test_starter');
-    assert.deepEqual(await after.json(), { valid: true, plan: 'starter', remaining: 2 });
+    assert.deepEqual(await after.json(), { valid: true, plan: 'starter', remaining: 2, billingIssue: false });
 
     harness.calls.failSecond = true;
     const viaHeader = await fetch(base + '/generate-manual', {

@@ -77,7 +77,7 @@ test('an unknown id is not found', async () => {
     checkout: { sessions: { retrieve: async () => { throw notFound(); } } },
     customers: { list: async () => ({ data: [] }) },
   };
-  for (const query of ['pi_missing', 'ch_missing', 'in_missing', 'cs_missing', 'nobody@example.com', 'not-an-id']) {
+  for (const query of ['pi_missing', 'ch_missing', 'in_missing', 'cs_test_missing', 'nobody@example.com', 'not-an-id']) {
     const result = await refundCheck(stripe, query, { now: DAY_29 });
     assert.equal(result.found, false);
     assert.deepEqual(result.purchases, []);
@@ -214,7 +214,7 @@ test('a checkout session uses that session and the payment or session creation t
     checkout: {
       sessions: {
         retrieve: async (id) => {
-          if (id !== 'cs_session') throw notFound();
+          if (id !== 'cs_test_session') throw notFound();
           return {
             id,
             created: PURCHASED / 1000,
@@ -226,12 +226,12 @@ test('a checkout session uses that session and the payment or session creation t
       },
     },
   };
-  const early = await refundCheck(stripe, 'cs_session', { now: DAY_29 });
+  const early = await refundCheck(stripe, 'cs_test_session', { now: DAY_29 });
   assert.equal(early.purchases[0].id, 'pi_session');
-  assert.equal(early.purchases[0].via, 'cs_session');
+  assert.equal(early.purchases[0].via, 'cs_test_session');
   assert.equal(early.purchases[0].refund_eligible, true);
   assert.equal(early.purchases[0].deadline, STARTER_DEADLINE);
-  const late = await refundCheck(stripe, 'cs_session', { now: DAY_31 });
+  const late = await refundCheck(stripe, 'cs_test_session', { now: DAY_31 });
   assert.equal(late.purchases[0].reason, `past deadline ${STARTER_DEADLINE}`);
 });
 
@@ -240,7 +240,7 @@ test('a pro checkout session resolves to that session invoice, not the latest pe
     checkout: {
       sessions: {
         retrieve: async () => ({
-          id: 'cs_old',
+          id: 'cs_test_old',
           metadata: { plan: 'pro' },
           invoice: {
             id: 'in_old',
@@ -286,9 +286,9 @@ test('a pro checkout session resolves to that session invoice, not the latest pe
       }),
     },
   };
-  const result = await refundCheck(stripe, 'cs_old', { now: new Date(PERIOD_END + DAY).toISOString() });
+  const result = await refundCheck(stripe, 'cs_test_old', { now: new Date(PERIOD_END + DAY).toISOString() });
   assert.equal(result.purchases[0].id, 'ch_old');
-  assert.equal(result.purchases[0].via, 'cs_old');
+  assert.equal(result.purchases[0].via, 'cs_test_old');
   assert.equal(result.purchases[0].refund_eligible, false);
   assert.equal(result.purchases[0].reason, `past deadline ${PERIOD_END_ISO}`);
 });

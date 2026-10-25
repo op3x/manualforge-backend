@@ -126,7 +126,7 @@ async function withServer(app, fn) {
 
 async function waitJob(base, id) {
   for (let i = 0; i < 150; i += 1) {
-    const body = await (await fetch(`${base}/jobs/${id}`)).json();
+    const body = await (await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } })).json();
     if (body.status === 'succeeded' || body.status === 'failed') return body;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -159,6 +159,51 @@ function watchUsed(meta) {
     stop() { clearInterval(timer); },
   };
 }
+
+test('a stale confirm cannot spend a second credit, and a stale refund read still returns it', async () => {
+  const paid = starterStripe();
+  let previous = { ...paid.meta };
+  let staleLeft = 0;
+  const update = paid.stripe.paymentIntents.update;
+  const retrieve = paid.stripe.paymentIntents.retrieve;
+  paid.stripe.paymentIntents.update = async (id, params) => {
+    previous = { ...paid.meta };
+    const result = await update(id, params);
+    staleLeft = 1;
+    return result;
+  };
+  paid.stripe.paymentIntents.retrieve = async () => {
+    if (staleLeft > 0) {
+      staleLeft -= 1;
+      return { id: PI, metadata: { ...previous } };
+    }
+    return retrieve();
+  };
+  const [first, second] = await Promise.all([
+    reserveStarterCredit(paid.stripe, PI, env()),
+    reserveStarterCredit(paid.stripe, PI, env()),
+  ]);
+  assert.notEqual(first.token, second.token);
+  assert.equal(paid.meta.manuals_used, '2');
+  assert.equal(readCreditHolds(paid.meta).size, 2);
+  staleLeft = 0;
+  let refundReads = 0;
+  paid.stripe.paymentIntents.retrieve = async () => {
+    refundReads += 1;
+    const metadata = { ...paid.meta };
+    if (refundReads === 1) {
+      delete metadata.credit_holds;
+      delete metadata.credit_hold;
+      delete metadata.credit_hold_at;
+    }
+    return { id: PI, metadata };
+  };
+  await refundStarterCredit(paid.stripe, PI, first.token);
+  await refundStarterCredit(paid.stripe, PI, second.token);
+  assert.equal(paid.meta.manuals_used, '0');
+  assert.equal(readCreditHolds(paid.meta).size, 0);
+  assert.equal(paid.decrements.count, 2);
+});
 
 test('two overlapping reserves keep both holds and a failure returns only its own credit', async () => {
   const paid = starterStripe();
