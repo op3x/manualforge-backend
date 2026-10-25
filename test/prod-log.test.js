@@ -97,6 +97,57 @@ function capture(method, fn) {
     .then((result) => ({ ...result, lines }));
 }
 
+test('an array, object, or repeated session_id is invalid and does not call Stripe', async () => {
+  const { stripe, calls } = countingStripe();
+  const app = createApp({ env: env(), stripe, anthropic: null });
+  const { lines } = await capture('error', () => withServer(app, async (base) => {
+    const cases = [
+      ['GET', `${base}/verify-session?session_id=cs_test_ok&session_id=cs_test_other`, null],
+      ['GET', `${base}/verify-session?${new URLSearchParams([['session_id[]', 'cs_test_ok']])}`, null],
+      ['GET', `${base}/verify-session?${new URLSearchParams([['session_id[id]', 'cs_test_ok']])}`, null],
+      ['POST', `${base}/access-token`, JSON.stringify({ session_id: ['cs_test_ok', 'cs_test_other'] })],
+      ['POST', `${base}/access-token`, JSON.stringify({ session_id: { id: 'cs_test_ok' } })],
+      ['POST', `${base}/access-token`, '{"session_id":"cs_test_ok","session_id":"cs_test_other"}'],
+      ['POST', `${base}/billing-portal`, JSON.stringify({ session_id: ['cs_test_ok'] })],
+    ];
+    for (const [method, url, body] of cases) {
+      const res = await fetch(url, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body || undefined,
+      });
+      assert.equal(res.status, 400, url);
+      assert.deepEqual(await res.json(), { error: 'Session id is invalid.', code: 'invalid_session_id' });
+    }
+    const form = new FormData();
+    form.append('session_id', 'cs_test_ok');
+    form.append('session_id', 'cs_test_other');
+    form.set('file', new Blob(['<xml/>']), 'line.L5X');
+    const posted = await fetch(`${base}/jobs`, { method: 'POST', body: form });
+    assert.equal(posted.status, 400);
+    assert.equal((await posted.json()).code, 'invalid_session_id');
+    assert.notEqual(posted.status, 402);
+    assert.equal(calls.retrieves, 0);
+
+    const nasty = `cs_test_xx\r\n\u0000\u202eyz`;
+    const loggedId = await fetch(`${base}/access-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: nasty }),
+    });
+    assert.equal(loggedId.status, 400);
+    assert.equal((await loggedId.json()).code, 'invalid_session_id');
+    assert.equal(calls.retrieves, 0);
+  }));
+  const logged = lines.join('\n');
+  const hit = lines.find((line) => line.includes('...xxyz'));
+  assert.match(hit || '', /Rejected session id \(\.\.\.xxyz\)/);
+  assert.equal(hit.includes('\r'), false);
+  assert.equal(hit.includes('\u0000'), false);
+  assert.equal(hit.includes('\u202e'), false);
+  assert.equal(logged.includes('cs_test_ok'), false);
+});
+
 test('session ids are rejected before Stripe and only the last four characters are logged', async () => {
   const { stripe, calls } = countingStripe();
   const app = createApp({ env: env(), stripe, anthropic: null });
@@ -178,7 +229,7 @@ test('session ids are rejected before Stripe and only the last four characters a
   }));
 
   const logged = lines.join('\n');
-  assert.match(logged, /Rejected session id \(\.\.\.e_up\)/);
+  assert.match(logged, /Rejected session id \(\.\.\.deup\)/);
   assert.match(logged, /Rejected session id \(\.\.\.\*\*\*\*\)/);
   assert.match(logged, /Rejected session id \(\.\.\.aaaa\)/);
   assert.equal(logged.includes('cs_made_up'), false);

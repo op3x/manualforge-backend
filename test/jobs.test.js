@@ -192,6 +192,51 @@ test('a missing model and an unreadable file do not spend a credit', async () =>
   });
 });
 
+test('two concurrent starter jobs on three credits both deliver or one is refused without losing a credit', async () => {
+  const paid = stripeFor('0');
+  const app = createApp({
+    env: env(),
+    stripe: paid.stripe,
+    anthropic: anthropic(),
+    renderPdf: async () => Buffer.from('%PDF-1.4\n'),
+  });
+  await withServer(app, async (base) => {
+    const send = () => {
+      const form = new FormData();
+      form.set('session_id', 'cs_test_starter');
+      form.set('file', new Blob([L5X]), 'line.L5X');
+      return fetch(`${base}/jobs`, { method: 'POST', body: form });
+    };
+    const results = await Promise.all([send(), send()]);
+    const accepted = [];
+    for (const res of results) {
+      if (res.status === 202) {
+        accepted.push(await res.json());
+        continue;
+      }
+      const body = await res.json();
+      assert.ok(res.status === 402 || res.status === 409, JSON.stringify(body));
+    }
+    const finished = [];
+    for (const job of accepted) finished.push(await waitJob(base, job.id));
+    const delivered = finished.filter((job) => job.status === 'succeeded').length;
+    const failedJobs = finished.filter((job) => job.status === 'failed').length;
+    const refused = results.filter((res) => res.status !== 202).length + failedJobs;
+    assert.equal(delivered + refused, 2);
+    assert.ok(delivered === 2 || delivered === 1);
+    assert.equal(Number(paid.meta.manuals_used), delivered);
+    const verify = await fetch(`${base}/verify-session?session_id=cs_test_starter`);
+    assert.equal(verify.status, 200);
+    const access = await verify.json();
+    assert.equal(access.remaining, 3 - delivered);
+    if (delivered === 2) {
+      assert.equal(access.remaining, 1);
+      assert.equal(paid.meta.credit_holds || '', '');
+      assert.equal(paid.meta.credit_hold || '', '');
+    }
+  });
+});
+
 test('concurrent starter reserves cannot both spend the last credit', async () => {
   const paid = stripeFor('0');
   let release;

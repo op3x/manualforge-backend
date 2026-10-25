@@ -39,8 +39,8 @@ const {
   safeEqual,
 } = require('./lib/access-token');
 const { contentDisposition, downloadFileName, shortJobId, sourceName } = require('./lib/download-name');
-const { assertSessionId, maskSessionId } = require('./lib/session-id');
-const { FILE_LIMIT, overLengthField } = require('./lib/field-limits');
+const { assertSessionId, duplicateTopLevelKey, invalidSessionId, maskSessionId, sessionFrom } = require('./lib/session-id');
+const { FILE_LIMIT, readTextFields } = require('./lib/field-limits');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyManualosCheckout, classifyStripeEvent } = require('./lib/stripeBrand');
 const { withStripeReadCache } = require('./lib/stripe-read-cache');
@@ -161,7 +161,9 @@ function logJobEvent(fields) {
 }
 
 function readSessionId(req) {
-  const fromBody = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+  if (req && req.duplicateSessionId) throw invalidSessionId('');
+  sessionFrom(req && req.query);
+  const fromBody = sessionFrom(req && req.body);
   if (fromBody) return fromBody;
   const header = req.get('x-session-id');
   return typeof header === 'string' ? header.trim() : '';
@@ -245,12 +247,8 @@ function collectFiles(req) {
 }
 
 function fieldsFrom(req) {
-  const body = req.body || {};
-  const fields = {};
-  for (const key of ['brand', 'manufacturer_name', 'manufacturer_address', 'product_name', 'model', 'doc_number', 'revision', 'language', 'date']) {
-    if (typeof body[key] === 'string') fields[key] = body[key];
-  }
-  return fields;
+  const read = readTextFields(req && req.body);
+  return read.fields || {};
 }
 
 function logWebhookEvent(event) {
@@ -489,7 +487,26 @@ function createApp({
     }
     return res.json({ received: true });
   });
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({
+    limit: '1mb',
+    verify(req, res, buf) {
+      try {
+        if (duplicateTopLevelKey(buf, 'session_id')) req.duplicateSessionId = true;
+      } catch {
+        // A body that is not JSON is rejected by the parser itself.
+      }
+    },
+  }));
+  app.use((req, res, next) => {
+    try {
+      if (req.duplicateSessionId) throw invalidSessionId('');
+      sessionFrom(req.query);
+      sessionFrom(req.body);
+      return next();
+    } catch (err) {
+      return sendError(res, err, env);
+    }
+  });
 
   app.post('/create-checkout-session', checkoutLimiter, async (req, res) => {
     try {
@@ -670,8 +687,9 @@ function createApp({
   }
 
   function presentedSessionIds(req) {
-    const query = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
-    const bodyId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+    if (req && req.duplicateSessionId) throw invalidSessionId('');
+    const query = sessionFrom(req && req.query);
+    const bodyId = sessionFrom(req && req.body);
     const header = typeof req.get('x-session-id') === 'string' ? req.get('x-session-id').trim() : '';
     return [query, bodyId, header].filter(Boolean);
   }
@@ -722,7 +740,8 @@ function createApp({
 
   app.post('/access-token', accessLimiter, async (req, res) => {
     try {
-      const sessionId = req.body && typeof req.body.session_id === 'string' ? req.body.session_id.trim() : '';
+      if (req.duplicateSessionId) throw invalidSessionId('');
+      const sessionId = sessionFrom(req.body);
       if (!sessionId) return res.status(400).json({ error: 'session_id is required.' });
       assertSessionId(sessionId);
       const gate = tokenExchangeGate(sessionId, env);
@@ -856,9 +875,12 @@ function createApp({
     const caller = await generationCaller(req);
     verifyCache.delete(caller.sessionId);
     const access = await assertCanGenerate(stripeClient, caller.sessionId, env);
-    const tooLong = overLengthField(req.body);
-    if (tooLong) {
-      throw exposed(400, `${tooLong.field} must be at most ${tooLong.max} characters.`, null, 'field_too_long');
+    const text = readTextFields(req.body);
+    if (text.error && text.error.code === 'field_too_long') {
+      throw exposed(400, `${text.error.field} must be at most ${text.error.max} characters.`, null, 'field_too_long');
+    }
+    if (text.error) {
+      throw exposed(400, `${text.error.field} must be a single text value.`, null, 'invalid_field');
     }
     const files = collectFiles(req);
     if (files.length > FILE_LIMIT) {
