@@ -22,6 +22,8 @@ const {
 } = require('./lib/billing');
 const { withCheckoutPolicy } = require('./lib/checkoutPolicy');
 const { applyStarterChargeEvent } = require('./lib/starter-entitlement');
+const { applyPeriodAccessEvent } = require('./lib/period-access');
+const { markFirstManualDelivered } = require('./lib/delivery');
 const { generateManual } = require('./lib/pipeline');
 const { parseUploads } = require('./lib/parsers');
 const { logPythonAvailability } = require('./lib/parsers/acd');
@@ -147,10 +149,11 @@ function createApp({
       return res.status(400).send('Webhook signature verification failed');
     }
     try {
-      await applyStarterChargeEvent(stripeClient, event);
+      const starterResult = await applyStarterChargeEvent(stripeClient, event);
+      await applyPeriodAccessEvent(stripeClient, event, starterResult);
     } catch (err) {
       const detail = err && err.message ? String(err.message) : 'error';
-      console.error('Starter webhook handler failed', event.type, detail.replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]'));
+      console.error('Webhook handler failed', event.type, detail.replace(/sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+/g, '[redacted]'));
       return res.status(500).json({ error: 'Webhook handler failed' });
     }
     logWebhookEvent(event);
@@ -192,6 +195,14 @@ function createApp({
       return sendError(res, err);
     }
   });
+
+  async function noteFirstManual(access, sessionId) {
+    try {
+      await markFirstManualDelivered(stripeClient, access, sessionId);
+    } catch (err) {
+      console.error('First manual delivery stamp failed', access && access.plan ? access.plan : 'unknown');
+    }
+  }
 
   async function runPaid(req, res, { reserveAtStart, respond }) {
     const access = await assertCanGenerate(stripeClient, readSessionId(req), env);
@@ -251,6 +262,7 @@ function createApp({
             },
           });
           store.savePdf(job.id, result.pdf);
+          if (result.pdf && result.pdf.length) await noteFirstManual(access, readSessionId(req));
           job.coverage = { units: result.coverage.units, accounted: result.coverage.accounted, percent: result.coverage.percent };
           job.warnings = result.warnings || [];
           job.status = 'succeeded';
@@ -308,6 +320,7 @@ function createApp({
           renderPdf,
         });
         if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
+        if (result.pdf && result.pdf.length) await noteFirstManual(access, readSessionId(req));
         res.set({
           'Content-Type': 'application/pdf',
           'Content-Disposition': 'attachment; filename="manual.pdf"',

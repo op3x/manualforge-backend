@@ -114,6 +114,35 @@ test('pro is valid only while the subscription is active or trialing', () => {
   assert.equal(lapsed.remaining, null);
 });
 
+test('a refunded or suspended pro period is not valid while the subscription stays active', () => {
+  const refunded = accessFromSession(
+    { metadata: { plan: 'pro' }, payment_status: 'paid' },
+    null,
+    { id: 'sub_1', status: 'active', metadata: { period_access: 'revoked', period_access_reason: 'refund' } },
+    env,
+  );
+  assert.equal(refunded.valid, false);
+  assert.equal(refunded.plan, 'pro');
+  assert.equal(refunded.periodAccess, 'revoked');
+  assert.equal(refunded.periodRevokeReason, 'refund');
+  const lost = accessFromSession(
+    { metadata: { plan: 'pro' } },
+    null,
+    { id: 'sub_1', status: 'active', metadata: { period_access: 'revoked', period_access_reason: 'dispute' } },
+    env,
+  );
+  assert.equal(lost.valid, false);
+  assert.equal(lost.periodRevokeReason, 'dispute');
+  const suspended = accessFromSession(
+    { metadata: { plan: 'pro' } },
+    null,
+    { id: 'sub_1', status: 'trialing', metadata: { period_access: 'suspended', period_access_reason: 'dispute' } },
+    env,
+  );
+  assert.equal(suspended.valid, false);
+  assert.equal(suspended.periodAccess, 'suspended');
+});
+
 test('assertCanGenerate returns 402 when starter credits are gone', async () => {
   const stripe = {
     checkout: {
