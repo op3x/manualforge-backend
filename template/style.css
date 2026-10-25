@@ -1,6 +1,6 @@
 @page { size: Letter; margin: 22mm 18mm 20mm 18mm;
-  @top-left { content: "__HEADER_LEFT__"; font: 8pt Helvetica, Arial, sans-serif; color:#5b6b7b; border-bottom: .5pt solid #c9d3dd; vertical-align: bottom; padding-bottom: 3mm; }
-  @top-right { content: "__HEADER_RIGHT__"; font: 8pt Helvetica, Arial, sans-serif; color:#5b6b7b; border-bottom: .5pt solid #c9d3dd; vertical-align: bottom; padding-bottom: 3mm; }
+  @top-left { content: "__HEADER_LEFT__"; font: 8pt Helvetica, Arial, sans-serif; color:#5b6b7b; border-bottom: .5pt solid #c9d3dd; vertical-align: bottom; padding-bottom: 3mm; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @top-right { content: "__HEADER_RIGHT__"; font: 8pt Helvetica, Arial, sans-serif; color:#5b6b7b; border-bottom: .5pt solid #c9d3dd; vertical-align: bottom; padding-bottom: 3mm; white-space: nowrap; }
   @bottom-left { content: "__FOOTER_LEFT__"; font: 8pt Helvetica, Arial, sans-serif; color:#5b6b7b; vertical-align: top; padding-top: 3mm; }
   @bottom-right { content: "Page " counter(page); font: 8pt Helvetica, Arial, sans-serif; color:#5b6b7b; vertical-align: top; padding-top: 3mm; }
 }
@@ -9,7 +9,11 @@
 html { font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif; font-size: 9.8pt; color: #1f2a36; line-height: 1.42; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 body { margin: 0; }
 p { margin: 0 0 2.2mm; orphans: 3; widows: 3; }
-.cover { height: 279.4mm; width: 215.9mm; position: relative; padding: 30mm 22mm 0; page-break-after: always; overflow: hidden; }
+.cover { box-sizing: border-box; display: flex; flex-direction: column; height: 279.4mm; min-height: 279.4mm; width: 215.9mm; position: relative; padding: 30mm 22mm 14mm; page-break-after: always; overflow: hidden; }
+.cover > * { flex-shrink: 0; }
+.cover > .publisher { flex-shrink: 0; overflow: visible; }
+.cover > .cimg { flex: 0 1 auto; min-height: 0; overflow: hidden; }
+.cimg svg { display: block; max-width: 100%; max-height: 100%; width: 100%; height: auto; }
 .cover .band { position:absolute; left:0; top:0; width:100%; height:14mm; background: repeating-linear-gradient(135deg,#f2b400 0 10mm,#1f2a36 10mm 20mm); }
 .sample-flag { position:absolute; top:22mm; right:22mm; border:2pt solid #b03a2e; color:#b03a2e; font-weight:bold; padding:2mm 4mm; font-size:11pt; letter-spacing:.5pt; }
 .maker { font-size: 11pt; color:#5b6b7b; margin-top: 12mm; text-transform: uppercase; letter-spacing: 1pt; }
@@ -19,8 +23,8 @@ p { margin: 0 0 2.2mm; orphans: 3; widows: 3; }
 .cmeta { width: 60%; border-collapse: collapse; font-size: 10pt; }
 .cmeta td { padding: 1.6mm 0; border-bottom: .5pt solid #dbe2e8; }
 .cmeta td:first-child { color:#5b6b7b; width: 40%; }
-.cwarn { margin-top: 10mm; background:#ff7900; color:#000; font-weight:bold; padding: 4mm 5mm; font-size:10.5pt; }
-.cfoot { position:absolute; bottom: 14mm; left:22mm; right:22mm; font-size:8.5pt; color:#b03a2e; border-top: .5pt solid #c9d3dd; padding-top: 3mm; }
+.cwarn { margin-top: 10mm; margin-bottom: 3mm; background:#ff7900; color:#000; font-weight:bold; padding: 4mm 5mm; font-size:10.5pt; }
+.cfoot { margin-top: auto; flex: 0 0 auto; font-size:8.5pt; color:#b03a2e; border-top: .5pt solid #c9d3dd; padding-top: 3mm; }
 .toc { page-break-after: always; }
 .tochead { font-size: 20pt; color:#13314f; border-bottom: 2pt solid #13314f; padding-bottom: 2mm; margin: 0 0 5mm; }
 .toc ul { list-style:none; padding:0; margin:0; }
@@ -84,3 +88,7 @@ ol.steps > li .expect b { font-weight: 700; }
 .callouts { margin: 0 0 3mm; padding-left: 5mm; font-size: 8.6pt; }
 .callouts li { margin-bottom: .4mm; }
 .tagcol { font-family: "Liberation Mono", "DejaVu Sans Mono", ui-monospace, monospace; font-size: 7.6pt; color: #243140; }
+.publisher { display: flex; align-items: center; gap: 4mm; margin-top: 8mm; min-height: 0; flex-shrink: 0; overflow: visible; }
+.publisher-name { font-size: 14pt; letter-spacing: .3pt; color: #13314f; font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.brand-logo { max-height: 14mm; max-width: 48mm; height: auto; width: auto; flex: 0 0 auto; object-fit: contain; }
+table.signoff td:last-child { letter-spacing: .4pt; color: #5b6b7b; }

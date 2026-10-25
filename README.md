@@ -6,29 +6,36 @@ The website is a separate static site (`op3x/matrixmanual-frontend`). This servi
 
 ## Pricing
 
-- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced.
-- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`.
+- **Starter** is a $39 one-time payment. It includes `STARTER_CREDITS` manuals (default 3). `POST /jobs` reserves one credit when the job starts and refunds it if generation fails. `POST /generate-manual` still increments `manuals_used` only after a PDF is produced. Starter generates the operating and maintenance manual only.
+- **Pro** is a $79 monthly subscription. Generation stays available while that subscription's status is `active` or `trialing`. Pro can also generate a preventive maintenance schedule, a shutdown procedure, a startup procedure, and up to five other equipment documents in the same run.
+- **Integrator** is the $249 monthly plan added on the integrator branch. The same extra documents are allowed when the session plan is `integrator`. Extra documents in that run do not add another manual credit. White-label company name and logo apply to every document when the integrator branding modules are present.
 
 ## API
 
 ### `POST /create-checkout-session`
 
-Request JSON: `{ "plan": "starter" }` or `{ "plan": "pro" }`.
+Request JSON: `{ "plan": "starter" }`, `{ "plan": "pro" }`, `{ "plan": "integrator", "interval": "month" }`, or `{ "plan": "integrator", "interval": "year" }`. `integrator_monthly` and `integrator_annual` are accepted as plan names. An extra manual is `{ "plan": "integrator_overage", "session_id": "cs_..." }` for an active Integrator checkout.
 
 Response JSON: `{ "url": "<hosted Checkout URL>" }`.
 
-Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mode: "subscription"` and `STRIPE_PRICE_PRO` (a recurring monthly price). Session metadata is `{ plan }`. Redirects:
+Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mode: "subscription"` and `STRIPE_PRICE_PRO` (a recurring monthly price). Integrator is $249 per month or $2,490 per year, with 25 manuals each month and a separate $9 Checkout for an extra manual. This service does not assign seats. Integrator uses Checkout `mode: "subscription"` and `MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY` or `MANUALOS_STRIPE_PRICE_INTEGRATOR_ANNUAL`. The extra manual uses `mode: "payment"` and `MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE` with quantity 1. Session metadata for the subscription is `{ plan: "integrator", interval }`. Redirects:
 
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
 
-Checkout requires a billing address. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard.
+The extra-manual success URL sends the browser back to the Integrator subscription session id, not the one-time payment session. Generation keeps using that subscription session.
+
+Integrator checkout stays off until all three price variables are set. A missing `MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY`, `MANUALOS_STRIPE_PRICE_INTEGRATOR_ANNUAL`, or `MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE` makes `POST /create-checkout-session` with `{ "plan": "integrator" }` return **503**. The message is `Integrator monthly checkout is temporarily unavailable.`, `Integrator annual checkout is temporarily unavailable.`, `Integrator overage checkout is temporarily unavailable.`, or `Integrator checkout is temporarily unavailable.` The response does not include the variable name or its value. Starter and Pro do not read those variables. They still return **500** when their own price variables are missing.
+
+Checkout requires a billing address on Starter, Pro, Integrator, and extra-manual sessions. The pay button shows: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable." A subscription adds "Cancel anytime." A one-time payment does not, because there is nothing to cancel. The PaymentIntent or Subscription description names the plan. Starter's description uses `STARTER_CREDITS` (default 3). `CHECKOUT_REQUIRE_TOS` stays unset, so no terms checkbox is sent. Set it to `1` only after a terms of service URL is saved in the Dashboard.
 
 ### `GET /verify-session?session_id=cs_...`
 
-Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | null, "remaining": number | null }`.
+Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | "integrator" | null, "remaining": number | null }`. Integrator also includes `overage_remaining`.
 
 Starter is valid when the Checkout Session `payment_status` is `paid`. `remaining` is `STARTER_CREDITS` minus `manuals_used`. Pro is valid when the session's subscription status is `active` or `trialing`, and `remaining` is `null` (unlimited). A paid Starter session with zero manuals left is still `valid: true` with `remaining: 0`; generation then returns 402.
+
+Integrator is valid for the same subscription statuses. `remaining` is how many of the 25 included manuals are left in the current month. `overage_remaining` counts paid extra manuals that have not been used. Included manuals reset when the month changes and do not roll over. Paid extra manuals stay until they are used or the subscription is no longer active. A month is the Stripe billing period for the monthly price. The yearly price is paid once a year and still allows 25 manuals each month, anchored to the subscription period start, because there is no monthly invoice inside that year. The next request in a new month opens that month's 25. The paid invoice grants the first month and each renewal.
 
 ### `POST /jobs`
 
@@ -54,9 +61,43 @@ Kept for the current site. Same body as before (`file`, or JSON `plcContent`, pl
 
 ### `POST /webhook`
 
-Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` and logs the event. Requests with a bad or missing signature get `400`.
+Raw JSON body. The route verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET`, applies Integrator credit changes, and logs the event. Requests with a bad or missing signature get `400`. A handler failure returns `500` so Stripe retries it.
+
+- `invoice.paid` grants 25 included manuals when the subscription is Integrator and is not canceled, unpaid, incomplete_expired, or paused. The same billing window does not reset usage again. Extra-manual credits are left as they are.
+- `checkout.session.completed` and `checkout.session.async_payment_succeeded` do that grant when `payment_status` is `paid` and the session plan is `integrator`. When the plan is `integrator_overage`, they add one extra manual, once per Checkout Session id.
+- `customer.subscription.deleted`, and `customer.subscription.updated` with status `canceled`, `unpaid`, or `incomplete_expired`, mark the subscription cancelled and set included credits to 0. `cancel_at_period_end` does not remove credits while the status stays `active` or `trialing`.
+- Starter and Pro events are logged as before and do not change Integrator credits.
 
 Each generate call re-reads the Checkout Session, PaymentIntent, and Subscription, so access stays correct even if a webhook is delayed. The endpoint is still required: subscription renewals, cancellations, and delayed payment methods are asynchronous, and the signature is what shows the call came from Stripe.
+
+Included credits and extra-manual counts live on the Stripe Subscription metadata, the same way Starter counts live on the PaymentIntent. The credit lock is in this process. Run a single replica. Two replicas can reserve the same manual or grant the same extra manual twice. `POST /jobs` and `POST /generate-manual` reserve one Integrator credit before generation and refund it if generation fails. When no included manuals and no extra manuals remain, generation returns **402** and does not create a charge:
+
+```json
+{
+  "error": "Integrator credits are used up. Purchase an extra manual for $9 to continue.",
+  "overage": { "plan": "integrator_overage", "amount_cents": 900, "currency": "usd" }
+}
+```
+
+The customer then calls `POST /create-checkout-session` with `integrator_overage`. Nothing is billed until that Checkout is paid.
+
+### `GET /integrator/branding` and `POST /integrator/branding`
+
+Requires an active Integrator `session_id` (query string, form field, or `X-Session-Id`). The POST body is JSON `{ "company_name": "..." }` or multipart with `company_name` and `logo`. The logo must be a PNG or SVG file of at most 256 KiB. SVG files that contain scripts, external links, or embedded documents are rejected. The response is `{ "company_name", "has_logo", "logo_type" }` and does not return the file bytes.
+
+The company name and logo are stored for that Stripe Customer. Integrator manuals and extra documents use them on the cover, in the running header, and in the running footer, and the revision approval line no longer says the product name. Starter and Pro manuals are unchanged. Program uploads stay in memory and are not written to the branding directory.
+
+`POST /jobs` and `POST /generate-manual` load that branding after the upload is parsed and pass it into the manual renderer. Logos are embedded as `data:` image URLs. The PDF renderer drops every other network request. `lib/accounts/store.js` exports `readBranding(customerId, { dir })`. With no directory, the helper uses `MANUALOS_ACCOUNT_DIR` or, outside production, the system temp directory. An empty record returns no white-label object. A missing directory returns no logo and does not throw.
+
+Paid extra-manual Checkout session ids are stored in that customer's `overage-grants.json` with no cap. The subscription records the source PaymentIntent on `overage_last_pi` and a short `overage_pi` list when the extra manual is added. The PaymentIntent is stamped `overage_credit_granted=1` after that credit is stored. A replay adds nothing when the stamp, the ledger, or those subscription ids already record the payment. Before a newer payment replaces `overage_last_pi` or `overage_grant`, the previous grant is settled. If stamping that previous PaymentIntent keeps failing, a newer extra-manual grant for the same customer stays uncommitted and the webhook returns **500** until the earlier stamp succeeds. The new payment is not credited twice. Stripe retries. Checkout for an extra manual sets `kind: overage` on the session and the PaymentIntent, along with `plan: integrator_overage`.
+
+If `overage-grants.json` cannot be parsed, reading it throws **503** `Extra manual records are temporarily unavailable.` The `/webhook` response is still **500** `Webhook handler failed` (Stripe retries either status). The handler does not treat the file as empty. The log says `overage-grants.json` and redacts the customer id. To recover, restore a JSON object that maps each granted Checkout session id to `"done"`. Delete the file only when `overage_pi` on the subscription, or `overage_credit_granted` on the PaymentIntent, already records those payments. An empty ledger lets a replay grant the manual again. The file lives on the same volume as the logo, so the single replica above is also what keeps the ledger and the in-memory credit lock together.
+
+### Branding storage
+
+There is no account database. `createAccountStore` in `lib/accounts/store.js` writes `branding.json` plus `logo.png` or `logo.svg`. Stripe metadata cannot hold a logo (values are limited to 500 characters), and the job store only keeps generated PDFs until they expire.
+
+On Railway the container disk is ephemeral. Run one replica: the credit lock is per process, and a second replica can spend or grant the same manual twice. Mount a volume at `/data/manualos-accounts` and set `MANUALOS_ACCOUNT_DIR` to that path. If the variable is unset outside production, local runs use the system temp directory. If the directory is missing, or the variable is unset in production, manuals and extra documents are generated with no logo. Saving a logo then returns **503** with `Company logo storage is temporarily unavailable.` and does not create the directory.
 
 ### `GET /health`
 
@@ -76,6 +117,10 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_WEBHOOK_SECRET` | Yes | Signing secret for `/webhook` |
 | `STRIPE_PRICE_STARTER` | Yes | Price id for the $39 one-time Starter price |
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
+| `MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY` | For Integrator monthly Checkout | Price id for the $249/month price |
+| `MANUALOS_STRIPE_PRICE_INTEGRATOR_ANNUAL` | For Integrator yearly Checkout | Price id for the $2,490/year price |
+| `MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE` | For extra manuals | Price id for the $9 one-time price |
+| `MANUALOS_ACCOUNT_DIR` | For a durable logo | Directory for the Integrator company name and logo. On Railway, mount a volume at `/data/manualos-accounts` and set this to that path. |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
 | `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
@@ -102,7 +147,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `SUPPORT_DATA_DIR` | Recommended | Directory for opt-outs, consent, and the budget counter. Railway's disk is ephemeral; mount a volume. |
 | `SUPPORT_INTEGRATOR_ENABLED` | No | `true` mentions Integrator pricing. Default off, because that plan is not launched. |
 
-`STRIPE_PUBLISHABLE_KEY` is not read by this server. Hosted Checkout only needs the URL returned by `/create-checkout-session`. The old `STRIPE_PRICE_ID` variable is unused.
+`STRIPE_PUBLISHABLE_KEY` is not read by this server. Hosted Checkout only needs the URL returned by `/create-checkout-session`. The old `STRIPE_PRICE_ID` variable is unused. The restricted key needs Checkout Sessions write, PaymentIntents read and write, and Subscriptions read and write. Integrator credit counters are subscription metadata. Customers read is needed when an extra-manual Checkout is attached to the existing customer. Reading Subscriptions is not enough for the credit update.
 
 When `FRONTEND_URL` is missing and `NODE_ENV` or `RAILWAY_ENVIRONMENT` is `production`, the process logs a fatal error and exits. In any other environment it logs a warning and still boots.
 
@@ -141,11 +186,16 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 
 1. Create a Product named **ManualOS Starter** with one one-time Price of **$39 USD**. Copy that price id into `STRIPE_PRICE_STARTER`.
 2. Create a separate Product named **ManualOS Pro** with one recurring Price of **$79 USD** billed **monthly**. Copy that price id into `STRIPE_PRICE_PRO`. Separate products keep the Checkout line item names distinct.
-3. Add a webhook endpoint:
+3. Create a separate Product named **ManualOS Integrator** with two recurring Prices:
+   - **$249.00 USD** billed **monthly**. Copy that price id into `MANUALOS_STRIPE_PRICE_INTEGRATOR_MONTHLY`.
+   - **$2,490.00 USD** billed **yearly**. Copy that price id into `MANUALOS_STRIPE_PRICE_INTEGRATOR_ANNUAL`.
+   Monthly and yearly are billing variants of the same plan, so they share this product. Either price includes 25 manuals per month. Unused manuals expire at the month boundary. The yearly price is that same monthly allowance, paid once a year.
+4. Create a separate Product named **ManualOS Integrator extra manual** with one one-time Price of **$9.00 USD**. Copy that price id into `MANUALOS_STRIPE_PRICE_INTEGRATOR_OVERAGE`. This is its own product so the Checkout line item is not labeled with the subscription name. The server does not add this price to an invoice by itself. The customer starts Checkout after the included manuals are used.
+5. Add a webhook endpoint:
    `https://manualforge-backend-production.up.railway.app/webhook`
    Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, and `radar.early_fraud_warning.created`.
    Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
-4. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, and read Subscriptions. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode.
+6. Create a restricted API key that can write Checkout Sessions, read and update PaymentIntents, and read and update Subscriptions. Store it as `STRIPE_SECRET_KEY` in Railway. A secret key works too. Use a different key for test and live mode. This repository does not create the products, prices, webhook endpoint, or API key.
 
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 
