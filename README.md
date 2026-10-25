@@ -22,6 +22,8 @@ Starter uses Checkout `mode: "payment"` and `STRIPE_PRICE_STARTER`. Pro uses `mo
 - success: `${FRONTEND_URL}/upload.html?session_id={CHECKOUT_SESSION_ID}`
 - cancel: `${FRONTEND_URL}/#pricing`
 
+Checkout requires a billing address. The pay button shows this refund rule: "Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable. Cancel anytime." The PaymentIntent (Starter) or Subscription (Pro) description names the plan so a dispute has a product description. A terms-of-service checkbox is not sent unless `CHECKOUT_REQUIRE_TOS=1`.
+
 ### `GET /verify-session?session_id=cs_...`
 
 Response JSON: `{ "valid": boolean, "plan": "starter" | "pro" | null, "remaining": number | null }`.
@@ -75,6 +77,7 @@ Copy `.env.example` to `.env` for local runs. Set the same names on Railway. Nev
 | `STRIPE_PRICE_STARTER` | Yes | Price id for the $39 one-time Starter price |
 | `STRIPE_PRICE_PRO` | Yes | Price id for the $79/month Pro price |
 | `STARTER_CREDITS` | No | Manuals included with Starter. Default `3` |
+| `CHECKOUT_REQUIRE_TOS` | No | Set to `1` to send `consent_collection.terms_of_service: required`. Leave unset. Stripe rejects that field unless a terms of service URL is saved in the Dashboard. |
 | `FRONTEND_URL` | Yes in production | Site origin, for example `https://manualos.com` |
 | `PORT` | No | Railway sets this. Local default `3001` |
 | `PUPPETEER_EXECUTABLE_PATH` | No | Chrome or Chromium used to render the PDF. On Railway, Nixpacks installs `chromium` and the server finds it on `PATH`. |
@@ -147,6 +150,8 @@ Do this in the Stripe Dashboard (or with the CLI against your own account). This
 Starter stays valid while the Checkout Session is `paid`. Stripe does not change that status when you later refund the charge, so a refunded Starter purchase can still generate until refunds are handled explicitly. Pro access follows the live subscription status, so a cancellation takes effect on the next generate call once the status is no longer `active` or `trialing`.
 
 Stripe Tax is left off. If you sell to US or EU customers, enable [Stripe Tax for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md) only after the account has an active registration. Turning on automatic tax without a registration collects no tax and returns no error.
+
+`CHECKOUT_REQUIRE_TOS` stays unset. Stripe rejects Checkout when `consent_collection.terms_of_service` is `required` and the Dashboard has no terms of service URL. Set the variable to `1` only after that URL is saved. Any other value, including omitting it, leaves the checkbox off.
 
 ## Model
 

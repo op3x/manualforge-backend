@@ -1,0 +1,376 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { checkoutParams } = require('../lib/billing');
+const {
+  DESCRIPTIONS,
+  REFUND_POLICY_MESSAGE,
+  withCheckoutPolicy,
+} = require('../lib/checkoutPolicy');
+const { createApp } = require('../server');
+const { removeTestJobDirectories } = require('../lib/jobs/store');
+
+const REFUND_RULE = 'Refundable until your first manual is delivered: within 30 days for Starter, or before the billing period ends for Pro and Integrator. Once a manual is delivered, that purchase is no longer refundable. Cancel anytime.';
+
+const STARTER_DESCRIPTION = 'ManualOS Starter: 3 operator and maintenance manuals from your files';
+const PRO_MONTHLY = 'ManualOS Pro: unlimited manuals, billed monthly';
+const PRO_YEARLY = 'ManualOS Pro: unlimited manuals, billed yearly';
+const INTEGRATOR_MONTHLY = 'ManualOS Integrator: 25 manuals per month';
+const INTEGRATOR_YEARLY = 'ManualOS Integrator: 25 manuals per month, billed yearly';
+const OVERAGE_DESCRIPTION = 'ManualOS Integrator: one extra manual';
+
+const AI_WORD = /\bAI\b/i;
+
+const env = {
+  FRONTEND_URL: 'https://manualos.com/',
+  STRIPE_PRICE_STARTER: 'price_starter',
+  STRIPE_PRICE_PRO: 'price_pro',
+  STARTER_CREDITS: '3',
+};
+
+test.after(() => {
+  removeTestJobDirectories();
+});
+
+function preserved(result, source) {
+  assert.deepEqual(result.metadata, source.metadata);
+  assert.deepEqual(result.line_items, source.line_items);
+  assert.equal(result.success_url, source.success_url);
+  assert.equal(result.cancel_url, source.cancel_url);
+  assert.equal(result.mode, source.mode);
+  assert.equal(result.integration_identifier, source.integration_identifier);
+  assert.equal(result.payment_method_types, undefined);
+  assert.equal(result.billing_address_collection, 'required');
+  assert.equal(result.custom_text.submit.message, REFUND_RULE);
+  assert.equal(result.consent_collection, undefined);
+}
+
+function customerCopy(result) {
+  return [
+    result.custom_text && result.custom_text.submit && result.custom_text.submit.message,
+    result.payment_intent_data && result.payment_intent_data.description,
+    result.subscription_data && result.subscription_data.description,
+  ].filter(Boolean);
+}
+
+// Same merge #10's withAttribution uses: session metadata, and subscription_data
+// metadata when mode is subscription. Other fields are copied through.
+function withAttribution(params, raw) {
+  if (raw === undefined) return params;
+  const next = {
+    ...params,
+    metadata: { ...(params.metadata || {}), ...raw },
+  };
+  if (params.mode === 'subscription') {
+    const subscriptionData = params.subscription_data && typeof params.subscription_data === 'object'
+      ? params.subscription_data
+      : {};
+    next.subscription_data = {
+      ...subscriptionData,
+      metadata: { ...(subscriptionData.metadata || {}), ...raw },
+    };
+  }
+  return next;
+}
+
+test('submit message is the refund rule and stays within 1200 characters', () => {
+  assert.equal(REFUND_POLICY_MESSAGE, REFUND_RULE);
+  assert.equal(REFUND_RULE.length <= 1200, true);
+  assert.equal(REFUND_RULE.includes('AI'), false);
+  const starter = withCheckoutPolicy(checkoutParams('starter', env), { plan: 'starter', env: {} });
+  assert.equal(starter.custom_text.submit.message, REFUND_RULE);
+});
+
+test('payment and subscription plans on main keep existing checkout fields', () => {
+  const starterIn = checkoutParams('starter', env);
+  const starterSnap = structuredClone(starterIn);
+  const starter = withCheckoutPolicy(starterIn, { plan: 'starter', env: {} });
+  assert.deepEqual(starterIn, starterSnap);
+  assert.notEqual(starter, starterIn);
+  assert.equal(starter.mode, 'payment');
+  preserved(starter, starterIn);
+  assert.equal(starter.payment_intent_data.description, STARTER_DESCRIPTION);
+  assert.deepEqual(starter.payment_intent_data.metadata, starterIn.payment_intent_data.metadata);
+  assert.equal(starter.subscription_data, undefined);
+  assert.notEqual(starter.payment_intent_data, starterIn.payment_intent_data);
+  assert.notEqual(starter.payment_intent_data.metadata, starterIn.payment_intent_data.metadata);
+
+  const proIn = checkoutParams('pro', env);
+  const pro = withCheckoutPolicy(proIn, { plan: 'pro', env: {} });
+  assert.equal(pro.mode, 'subscription');
+  preserved(pro, proIn);
+  assert.equal(pro.subscription_data.description, PRO_MONTHLY);
+  assert.deepEqual(pro.subscription_data.metadata, proIn.subscription_data.metadata);
+  assert.equal(pro.payment_intent_data, undefined);
+});
+
+test('descriptions name the plan without calling the product AI', () => {
+  const cases = [
+    {
+      plan: 'starter',
+      params: checkoutParams('starter', env),
+      description: STARTER_DESCRIPTION,
+      slot: 'payment_intent_data',
+    },
+    {
+      plan: 'pro',
+      params: checkoutParams('pro', env),
+      description: PRO_MONTHLY,
+      slot: 'subscription_data',
+    },
+    {
+      plan: 'pro',
+      params: {
+        ...checkoutParams('pro', env),
+        metadata: { plan: 'pro', interval: 'year' },
+        subscription_data: { metadata: { plan: 'pro', interval: 'year' } },
+      },
+      description: PRO_YEARLY,
+      slot: 'subscription_data',
+    },
+    {
+      plan: 'integrator',
+      params: {
+        mode: 'subscription',
+        line_items: [{ price: 'price_int_month', quantity: 1 }],
+        success_url: 'https://manualos.com/upload.html?session_id={CHECKOUT_SESSION_ID}',
+        metadata: { plan: 'integrator', interval: 'month' },
+        subscription_data: { metadata: { plan: 'integrator', interval: 'month', manuals_used: '0' } },
+      },
+      description: INTEGRATOR_MONTHLY,
+      slot: 'subscription_data',
+    },
+    {
+      plan: 'integrator',
+      params: {
+        mode: 'subscription',
+        line_items: [{ price: 'price_int_year', quantity: 1 }],
+        success_url: 'https://manualos.com/upload.html?session_id={CHECKOUT_SESSION_ID}',
+        metadata: { plan: 'integrator', interval: 'year' },
+        subscription_data: { metadata: { plan: 'integrator', interval: 'year', credits_granted: '0' } },
+      },
+      description: INTEGRATOR_YEARLY,
+      slot: 'subscription_data',
+    },
+    {
+      plan: 'integrator_annual',
+      params: {
+        mode: 'subscription',
+        line_items: [{ price: 'price_int_year', quantity: 1 }],
+        success_url: 'https://manualos.com/upload.html?session_id={CHECKOUT_SESSION_ID}',
+        metadata: { plan: 'integrator', interval: 'month' },
+        subscription_data: { metadata: { plan: 'integrator', interval: 'month', credits_granted: '0' } },
+      },
+      description: INTEGRATOR_YEARLY,
+      slot: 'subscription_data',
+    },
+    {
+      plan: 'integrator_overage',
+      params: {
+        mode: 'payment',
+        line_items: [{ price: 'price_int_overage', quantity: 1 }],
+        success_url: 'https://manualos.com/upload.html?session_id=cs_sub',
+        metadata: { plan: 'integrator_overage', subscription_id: 'sub_int' },
+        payment_intent_data: { metadata: { plan: 'integrator_overage', subscription_id: 'sub_int' } },
+      },
+      description: OVERAGE_DESCRIPTION,
+      slot: 'payment_intent_data',
+    },
+  ];
+
+  const seen = [];
+  for (const entry of cases) {
+    const result = withCheckoutPolicy(entry.params, { plan: entry.plan, env: {} });
+    assert.equal(result[entry.slot].description, entry.description);
+    assert.deepEqual(result[entry.slot].metadata, entry.params[entry.slot].metadata);
+    assert.deepEqual(result.metadata, entry.params.metadata);
+    assert.deepEqual(result.line_items, entry.params.line_items);
+    assert.equal(result.success_url, entry.params.success_url);
+    seen.push(...customerCopy(result));
+  }
+
+  seen.push(REFUND_RULE, ...Object.values(DESCRIPTIONS.pro), ...Object.values(DESCRIPTIONS.integrator), DESCRIPTIONS.starter, DESCRIPTIONS.overage);
+  for (const text of seen) {
+    assert.equal(AI_WORD.test(text), false, text);
+    assert.equal(text.includes('AI-generated'), false, text);
+  }
+});
+
+test('policy merges nested checkout data and does not overwrite metadata', () => {
+  const starter = checkoutParams('starter', env);
+  starter.customer_creation = 'always';
+  starter.payment_intent_data.transfer_group = 'grp_starter';
+  starter.payment_intent_data.metadata.credit_hold = 'hold_1';
+  starter.custom_text = {
+    submit: { message: 'old', extra: 'keep' },
+    shipping_address: { message: 'Ship to the plant.' },
+  };
+  const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: '0' } });
+  assert.equal(result.customer_creation, 'always');
+  assert.equal(result.payment_intent_data.transfer_group, 'grp_starter');
+  assert.equal(result.payment_intent_data.description, STARTER_DESCRIPTION);
+  assert.deepEqual(result.payment_intent_data.metadata, {
+    plan: 'starter',
+    manuals_used: '0',
+    credit_hold: 'hold_1',
+  });
+  assert.equal(result.custom_text.submit.extra, 'keep');
+  assert.deepEqual(result.custom_text.shipping_address, { message: 'Ship to the plant.' });
+  assert.equal(result.consent_collection, undefined);
+
+  const pro = checkoutParams('pro', env);
+  pro.subscription_data.description = 'replace me';
+  pro.subscription_data.trial_period_days = 0;
+  pro.consent_collection = { promotions: 'auto' };
+  const off = withCheckoutPolicy(pro, { plan: 'pro', env: {} });
+  assert.equal(off.subscription_data.description, PRO_MONTHLY);
+  assert.equal(off.subscription_data.trial_period_days, 0);
+  assert.deepEqual(off.subscription_data.metadata, { plan: 'pro' });
+  assert.deepEqual(off.consent_collection, { promotions: 'auto' });
+
+  const on = withCheckoutPolicy(pro, { plan: 'pro', env: { CHECKOUT_REQUIRE_TOS: '1' } });
+  assert.deepEqual(on.consent_collection, { promotions: 'auto', terms_of_service: 'required' });
+  assert.deepEqual(pro.consent_collection, { promotions: 'auto' });
+});
+
+test('terms of service consent is sent only when CHECKOUT_REQUIRE_TOS is 1', () => {
+  const starter = checkoutParams('starter', env);
+  for (const flag of [undefined, '', '0', 'true', 'yes', '01']) {
+    const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: flag } });
+    assert.equal(result.consent_collection, undefined, String(flag));
+  }
+  for (const flag of ['1', ' 1 ', '1\n']) {
+    const result = withCheckoutPolicy(starter, { plan: 'starter', env: { CHECKOUT_REQUIRE_TOS: flag } });
+    assert.deepEqual(result.consent_collection, { terms_of_service: 'required' });
+  }
+});
+
+test('checkout policy and attribution compose in either order', () => {
+  const attribution = { attr_utm_source: 'newsletter', attr_utm_medium: 'email' };
+  for (const plan of ['starter', 'pro']) {
+    const base = checkoutParams(plan, env);
+    const policyThenAttribution = withAttribution(
+      withCheckoutPolicy(base, { plan, env: {} }),
+      attribution,
+    );
+    const attributionThenPolicy = withCheckoutPolicy(
+      withAttribution(structuredClone(base), attribution),
+      { plan, env: {} },
+    );
+    assert.deepEqual(policyThenAttribution, attributionThenPolicy);
+    assert.equal(policyThenAttribution.metadata.plan, plan);
+    assert.equal(policyThenAttribution.metadata.attr_utm_source, 'newsletter');
+    assert.equal(policyThenAttribution.billing_address_collection, 'required');
+    assert.equal(policyThenAttribution.custom_text.submit.message, REFUND_RULE);
+    assert.deepEqual(policyThenAttribution.line_items, base.line_items);
+    assert.equal(policyThenAttribution.success_url, base.success_url);
+    if (plan === 'starter') {
+      assert.deepEqual(policyThenAttribution.payment_intent_data.metadata, base.payment_intent_data.metadata);
+      assert.equal(policyThenAttribution.payment_intent_data.description, STARTER_DESCRIPTION);
+    } else {
+      assert.equal(policyThenAttribution.subscription_data.metadata.plan, 'pro');
+      assert.equal(policyThenAttribution.subscription_data.metadata.attr_utm_medium, 'email');
+      assert.equal(policyThenAttribution.subscription_data.description, PRO_MONTHLY);
+    }
+    for (const text of customerCopy(policyThenAttribution)) {
+      assert.equal(AI_WORD.test(text), false);
+    }
+  }
+});
+
+test('create-checkout-session sends the policy and does not call Stripe for a bad plan', async () => {
+  const calls = [];
+  const stripe = {
+    checkout: {
+      sessions: {
+        create: async (params) => {
+          calls.push(params);
+          return { id: 'cs_test_new', url: 'https://checkout.stripe.com/c/pay/cs_test_new' };
+        },
+      },
+    },
+  };
+  const appEnv = {
+    NODE_ENV: 'test',
+    FRONTEND_URL: 'https://manualos.com',
+    STRIPE_PRICE_STARTER: 'price_starter',
+    STRIPE_PRICE_PRO: 'price_pro',
+    STRIPE_WEBHOOK_SECRET: 'whsec_test',
+    STARTER_CREDITS: '3',
+  };
+  const app = createApp({
+    env: appEnv,
+    stripe,
+    anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
+  });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const bad = await fetch(base + '/create-checkout-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan: 'enterprise' }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(calls.length, 0);
+
+    for (const plan of ['starter', 'pro']) {
+      const response = await fetch(base + '/create-checkout-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan }),
+      });
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(Object.keys(body), ['url']);
+    }
+    assert.deepEqual(calls[0], withCheckoutPolicy(checkoutParams('starter', appEnv), { plan: 'starter', env: appEnv }));
+    assert.deepEqual(calls[1], withCheckoutPolicy(checkoutParams('pro', appEnv), { plan: 'pro', env: appEnv }));
+    assert.equal(calls[0].consent_collection, undefined);
+    assert.equal(calls[1].consent_collection, undefined);
+    for (const params of calls) {
+      for (const text of customerCopy(params)) assert.equal(AI_WORD.test(text), false);
+    }
+
+    const tosCalls = [];
+    const tosEnv = { ...appEnv, CHECKOUT_REQUIRE_TOS: '1' };
+    const tosApp = createApp({
+      env: tosEnv,
+      stripe: {
+        checkout: {
+          sessions: {
+            create: async (params) => {
+              tosCalls.push(params);
+              return { id: 'cs_tos', url: 'https://checkout.stripe.com/c/pay/cs_tos' };
+            },
+          },
+        },
+      },
+      anthropic: { messages: { create: async () => { throw new Error('model unused'); } } },
+    });
+    const tosServer = tosApp.listen(0, '127.0.0.1');
+    await new Promise((resolve, reject) => {
+      tosServer.once('listening', resolve);
+      tosServer.once('error', reject);
+    });
+    try {
+      const tosBase = `http://127.0.0.1:${tosServer.address().port}`;
+      const paid = await fetch(tosBase + '/create-checkout-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan: 'starter' }),
+      });
+      assert.equal(paid.status, 200);
+      assert.equal(tosCalls[0].consent_collection.terms_of_service, 'required');
+      assert.equal(tosCalls[0].payment_intent_data.metadata.manuals_used, '0');
+      assert.equal(String(process.env.CHECKOUT_REQUIRE_TOS || '').trim() === '1', false);
+    } finally {
+      await new Promise((resolve) => tosServer.close(resolve));
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
