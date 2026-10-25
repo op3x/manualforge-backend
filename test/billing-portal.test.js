@@ -750,8 +750,11 @@ test('each skipped cancel email warns when SMTP is not configured', async () => 
     checkout: {
       sessions: {
         list: async (params) => {
-          lists.push(params);
-          return { data: [proSession('cus_buyer')] };
+          lists.push(params.customer_details.email);
+          if (params.customer_details.email === 'buyer@example.com') {
+            return { data: [proSession('cus_buyer')] };
+          }
+          return { data: [] };
         },
       },
     },
@@ -768,10 +771,13 @@ test('each skipped cancel email warns when SMTP is not configured', async () => 
     const res = await post(base, '/access-link', { email: 'buyer@example.com' }, '198.51.100.80');
     assert.equal(res.status, 202);
     assert.deepEqual(await res.json(), { ok: true });
+    const unknown = await post(base, '/access-link', { email: 'nobody@example.com' }, '198.51.100.81');
+    assert.equal(unknown.status, 202);
     await app.settle();
-    assert.equal(lists.length, 0);
+    assert.deepEqual(lists, ['buyer@example.com', 'nobody@example.com']);
     assert.equal(warnings.filter((line) => line === SMTP_SKIP_WARNING).length, 1);
     assert.equal(warnings.some((line) => line.includes('buyer@example.com')), false);
+    assert.equal(warnings.some((line) => line.includes('nobody@example.com')), false);
   } finally {
     console.warn = original;
     await new Promise((resolve) => server.close(resolve));
