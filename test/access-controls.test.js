@@ -67,16 +67,16 @@ function authHeaders(token, extra = {}) {
   return { Authorization: `Bearer ${token}`, ...extra };
 }
 
-test('download names are ascii slugs with an RFC 5987 filename for non-ASCII', () => {
-  assert.equal(downloadFileName(''), 'manualos-manual.pdf');
-  assert.equal(downloadFileName('!!!'), 'manualos-manual.pdf');
-  assert.equal(downloadFileName('Infeed Line'), 'infeed-line-manual.pdf');
-  const long = 'A'.repeat(80);
-  assert.equal(downloadFileName(long), `${'a'.repeat(60)}-manual.pdf`);
-  assert.equal(contentDisposition('Infeed Line'), 'attachment; filename="infeed-line-manual.pdf"');
-  const header = contentDisposition('Förderband');
-  assert.match(header, /filename="forderband-manual\.pdf"/);
-  assert.match(header, /filename\*=UTF-8''F%C3%B6rderband-manual\.pdf/);
+test('download names are the short job id and contain no customer text', () => {
+  assert.equal(downloadFileName(''), 'manual.pdf');
+  assert.equal(downloadFileName('Infeed Line'), 'manual.pdf');
+  assert.equal(downloadFileName('Förderband'), 'manual.pdf');
+  assert.equal(downloadFileName('job_abcdef12ffffffffffffffff'), 'manual-abcdef12.pdf');
+  const header = contentDisposition('job_abcdef12ffffffffffffffff');
+  assert.equal(header, 'attachment; filename="manual-abcdef12.pdf"');
+  assert.equal(header.includes('filename*'), false);
+  assert.equal(contentDisposition('Förderband Linie').includes('Förder'), false);
+  assert.equal(contentDisposition('Förderband Linie').includes('filename*'), false);
   assert.equal(header.includes('\n'), false);
 });
 
@@ -114,18 +114,24 @@ test('job routes require the owner and a revoked purchase keeps the access block
   try {
     await withServer(app, async (base) => {
       const missing = await fetch(`${base}/jobs/${job.id}`);
-      assert.equal(missing.status, 404);
-      assert.deepEqual(await missing.json(), { error: 'Job not found or expired.' });
+      assert.equal(missing.status, 401);
+      assert.equal((await missing.json()).code, 'authorization_required');
+
+      const unknown = await fetch(`${base}/jobs/job_${'ab'.repeat(12)}`);
+      assert.equal(unknown.status, 404);
+      assert.deepEqual(await unknown.json(), { error: 'Job not found or expired.' });
 
       const query = await fetch(`${base}/jobs/${job.id}/pdf?session_id=cs_owner`);
-      assert.equal(query.status, 404);
-      assert.deepEqual(await query.json(), { error: 'Job not found or expired.' });
+      assert.equal(query.status, 401);
+      assert.equal((await query.json()).code, 'authorization_required');
 
       const other = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_other' } });
-      assert.equal(other.status, 404);
-      assert.deepEqual(await other.json(), await (await fetch(`${base}/jobs/job_${'ab'.repeat(12)}`, {
+      assert.equal(other.status, 403);
+      assert.equal((await other.json()).code, 'forbidden');
+      const otherMissing = await fetch(`${base}/jobs/job_${'ab'.repeat(12)}`, {
         headers: { 'X-Session-Id': 'cs_other' },
-      })).json());
+      });
+      assert.equal(otherMissing.status, 404);
 
       const owned = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_owner' } });
       assert.equal(owned.status, 200);
@@ -137,8 +143,10 @@ test('job routes require the owner and a revoked purchase keeps the access block
       assert.equal(pdf.headers.get('cache-control'), 'no-store');
       assert.equal(pdf.headers.get('x-content-type-options'), 'nosniff');
       assert.equal(pdf.headers.get('referrer-policy'), 'no-referrer');
-      assert.match(pdf.headers.get('content-disposition'), /filename="forderband-linie-manual\.pdf"/);
-      assert.match(pdf.headers.get('content-disposition'), /filename\*=UTF-8''/);
+      const short = job.id.slice(4, 12);
+      assert.equal(pdf.headers.get('content-disposition'), `attachment; filename="manual-${short}.pdf"`);
+      assert.equal(pdf.headers.get('content-disposition').includes('filename*'), false);
+      assert.equal(pdf.headers.get('content-disposition').toLowerCase().includes('forder'), false);
       assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
 
       const again = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_owner' } });
@@ -150,7 +158,7 @@ test('job routes require the owner and a revoked purchase keeps the access block
       assert.equal(listed.status, 200);
       const body = await listed.json();
       assert.deepEqual(body.jobs.map((item) => item.id), [job.id]);
-      assert.equal(body.jobs[0].filename, 'forderband-linie-manual.pdf');
+      assert.equal(body.jobs[0].filename, `manual-${job.id.slice(4, 12)}.pdf`);
       assert.equal(body.jobs[0].download_path, `/jobs/${job.id}/pdf`);
 
       const hidden = await fetch(`${base}/jobs`, { headers: { 'X-Session-Id': 'cs_other' } });
@@ -245,7 +253,8 @@ test('a bearer token replaces session_id and can be revoked', async () => {
 
       const otherSub = signAccessToken({ sessionId: 'cs_third', subscriptionId: 'sub_other' }, env);
       const denied = await fetch(`${base}/jobs/${job.id}`, { headers: authHeaders(otherSub.token) });
-      assert.equal(denied.status, 404);
+      assert.equal(denied.status, 403);
+      assert.equal((await denied.json()).code, 'forbidden');
 
       const revoked = await fetch(`${base}/access-token/revoke`, {
         method: 'POST',
@@ -395,7 +404,7 @@ test('a malformed JSON body is a generic 400 and the parser detail stays in the 
         body: '{"plan":',
       });
       assert.equal(res.status, 400);
-      assert.deepEqual(await res.json(), { error: 'Invalid request body.' });
+      assert.deepEqual(await res.json(), { error: 'invalid_json' });
     });
   } finally {
     console.error = original;

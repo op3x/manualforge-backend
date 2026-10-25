@@ -241,7 +241,7 @@ async function waitForSettledJob(base, id) {
   const deadline = Date.now() + 60000;
   let last = '';
   while (Date.now() < deadline) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': 'cs_pro' } });
     const body = await res.json();
     last = body && body.status ? body.status : '';
     if (last === 'succeeded' || last === 'failed') return body;

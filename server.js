@@ -549,7 +549,7 @@ function createApp({
   }
 
   function listedJob(job) {
-    const filename = downloadFileName(job.nameSource || '');
+    const filename = downloadFileName(job.id);
     return {
       id: job.id,
       status: job.status,
@@ -803,6 +803,15 @@ function createApp({
             job.status = 'failed';
             job.error = message;
             job.progress = { stage: 'failed', percent: (job.progress && job.progress.percent) || 0, message };
+            if (typeof store.removePdf === 'function') {
+              try {
+                store.removePdf(job.id);
+              } catch (removeErr) {
+                const code = removeErr && removeErr.code ? removeErr.code : 'unknown';
+                console.error(`Job PDF removal failed (${code})`);
+              }
+            }
+            rememberJob(job);
           }
           if (stamp && stamp.created) {
             await rollbackFirstManual(stripeClient, access, sessionId, stamp.delivered_at);
@@ -895,14 +904,18 @@ function createApp({
     });
   });
 
-  async function ownedJob(req) {
+  async function authorizeJob(req) {
     const caller = presentedCaller(req);
     const job = store.get(req.params.id);
-    if (!caller || !job) return null;
+    if (!job) return { status: 404, body: JOB_NOT_FOUND };
+    if (!caller) {
+      return { status: 401, body: { error: 'Authorization is required.', code: 'authorization_required' } };
+    }
     if (!sessionMatches(caller, job) && callerNeedsLookup(caller, job)) await hydrateCaller(caller);
-    if (caller.notFound && !sessionMatches(caller, job)) return null;
-    if (!identityMatches(caller, job)) return null;
-    return job;
+    if (!identityMatches(caller, job)) {
+      return { status: 403, body: { error: 'You do not have access to this job.', code: 'forbidden' } };
+    }
+    return { job, caller };
   }
 
   app.get('/jobs', jobReadLimiter, async (req, res) => {
@@ -928,9 +941,9 @@ function createApp({
 
   app.get('/jobs/:id', jobReadLimiter, async (req, res) => {
     try {
-      const job = await ownedJob(req);
-      if (!job) return res.status(404).json(JOB_NOT_FOUND);
-      return res.json(publicJob(job));
+      const found = await authorizeJob(req);
+      if (found.status) return res.status(found.status).json(found.body);
+      return res.json(publicJob(found.job));
     } catch (err) {
       return sendError(res, err);
     }
@@ -938,9 +951,10 @@ function createApp({
 
   app.get('/jobs/:id/pdf', jobReadLimiter, async (req, res) => {
     try {
-      const caller = presentedCaller(req);
-      const job = await ownedJob(req);
-      if (!job) return res.status(404).json(JOB_NOT_FOUND);
+      const found = await authorizeJob(req);
+      if (found.status) return res.status(found.status).json(found.body);
+      const job = found.job;
+      const caller = found.caller;
       if (job.status !== 'succeeded') return res.status(409).json({ error: 'Manual is not ready.' });
       const sessionForBlock = job.sessionId || (caller && identityMatches(caller, job) ? caller.sessionId : '');
       if (sessionForBlock) {
@@ -952,7 +966,7 @@ function createApp({
       res.set({
         ...PRIVATE_RESPONSE,
         'Content-Type': 'application/pdf',
-        'Content-Disposition': contentDisposition(job.nameSource || ''),
+        'Content-Disposition': contentDisposition(job.id),
         'Content-Length': pdf.length,
       });
       return res.send(pdf);
@@ -995,7 +1009,7 @@ function createApp({
           if (access.plan === 'starter') await recordStarterManual(stripeClient, access.paymentIntentId);
           res.set({
             'Content-Type': 'application/pdf',
-            'Content-Disposition': contentDisposition(sourceName(project)),
+            'Content-Disposition': contentDisposition(''),
             'Content-Length': result.pdf.length,
             Deprecation: 'true',
             Link: '</jobs>; rel="successor-version"',
@@ -1036,7 +1050,7 @@ function createApp({
     if (err && (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400))) {
       const length = typeof err.body === 'string' || Buffer.isBuffer(err.body) ? err.body.length : 0;
       console.error('Invalid request body', err.type || 'SyntaxError', `length=${length}`);
-      return res.status(400).json({ error: 'Invalid request body.' });
+      return res.status(400).json({ error: 'invalid_json' });
     }
     if (err && err.expose) return sendError(res, err);
     if (err && err.name === 'MulterError') {

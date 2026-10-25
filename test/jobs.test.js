@@ -126,7 +126,9 @@ test('jobs reserve one credit, return a pdf, and refund when rendering fails', a
     const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal(pdf.status, 200);
     assert.match(pdf.headers.get('content-type'), /pdf/);
-    assert.equal(pdf.headers.get('content-disposition'), 'attachment; filename="infeed-line-manual.pdf"');
+    assert.equal(pdf.headers.get('content-disposition'), `attachment; filename="manual-${job.id.slice(4, 12)}.pdf"`);
+    assert.equal(pdf.headers.get('content-disposition').includes('Infeed'), false);
+    assert.equal(pdf.headers.get('content-disposition').includes('filename*'), false);
     assert.equal(paid.meta.manuals_used, '1');
     assert.equal(pdf.headers.get('deprecation'), null);
 

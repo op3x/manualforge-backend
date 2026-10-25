@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createApp } = require('../server');
-const { removeTestJobDirectories } = require('../lib/jobs/store');
+const { createJobStore, removeTestJobDirectories } = require('../lib/jobs/store');
 const { commitStarterCredit, refundStarterCredit } = require('../lib/billing');
 const {
   createCreditLedger,
@@ -198,9 +198,9 @@ async function withServer(app, fn) {
   }
 }
 
-async function waitJob(base, id, ready) {
+async function waitJob(base, id, ready, sessionId = 'cs_test_starter') {
   for (let i = 0; i < 100; i += 1) {
-    const res = await fetch(`${base}/jobs/${id}`);
+    const res = await fetch(`${base}/jobs/${id}`, { headers: { 'X-Session-Id': sessionId } });
     const body = await res.json();
     if (ready) {
       if (ready(body)) return body;
@@ -265,10 +265,12 @@ test('a timed-out job hands a Starter credit back once and ignores a late pdf', 
     aiSignal = options && options.signal;
     return original(body, options);
   };
+  const jobs = createJobStore({ env: env() });
   const app = createApp({
     env: env(),
     stripe: paid.stripe,
     anthropic: model,
+    jobs,
     scheduleTimeout(fn, ms) {
       armed.push(ms);
       fire = fn;
@@ -305,12 +307,17 @@ test('a timed-out job hands a Starter credit back once and ignores a late pdf', 
     assert.equal(renderSignal.aborted, true);
     late();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const after = await fetch(`${base}/jobs/${job.id}`);
+    const after = await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal((await after.json()).status, 'failed');
-    assert.equal((await fetch(`${base}/jobs/${job.id}/pdf`)).status, 409);
+    const anon = await fetch(`${base}/jobs/${job.id}/pdf`);
+    assert.equal(anon.status, 401);
+    const pdf = await fetch(`${base}/jobs/${job.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
+    assert.equal(pdf.status, 409);
+    assert.equal(jobs.readPdf(job.id), null);
     assert.equal(paid.decrements.count, 1);
     assert.equal(paid.meta.manuals_used, '0');
   });
+  jobs.close();
 });
 
 test('a failed hand-back retries and then succeeds', async () => {
@@ -500,7 +507,7 @@ test('a succeeded job never returns its Starter credit', async () => {
       await ledger.reconcile(paid.stripe, { now: Date.now(), timeoutMs: DEFAULT_JOB_TIMEOUT_MS });
       assert.equal(paid.meta.manuals_used, '1');
       assert.equal(paid.decrements.count, 0);
-      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+      const pdf = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
       assert.equal(pdf.status, 200);
     });
   } finally {
@@ -536,13 +543,13 @@ test('Pro jobs do not touch Starter credits', async () => {
     const job = await created.json();
     await startedPromise;
     fire();
-    const done = await waitJob(base, job.id);
+    const done = await waitJob(base, job.id, null, 'cs_pro');
     assert.equal(done.status, 'failed');
     assert.equal(done.error, JOB_TIMEOUT_MESSAGE);
     assert.equal(paid.touched(), false);
     late();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal((await (await fetch(`${base}/jobs/${job.id}`)).json()).status, 'failed');
+    assert.equal((await (await fetch(`${base}/jobs/${job.id}`, { headers: { 'X-Session-Id': 'cs_pro' } })).json()).status, 'failed');
   });
 
   const again = proStripe();
@@ -554,7 +561,7 @@ test('Pro jobs do not touch Starter credits', async () => {
   });
   await withServer(ok, async (base) => {
     const created = await postJob(base, 'cs_pro');
-    const done = await waitJob(base, (await created.json()).id);
+    const done = await waitJob(base, (await created.json()).id, null, 'cs_pro');
     assert.equal(done.status, 'succeeded');
     assert.equal(again.touched(), false);
     const failed = proStripe();
@@ -566,7 +573,7 @@ test('Pro jobs do not touch Starter credits', async () => {
     });
     await withServer(bad, async (badBase) => {
       const createdJob = await postJob(badBase, 'cs_pro');
-      const failedJob = await waitJob(badBase, (await createdJob.json()).id);
+      const failedJob = await waitJob(badBase, (await createdJob.json()).id, null, 'cs_pro');
       assert.equal(failedJob.status, 'failed');
       assert.equal(failed.touched(), false);
     });
@@ -599,6 +606,7 @@ test('health reports only the pending hand-back count', async () => {
       assert.equal(body.creditHandbacksRejected, 0);
       assert.equal(body.creditLedgerOk, true);
       assert.equal(body.supportDataDirOk, true);
+      assert.equal(typeof body.portalTokens, 'boolean');
       const text = JSON.stringify(body);
       assert.equal(text.includes('pi_'), false);
       assert.equal(text.includes(TOKEN), false);
@@ -626,7 +634,7 @@ test('a confirm read that fails after the hold clear still lets the job succeed 
     assert.equal(paid.meta.manuals_used, '1');
     assert.equal(paid.meta.credit_hold, undefined);
     assert.equal(paid.decrements.count, 0);
-    const pdf = await fetch(`${base}/jobs/${done.id}/pdf`);
+    const pdf = await fetch(`${base}/jobs/${done.id}/pdf`, { headers: { 'X-Session-Id': 'cs_test_starter' } });
     assert.equal(pdf.status, 200);
   });
 });

@@ -7,5 +7,5 @@ const files = readdirSync(path.join(root, 'test'))
   .filter((name) => name.endsWith('.js'))
   .sort()
   .map((name) => path.join('test', name));
-const result = spawnSync(process.execPath, ['--test', ...files], { cwd: root, stdio: 'inherit' });
+const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...files], { cwd: root, stdio: 'inherit' });
 process.exit(result.status === null ? 1 : result.status);
