@@ -31,6 +31,7 @@ function env() {
     STRIPE_PRICE_PRO: 'price_pro',
     STRIPE_WEBHOOK_SECRET: 'whsec_test',
     STARTER_CREDITS: '3',
+    MANUALOS_LEGACY_GENERATE: '1',
   };
 }
 

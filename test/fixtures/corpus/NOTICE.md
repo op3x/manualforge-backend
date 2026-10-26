@@ -15,6 +15,7 @@ full local copy of the corpus.
 | --- | --- | --- | --- |
 | `plc/line.L5X` | Original ManualOS fixture | Proprietary (ManualOS) | Written for ManualOS tests |
 | `cad/pulley.stp` | Original ManualOS fixture | Proprietary (ManualOS) | Written for ManualOS tests |
+| `cad/mesh-plate.stl` | Original ManualOS fixture | Proprietary (ManualOS) | Written for ManualOS tests. A two-triangle plate with no part names. |
 | `plc/acd_ACDTestsWithAOI.L5X` | https://github.com/hutcheb/acd/blob/main/resources/ACDTestsWithAOI.L5X | Apache-2.0 | Copyright the hutcheb/acd contributors. Licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Unmodified. |
 | `plc/acd_CuteLogix.ACD` | https://github.com/hutcheb/acd/blob/main/resources/CuteLogix.ACD | Apache-2.0 | Copyright the hutcheb/acd contributors. Licensed under the Apache License, Version 2.0. Unmodified. |
 | `plc/brewery_Cooker_1_AutoLogic_Program.L5X` | https://github.com/reh3376/acd-l5x-tool-lib/blob/main/docs/exports/Cooker_1_AutoLogic_Program.L5X | MIT | Copyright (c) 2025 PLC-GPT Team (reh3376/acd-l5x-tool-lib). Used under the MIT License; the copyright and permission notice of that repository apply to this file. Unmodified. |
